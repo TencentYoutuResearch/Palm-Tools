@@ -115,12 +115,46 @@ function boundedHistory(messages) {
   return rows.length ? [{ type: 'text', text: header + rows.reverse().join('') + footer }] : []
 }
 
+/** The old branch editor could seed a native thread with the entire transcript.
+ * Recover only its rejected first turn, on a new explicit user message. */
+export function rejectedLegacyHistory(session, binding) {
+  if (!binding.historyBranch || !binding.historyBootstrapped || !binding.threadId || binding.historyBranchRecovered || binding.profile.type !== 'claude') return false
+  const events = session.snapshotEvents(), marker = events.findLast(event => event.type === HISTORY_EDIT)
+  if (!marker) return false
+  const branch = events.slice(marker.seq + 1)
+  const settled = branch.filter(event => event.type === 'turn/end')
+  if (settled.length !== 1) return false
+  const reason = settled[0].data.reason
+  if (reason?.kind !== 'error' || !/^(?:Internal error:\s*)?Prompt is too long[.!]?$/i.test(reason.error?.message?.trim() ?? '')) return false
+  const rejected = branch.filter(event => event.seq < settled[0].seq)
+  const compactions = new Set()
+  for (const event of rejected) {
+    if (event.type !== 'tool/call') continue
+    const { name, arguments: args, callId } = event.data
+    let item
+    try { item = JSON.parse(args) } catch { return false }
+    // ACP surfaces its automatic compaction as a thinking item, not a shell command.
+    if (name !== 'kode_native_commandExecution' || item?.kind !== 'think' || item?.title !== 'Compact conversation' || item.command) return false
+    compactions.add(callId)
+  }
+  return rejected.every(event => {
+    if (event.type === 'assistant/message') return event.data.message.content.every(part => part.type === 'tool-call' && compactions.has(part.id))
+    if (event.type === 'tool/result') return event.data.message.isError && compactions.has(event.data.message.toolCallId)
+    return true
+  })
+}
+
 /** Compatibility for pending edits made before in-place editing was introduced. */
-export function branchHistoryInput(session, binding) {
+export function branchHistoryInput(session, binding, incomingIds = []) {
   if (!binding.historyBranch || binding.historyBootstrapped) return []
   const events = session.snapshotEvents?.() ?? [], marker = events.findLast(event => event.type === HISTORY_EDIT)
   if (!marker) return []
-  const prefix = events.slice(0, marker.seq), folded = foldSurface(prefix)
+  // Keep the failed edited question as a quoted excerpt when the user continues.
+  const incoming = new Set(incomingIds)
+  const cutoff = binding.historyBranchRecovered
+    ? events.find(event => event.seq > marker.seq && event.type === 'user/message' && incoming.has(event.data.id))?.seq ?? marker.seq
+    : marker.seq
+  const prefix = events.slice(0, cutoff), folded = foldSurface(prefix)
   return boundedHistory(folded.nodes.map(seq => deriveEventMessage(prefix[seq], folded.projectedMessages)).filter(Boolean))
 }
 

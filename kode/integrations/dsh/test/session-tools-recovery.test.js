@@ -53,6 +53,7 @@ test(
       await remote.stop('SIGKILL')
       const request = {
         ...address,
+        title: 'Review the fixture',
         content: 'Durable fixture request',
         idempotency_key: 'same-request',
       }
@@ -75,6 +76,7 @@ test(
       sourceMcp = await sessionMcp(home, source)
       const retry = await sourceMcp.tool('kode_sessions_send', request)
       assert.equal(retry.id, message.id)
+      assert.equal(retry.title, request.title)
       await assert.rejects(
         sourceMcp.tool('kode_sessions_send', {
           ...request,
@@ -96,6 +98,7 @@ test(
         claim.messages.map((row) => row.id),
         [message.id],
       )
+      assert.equal(claim.messages[0].title, request.title)
       // Persist terminal delivery evidence while the sender cannot acknowledge it.
       await sourceMcp.close()
       await home.stop('SIGKILL')
@@ -106,6 +109,7 @@ test(
       peerMcp = await sessionMcp(remote, target)
       const reply = await peerMcp.tool('kode_sessions_send', {
         ...source.session.address,
+        title: 'Fixture reviewed',
         content: 'Fixture response',
         idempotency_key: 'same-reply',
         in_reply_to: message.id,
@@ -133,6 +137,7 @@ test(
             accepted = true
           if (event.message.id === reply.id) {
             assert.equal(event.message.in_reply_to, message.id)
+            assert.equal(event.message.title, reply.title)
             replySeen = true
           }
         }
@@ -151,6 +156,8 @@ test(
           .messages,
         [],
       )
+      const fullReply = await sourceMcp.tool('kode_sessions_message_read', { message_id: reply.id, offset: 0 })
+      assert.equal(fullReply.title, 'Fixture reviewed')
       const page = await sourceMcp.tool('kode_sessions_read', { after })
       assert.ok(page.events.every((event) => event.seq > after))
     } finally {

@@ -1,6 +1,7 @@
 import { installConnection } from '@deepseek-ai/dsh-client-connection/client'
 import { waitForSessionService } from './readiness.js'
 import { fetchWithLocalAppearance } from './preferences.js'
+import { fetchWithWorkspaceSessionCreation } from './session-creation.js'
 import { showConnectionProgress } from './connection-progress.js'
 import { installInterfacePreferences } from './interface.js'
 import { installSessionNotifications } from './notifications.js'
@@ -24,7 +25,11 @@ export async function apply(ctx) {
   const carrier = globalThis.__DSH_TRANSPORT__
   installConnection(ctx, { location: window.location, transport: {
     ...carrier,
-    fetch: (input, init) => fetchWithLocalAppearance(input, init, { current, send: fetchHost }),
+    fetch: (input, init) => {
+      const host = current
+      return fetchWithWorkspaceSessionCreation(input, init, (path, request) =>
+        fetchWithLocalAppearance(path, request, { current: host, send: fetchHost }))
+    },
     createWebSocket: input => {
       const base = carrier?.streamBaseUrl ?? window.location.href
       const original = new URL(input, base)

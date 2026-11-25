@@ -274,9 +274,9 @@ test('send receipts are historical delivery states, never task completion', () =
     const tree = render({ sessions: c.ctx.sessions, toolName: 'kode_sessions_send', phase: 'result', block: {
       args: { text: key => ({ content: 'review result', node_id: 'worker.example', session_id: 'same-id' })[key] },
       content: [{ type: 'text', text: JSON.stringify({ message: { status } }) }],
-    }, useDisclosure: () => ({ expanded: false, setExpanded() {} }) })
+    }, useDisclosure: () => ({ expanded: true, setExpanded() {} }) })
     assert.match(JSON.stringify(tree), /发送时：/)
-    assert.doesNotMatch(JSON.stringify(tree), /任务完成|已完成/)
+    assert.doesNotMatch(JSON.stringify(tree).replace('投递状态不代表目标任务已完成。', ''), /任务完成|已完成/)
   }
 })
 test('native command cards describe the command and outcome instead of protocol names and IDs',()=>{
@@ -414,10 +414,10 @@ test('handoff excludes the current Agent and keeps the dialog outside the sessio
   assert.match(visibleText(legacy(props)), /交接/)
   c.addSlot('conversation.session.header.utilities', 'session-panel', c.native)
   assert.equal(legacy(props), null)
-  assert.match(visibleText(c.entryById('kode-agent-handoff')(props)), /交接给其他 Agent/)
+  assert.ok(!c.ctx.slots.entries('conversation.session.panel.environment.row').some(entry => entry.options.id === 'kode-agent-handoff'), 'the card renders handoff beside the Agent')
 })
 
-test('the details card uses the same profile and selected model as the composer across Agents', async () => {
+test('the details card uses the composer profile without repeating its model across Agents', async () => {
   for (const [type, name] of [['dsh', 'DSH'], ['codex', 'Codex'], ['claude', 'TClaude'], ['codebuddy', 'CodeBuddy'], ['cursor', 'Cursor'], ['custom', 'Custom ACP']]) {
     const currentProfile = { id: type, name, type }
     const models = [{ id: 'other', name: 'Other model' }, { id: 'fixture', name: 'Fixture model', isDefault: true }]
@@ -433,13 +433,35 @@ test('the details card uses the same profile and selected model as the composer 
     const render = () => { const row = card.component(props); return row.type(row.props) }
     render()
     await new Promise(resolve => setImmediate(resolve))
-    const row = render()
+    const block = render()
+    assert.equal(block.type.name, 'SessionIdentitySection')
+    const [identity] = block.children
+    assert.equal(identity.props.className, 'kode-environment-identity')
+    const [row, action] = identity.children
     assert.equal(row.props.label, name)
-    assert.equal(row.props.detail, 'Fixture model')
+    assert.equal(row.props.detail, name === type ? undefined : type)
+    assert.equal(row.props.icon.props.size, 28)
     assert.equal(row.props.actionLabel, '设置 ' + name + ' 的头像与背景')
+    const handoff = action.type(action.props)
+    assert.equal(handoff.props['aria-label'], '交接会话到其他 Agent')
+    assert.match(visibleText(handoff), /交接/)
     const model = c.ctx.slots.entries('conversation.input.model')[0].component
     assert.match(model(props).children[0].props.anchor.props.label, /Fixture model/)
   }
+})
+
+test('the environment keeps the native project row and labels the actual Git checkout', () => {
+  const c = client(), seat = 'conversation.session.panel.environment.row'
+  c.addSlot(seat, 'project', c.native)
+  const wrap = c.entryById('project')({ sessionId: 'saved', useProjection: () => undefined, useSessions: () => '/project' })
+  assert.equal(wrap.props.native, c.native)
+  const scope = { h: (type, props, ...children) => ({ type, props, children }), IconBranchOutlineRegular: 'branch', Tooltip: 'tooltip' }
+  vm.runInNewContext(source.slice(source.indexOf('  function SessionGitLocation('), source.indexOf('  function SessionProjectLocation(')), scope)
+  const render = git => visibleText(scope.SessionGitLocation({ git }))
+  assert.match(render({ root: '/project', kind: 'primary', branch: 'main' }), /main.*主工作区/s)
+  assert.match(render({ root: '/project-linked', kind: 'worktree', branch: 'feat/review' }), /feat\/review.*独立 worktree/s)
+  assert.match(render({ root: '/project-linked', kind: 'worktree', branch: null, commit: '123abcdef000' }), /游离 HEAD · 123abcde/)
+  assert.equal(render(null), '')
 })
 
 test('the native details card reuses DSH subagents and Forge without duplicate review links', () => {
@@ -546,18 +568,16 @@ test('plugin detail selection follows a stable package path when polling reorder
  assert.match(logo.props.src,/logo=multi&package=0/)
 })
 
-test('Kode settings keep the native settings section and an entry in the sidebar More menu', () => {
+test('Kode settings use the native settings section and a pinnable sidebar panel', () => {
   const selected = [], c = client(undefined, {}, { layout: { selectPanel: id => selected.push(id) } })
   const settings = c.ctx.slots.entries('settings.section').find(row => row.options.id === 'agent-presets')
   assert.ok(settings, JSON.stringify(c.ctx.slots.entries('settings.section').map(row => row.options)))
   assert.equal(settings.options.name, 'settings.section'); assert.equal(settings.options.label(), 'Kode')
   assert.equal(c.ctx.slots.entries('settings.trigger').length, 0)
-  assert.ok(!c.ctx.slots.entries('sidebar.panellist').some(row => ['kode-settings', 'kode-leave', 'kode-resume'].includes(row.options.id)), 'Kode entries are not sidebar rows')
-  const more = c.ctx.slots.entries('sidebar.panellist.actions').find(row => row.options.id === 'kode-entries')
-  assert.ok(more, JSON.stringify(c.ctx.slots.entries('sidebar.panellist.actions').map(row => row.options)))
-  const items = more.component({ onDismiss: () => {} })
-  const settingsItem = items.children.find(item => item && item.children?.includes('Kode 设置'))
-  settingsItem.props.onSelect(); assert.equal(selected.at(-1), 'kode-settings')
+  const rows = c.ctx.slots.entries('sidebar.panellist')
+  assert.equal(rows.find(row => row.options.id === 'kode-settings')?.options.label, 'Kode 设置')
+  assert.ok(!rows.some(row => ['kode-leave', 'kode-resume'].includes(row.options.id)), 'utility actions are not sidebar panels')
+  assert.ok(!c.ctx.slots.entries('sidebar.panellist.actions').some(row => row.options.id === 'kode-entries'), 'standalone does not duplicate the native menu entry')
   const main = c.entry('main', 'kode-settings'), wrapper = main(), panel = wrapper.children[0], tree = panel.type(panel.props)
   assert.match(JSON.stringify(tree), /插件与集成/); assert.doesNotMatch(JSON.stringify(tree), /Agent 共享/)
   assert.match(JSON.stringify(tree), /统一管理 Agent、插件、连接与个性化设置/)
@@ -566,7 +586,7 @@ test('Kode settings keep the native settings section and an entry in the sidebar
   assert.match(source,/\.kode-settings-brand-avatar\{[^}]*width:32px;height:32px/)
   assert.match(source,/\.kode-settings-brand p\{[^}]*font-size:12px;line-height:18px/)
   c.ctx.layout.selectPanel('kode-settings')
-  assert.deepEqual(selected, ['kode-settings', 'kode-settings'])
+  assert.deepEqual(selected, ['kode-settings'])
   assert.equal(c.shell.component, c.native)
 })
 
@@ -917,6 +937,30 @@ test('the sidebar status overlay preserves base avatars and maps running, awaiti
  assert.ok(avatars.every(avatar=>avatar.props.profile.avatar.id==='gallery/person'&&avatar.props.size===20))
 })
 
+test('running sessions use one steady avatar marker for default and custom artwork; rows without an Agent keep the native dot',()=>{
+ const h=(type,props,...children)=>({type,props,children}),targets=[{id:'custom',seat:{},state:'ongoing'},{id:'default',seat:{},state:'ongoing'},{id:'plain',seat:{},state:'ongoing'}]
+ const scope={React:{Fragment:'fragment'},h,AgentAvatar:'avatar',createPortal:element=>element,useState:()=>[targets.splice(0),()=>{}],useEffect:()=>{}}
+ vm.runInNewContext(source.slice(source.indexOf('  const avatarStateRank'),source.indexOf('  function FederatedWorkspaceBrowser')),scope)
+ const tree=scope.SessionStatusAvatars({root:{current:null},rows:{custom:{agent:{type:'codex',avatar:{id:'gallery/person'}}},default:{agent:{type:'claude'}},plain:{}}})
+ assert.deepEqual(tree.children.map(overlay=>[overlay.children[0].props['data-status'],overlay.children[0].children[0].props.status]),[['ongoing','running'],['ongoing','running']])
+ const css=source.slice(source.indexOf('/* Session state rides the avatar'),source.indexOf('.kode-tool-action{'))
+ assert.match(css,/\[data-avatar-state=running\],[^{]*\[data-avatar-state=awaiting\],[^{]*\[data-avatar-state=done\]\{outline:2px solid var\(--kode-avatar-ring\);outline-offset:2px\}/,'the avatar outline carries every state')
+ assert.match(css,/\[data-avatar-state=awaiting\]\{[^}]*outline-style:dashed\}/,'awaiting differs by stroke, not only by color')
+ assert.match(css,/\[data-avatar-state=done\]\{[^}]*outline-style:double/)
+ assert.doesNotMatch(css,/data-avatar-state=[a-z]+\]::(before|after)/,'no corner dots or overlays on the artwork')
+ assert.doesNotMatch(css,/@keyframes kode-avatar-ring-breathe\{[^}]*opacity/,'the ring moves, the avatar never fades')
+ assert.match(css,/prefers-reduced-motion:reduce\)\{[^}]*\.kode-agent-avatar\[data-avatar-state\]\{animation:none\}/)
+ assert.match(css,/\.kode-status-avatar-body::after\{content:none\}/,'the sidebar overlay adds no second frame')
+})
+
+test('environment Git and folder rows are flat native-style rows with hover and focus feedback',()=>{
+ assert.match(source,/\.kode-environment-project\[data-git\]\{display:grid;gap:0\}/)
+ assert.doesNotMatch(source,/\.kode-environment-project\[data-git\]\{[^}]*background/,'no always-visible gray block')
+ assert.match(source,/@media\(hover:hover\)\{\.kode-environment-git:hover\{background:var\(--dsw-alias-interactive-bg-hover\)\}\}/)
+ assert.match(source,/\.kode-environment-git:has\(code:focus-visible\)\{outline:/)
+ assert.match(source,/\.kode-environment-project\[data-git=worktree\] \.kode-environment-kind\{/,'the separate worktree badge stays')
+})
+
 test('workspace status gives awaiting highest priority, then completion, then running',()=>{
  const scope={};vm.runInNewContext(source.slice(source.indexOf('  const avatarStateRank'),source.indexOf('  function SessionStatusAvatars')),scope)
  const collapsed=scope.sessionStateMap({busy:{running:false},done:{},review:{},idle:{}},new Map([['busy',{running:true}],['done',{running:true,completionUnread:true}],['review',{running:true,completionUnread:true,pendingInteraction:{kind:'approval'}}],['idle',{running:false}]]))
@@ -1038,13 +1082,13 @@ test('existing session identity remains visible when its runtime is idle or unlo
  assert.equal(worn.children[0].props['aria-label'],'编辑伙伴')
  const clicks = []
  Object.assign(scope, {
-   SessionPanelRow: 'panel-row', selectedCatalogModel: () => undefined, IconEditOutlineRegular: 'edit',
+   SessionPanelRow: 'panel-row', HandoffAction: 'handoff', selectedCatalogModel: () => undefined, IconEditOutlineRegular: 'edit',
    openBotsPage: () => clicks.push('companions'), requestedBotEdit: null,
    window: { dispatchEvent: event => clicks.push(event.type) }, CustomEvent: class { constructor(type) { this.type = type } },
    openAvatarDialog: target => clicks.push(target),
  })
  const panelProps = { ...props, panel: true, dismissOverlay: () => clicks.push('close panel') }
- const companionRow = scope.AgentIdentity(panelProps).props
+ const companionRow = scope.AgentIdentity(panelProps).children[0].children[0].props
  assert.equal(companionRow.actionLabel, '编辑伙伴 柚子 PM')
  assert.equal(companionRow.icon.props.profile.avatar.id, 'gallery/yuzu')
  companionRow.onClick()
@@ -1052,7 +1096,7 @@ test('existing session identity remains visible when its runtime is idle or unlo
  assert.deepEqual(clicks, ['close panel', 'companions', 'kode-bot-edit'])
 
  scope.useWorkspaceDirectory = () => ({ current: 'remote-fixture', hosts: [{ id: 'remote-fixture', sessions: [{ id: 'saved-session', running: true, agent: { avatar: { id: 'gallery/remote' } } }] }] })
- const avatarRow = scope.AgentIdentity(panelProps).props
+ const avatarRow = scope.AgentIdentity(panelProps).children[0].children[0].props
  assert.equal(avatarRow.icon.props.status, 'running')
  avatarRow.onClick()
  assert.equal(clicks.at(-2), 'close panel')
@@ -1082,9 +1126,8 @@ test('goal dock reuses the queued composer width and panel presentation',()=>{
  assert.equal(tabs.find(tab => tab.id === 'kode-goal')?.kind, 'kode-goal')
 })
 
-test('connected service uses a success icon and hover details with compact Agent groups',()=>{
+test('connected service uses a success icon with compact Agent groups',()=>{
  assert.match(source,/IconCheckOutlineRegular, \{ size: 14, className: 'kode-service-connected-icon'/)
- assert.match(source,/className: 'kode-service-recovery-actions', title: hint/)
  assert.match(source,/\.kode-settings-group-title\{font-size:14px;font-weight:600;line-height:20px;color:var\(--dsw-alias-label-primary\);margin:4px 0 -4px/)
  assert.match(source,/\.kode-settings-section \.kode-agent-settings>\.kode-field:first-child\{margin-bottom:0\}/)
  assert.match(source,/\.kode-agent-rows\{[^}]*margin:0;padding:0/)
@@ -1295,9 +1338,32 @@ test('settings group small preferences by task, preserve deep links, and keep de
  assert.equal(appearance.children[0].children[0].children[0].type.name, 'InterfaceSettingsBody')
  const avatarCard = findNode(appearance, node => node.props.className === 'kode-settings-card kode-settings-card-padded')
  assert.equal(avatarCard.children[0].type.name, 'PersonalizationSettings')
- const integrations = source.slice(source.indexOf('  function IntegrationSettingsBody('), source.indexOf('  function SessionBehaviorSettings('))
- assert.doesNotMatch(integrations, /auto_resume_interrupted/)
- assert.match(integrations, /messaging_enabled/); assert.match(integrations, /memory_enabled/)
+})
+
+test('Agent naming is grouped under conversation communication and missing support is explained', () => {
+ const shared = { messaging_enabled: false, memory_enabled: true, auto_resume_interrupted: true }
+ let data
+ const scope = {
+  h: (type, props, ...children) => ({ type, props: props ?? {}, children }),
+  React: { Fragment: 'fragment' }, Button: 'button', useState: value => [value, () => {}],
+  useIntegrationSettings: () => ({ data, update() {}, busy: false, error: '' }),
+  HubSettings: 'HubSettings', Failure: 'Failure', ServiceRecoveryLink: 'ServiceRecoveryLink',
+ }
+ vm.runInNewContext(source.slice(source.indexOf('  function IntegrationSettingsBody('), source.indexOf('  function MobileSettingsBody(')), scope)
+ const render = settings => { data = { settings }; return scope.IntegrationSettingsBody({ host: 'local' }) }
+ const available = render({ ...shared, session_naming_prompt: 'Example' })
+ const communication = findNode(available, node => node.props?.['aria-label'] === '会话通信')
+ assert.ok(communication)
+ assert.equal(findNode(communication, node => node.props?.role === 'switch').props.checked, false)
+ assert.equal(findNode(communication, node => node.type?.name === 'SessionNamingSettings').props.prompt, 'Example')
+ assert.doesNotMatch(visibleText(communication), /共享记忆/)
+ const unsupported = findNode(render(shared), node => node.props?.['aria-label'] === '会话通信')
+ assert.match(visibleText(unsupported), /Agent 会话命名.*更新服务后即可设置/s)
+ assert.ok(findNode(unsupported, node => node.type === 'ServiceRecoveryLink'))
+ data = { settings: { ...shared, session_naming_prompt: 'Example' } }
+ const general = scope.SessionBehaviorSettings({ host: 'local' })
+ assert.match(visibleText(general), /重启后自动续接/)
+ assert.equal(findNode(general, node => node.type?.name === 'SessionNamingSettings'), undefined)
 })
 
 test('session naming settings save a semantic prompt and restore the default', async () => {
@@ -1449,4 +1515,124 @@ test('imported relay contexts render the same communication card without requiri
   assert.equal(card.props.relay.address, 'worker.example/session-same-id')
   const rendered = card.type(card.props)
   assert.equal(rendered.props.className, 'kode-relay')
+})
+
+test('the session identity becomes a sibling before the native environment section, else stays inline', () => {
+  const start = source.indexOf('  function SessionIdentitySection('), end = source.indexOf('  function SessionAvatarMenuItem(', start)
+  let cleanup, seat = null, anchor
+  const scope = vm.createContext({ React: { Fragment: 'fragment' }, h: (type, props, ...children) => ({ type, props, children }),
+    createPortal: (element, node) => ({ portal: node, element }), useRef: () => anchor, useState: () => [seat, value => { seat = value }], useEffect: effect => { cleanup = effect() } })
+  vm.runInContext(source.slice(start, end), scope)
+  const inserted = [], attrs = {}
+  const node = { setAttribute: (key, value) => { attrs[key] = value }, remove: () => inserted.push('removed') }
+  const environment = { parentElement: { matches: selector => selector === '[data-session-panel]' }, ownerDocument: { createElement: tag => (node.tag = tag, node) }, before: added => inserted.push(added) }
+  anchor = { current: { closest: selector => selector === '[data-session-panel-section=environment]' ? environment : null } }
+  scope.SessionIdentitySection({ children: 'identity' })
+  assert.deepEqual(inserted, [node])
+  assert.equal(node.tag, 'section')
+  assert.equal(attrs['data-kode-session-identity'], '')
+  const lifted = scope.SessionIdentitySection({ children: 'identity' })
+  assert.deepEqual(lifted.children[1], { portal: node, element: 'identity' }, 'native heading stays on 环境; identity renders above it')
+  cleanup()
+  assert.equal(inserted.at(-1), 'removed')
+  assert.equal(seat, null)
+  anchor = { current: { closest: () => null } }
+  assert.equal(scope.SessionIdentitySection({ children: 'identity' }).children[1], 'identity', 'unknown hosts keep the identity inline')
+  assert.equal(cleanup, undefined)
+})
+
+test('Kode review, subagent and communication rows stay one line and show three before folding', () => {
+  const h = (type, props, ...children) => ({ type, props, children })
+  const scope = vm.createContext({ h, React: { Fragment: 'fragment' }, useState: value => [value, () => {}] })
+  vm.runInContext(source.slice(source.indexOf('  function SessionPanelRow('), source.indexOf('  const cardKey =')), scope)
+  const row = scope.SessionPanelRow({ label: '验证 Agent', detail: '运行中', compact: true, onClick: () => {} })
+  assert.equal(row.props['data-kode-compact'], '')
+  assert.equal(scope.SessionPanelRow({ label: 'Codex' }).props['data-kode-compact'], undefined, 'identity keeps its two-line layout')
+  const folds = []
+  const list = scope.DisclosurePanelRows({ rows: [1, 2, 3, 4, 5].map(id => ({ id })), renderFactorySlot: (name, props) => folds.push(props) && name, rowProps: row => ({ label: `#${row.id}`, detail: '运行中' }), content: () => null })
+  const tree = list.type(list.props)
+  assert.equal(tree.children[0].length, 3)
+  assert.ok(tree.children[0].every(item => item.children[0].props.compact === true))
+  assert.equal(folds[0].label, '显示另外 2 项', 'the native fold still reveals every item')
+  assert.match(source, /\[data-kode-panel-row\]\[data-kode-compact\] \[data-row-part=lines\]\{flex-direction:row/)
+  assert.match(source, /renderRow: row => h\(SessionPanelRow, \{ key: row\.url, href: row\.url, compact: true,/)
+  const sub = scope.SessionPanelRow({ label: '一个很长的外部 CLI 子 Agent 标题', hint: '等待操作', detail: 'gpt-5-codex', compact: true })
+  const [icon, lines] = sub.children[0].children[0]
+  assert.equal(icon.props.title, '等待操作', 'the status dot names its state on hover')
+  assert.deepEqual(lines.children.filter(Boolean).map(part => [part.props['data-row-part'] ?? part.props.className, part.children[0]]), [['content', '一个很长的外部 CLI 子 Agent 标题'], ['kode-sr-only', '，等待操作'], ['detail', 'gpt-5-codex']])
+  assert.match(source, /rowProps: child => \(\{ label: childTitle\(child\), hint: childStatusLabel\(child\), detail: child\.model,/)
+})
+
+test('communication rows show only a title and tell waiting from answered by the projected flag or reply-to, never by delivery receipts', () => {
+  const scope = vm.createContext({ IconClockOutlineRegular: 'clock', IconCheckOutlineRegular: 'check', IconPaperPlaneOutlineRegular: 'plane' })
+  vm.runInContext(source.slice(source.indexOf('  const relayKinds = {'), source.indexOf('  function CommunicationRows(')), scope)
+  const ask = { nodeId: 'n', sessionId: 'peer', id: 'ask', direction: 'sent', reply: false, status: 'accepted', content: '请评审 PR' }
+  const delivered = { nodeId: 'n', sessionId: 'peer', id: 'ask-2', direction: 'sent', reply: false, status: 'received', content: '另一个请求' }
+  const answer = { nodeId: 'n', sessionId: 'peer', id: 'ans', direction: 'received', reply: true, replyTo: 'ask', content: '评审完成' }
+  const reply = { nodeId: 'n', sessionId: 'peer', id: 'back', direction: 'sent', reply: true, replyTo: 'theirs', content: '已处理' }
+  const request = { nodeId: 'n', sessionId: 'peer', id: 'theirs', direction: 'received', reply: false, content: '# 帮我看看\n细节' }
+  const rows = [ask, delivered, answer, reply, request]
+  assert.deepEqual(rows.map(row => scope.relayKind(row, rows)), ['answered', 'waiting', 'reply', 'replied', 'incoming'])
+  assert.equal(scope.relayKind(ask, [ask]), 'waiting', 'an accepted receipt is not a reply')
+  assert.equal(scope.relayKind(ask, [ask, { ...answer, sessionId: 'stranger' }]), 'waiting', 'only the asked peer can answer')
+  assert.equal(scope.relayTitle({ title: ' 代码评审 ', content: 'body' }), '代码评审')
+  assert.equal(scope.relayTitle(request), '会话消息', 'untitled history never leaks its content')
+  assert.equal(scope.relayTitle(reply), '会话回复')
+  assert.equal(scope.relayTitle({ replyTo: 'm', content: '正文' }), '会话回复')
+  const reordered = { ...ask, answered: true }
+  assert.equal(scope.relayKind(reordered, [reordered]), 'answered', 'the projected answered flag wins even when the reply is not in view')
+  assert.equal(scope.relayKind({ ...ask, answered: false }, rows), 'answered', 'without the flag the real reply-to still counts')
+})
+
+test('relay cards consume an optional title line and keep malformed ones as body text', () => {
+  const scope = vm.createContext({})
+  vm.runInContext(source.slice(source.indexOf('  function relayTitlePrefix('), source.indexOf('  let namesSnapshot')), scope)
+  assert.deepEqual({ ...scope.relayTitlePrefix('[Kode message title: "代码评审"]\n正文') }, { title: '代码评审', content: '正文' })
+  assert.deepEqual({ ...scope.relayTitlePrefix('[Kode message title: nope]\n正文') }, { content: '[Kode message title: nope]\n正文' })
+  assert.deepEqual({ ...scope.relayTitlePrefix('普通消息') }, { content: '普通消息' })
+})
+
+test('chat relay cards start collapsed to route and title, and reveal the body only when expanded', () => {
+  let state = false
+  const h = (type, props, ...children) => ({ type, props: props ?? {}, children })
+  const scope = vm.createContext({ h, useState: initial => [state ?? initial, next => { state = next }], IconPaperPlaneOutlineRegular: 'plane', IconChevronDownOutlineRegular: 'chevron', IconWarningOutlineRegular: 'warning', RelayEchoVisibility: 'echo' })
+  const slice = (from, to) => source.slice(source.indexOf(from), source.indexOf(to))
+  vm.runInContext(slice('  function relayTitle(', '  function CommunicationRows') + slice('  // Collapsed relays show', '  function HistoricalRelay('), scope)
+  const text = node => node == null || node === false ? '' : typeof node === 'string' ? node : Array.isArray(node) ? node.map(text).join('') : text(node.children)
+  const find = (node, test) => !node || typeof node !== 'object' ? undefined : Array.isArray(node) ? node.map(child => find(child, test)).find(Boolean) : test(node) ? node : find(node.children, test)
+  const draw = relay => scope.RelayCard({ relay, time: Date.UTC(2026, 0, 1, 2, 42), nameOf: (node, id) => id === 'self' ? '当前会话' : '评审助手', sessionId: 'self' })
+  const relay = { address: 'n/peer', replyTo: 'm1', title: '代码评审结论', content: '机密正文第一行\n第二行' }
+  const expand = node => !node || typeof node !== 'object' ? node : Array.isArray(node) ? node.map(expand) : typeof node.type === 'function' ? expand(node.type(node.props)) : { ...node, children: expand(node.children) }
+  const render = relay => expand(draw(relay))
+  let card = render(relay)
+  const toggle = find(card, node => node.type === 'button')
+  assert.equal(toggle.props['aria-expanded'], false)
+  assert.equal(text(card), '评审助手→当前会话代码评审结论')
+  assert.equal(find(card, node => node.type === 'strong' && node.props.title === '当前会话（当前会话）') != null, true)
+  assert.equal(find(card, node => node.type === 'time'), undefined)
+  toggle.props.onClick()
+  card = render(relay)
+  assert.equal(find(card, node => node.type === 'button').props['aria-expanded'], true)
+  assert.match(text(card), /回复了这段对话 · \d\d:\d\d[^机]*机密正文第一行\n第二行/)
+  state = false
+  assert.match(text(render({ address: 'n/peer', content: '## 旧消息首行\n更多' })), /会话消息/)
+  assert.doesNotMatch(text(render({ address: 'n/peer', content: '## 旧消息首行\n更多' })), /旧消息|更多/)
+  assert.match(text(render({ address: 'n/peer', replyTo: 'm0', content: '旧回复正文' })), /会话回复/)
+  assert.doesNotMatch(text(render({ address: 'n/peer', replyTo: 'm0', content: '旧回复正文' })), /旧回复正文/)
+})
+
+test('sessions_send cards collapse to the two session names and title, with status, time and body only when expanded', () => {
+  const c = client(), render = c.entry('tool.call.toolview', 'kode_sessions_send')
+  const text = node => node == null || node === false ? '' : typeof node !== 'object' ? String(node) : Array.isArray(node) ? node.map(text).join('') : typeof node.type === 'function' ? text(node.type(node.props)) : text(node.children ?? node.props?.children)
+  const card = (expanded, isError) => render({ sessions: c.ctx.sessions, sessionId: 'current', toolName: 'kode_sessions_send', phase: 'result', block: {
+    isError, args: { text: key => ({ content: '机密正文', title: '代码评审', node_id: 'worker.example', session_id: 'peer' })[key] },
+    content: [{ type: 'text', text: JSON.stringify({ message: { status: 'accepted' } }) }],
+  }, useDisclosure: () => ({ expanded, setExpanded() {} }) })
+  const closed = JSON.stringify(card(false)), shown = text(card(false))
+  assert.match(shown, /代码评审/)
+  assert.doesNotMatch(shown, /机密正文|发送时|发送会话消息|（当前）|投递状态/)
+  assert.doesNotMatch(closed, /通信未成功/)
+  assert.match(text(card(true)), /发送会话消息 · 发送时：.*机密正文.*投递状态不代表目标任务已完成/)
+  const expand = node => !node || typeof node !== 'object' ? node : Array.isArray(node) ? node.map(expand) : typeof node.type === 'function' ? expand(node.type(node.props)) : { ...node, children: expand(node.children) }
+  assert.match(JSON.stringify(expand(card(false, true))), /"role":"img","aria-label":"通信未成功"/)
 })

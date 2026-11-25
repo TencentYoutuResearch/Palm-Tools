@@ -10,7 +10,7 @@ import { assertReleasedV4Relationships } from '@deepseek-ai/dsh-session-format-v
 import { AgentProfiles } from '../src/agent-profiles.js'
 import { AgentRuntimeAdapter, profileRoute } from '../src/agent-runtime.js'
 import { buildHistorySeed } from '../src/native-history.js'
-import { HISTORY_EDIT, HISTORY_CONTEXT_BYTES, HistoryEditor, branchHistoryInput, editedHistoryInput, editedMessage, historyEditProjection, historyEditSurface } from '../src/history-edit.js'
+import { HISTORY_EDIT, HISTORY_CONTEXT_BYTES, HistoryEditor, branchHistoryInput, editedHistoryInput, editedMessage, historyEditProjection, historyEditSurface, rejectedLegacyHistory } from '../src/history-edit.js'
 
 const selection = { provider: 'kode-agent-fixture', model: 'fixture' }
 const timeline = [
@@ -68,6 +68,118 @@ test('a long fallback request contains a bounded prefix without historical attac
   const oldBranch = Session.create('old-branch', legacy)
   assert.equal(branchHistoryInput(oldBranch, { historyBranch: true })[0].text, result)
   assert.deepEqual(branchHistoryInput(oldBranch, { historyBranch: true, historyBootstrapped: true }), [])
+})
+
+test('legacy recovery refuses turns that produced an answer or ran a real tool', () => {
+  const binding = { profile: { type: 'claude' }, historyBranch: true, historyBootstrapped: true, threadId: 'old-native' }
+  const marker = { type: HISTORY_EDIT, seq: 0 }
+  const failure = { type: 'turn/end', seq: 2, data: { reason: { kind: 'error', error: { message: 'Internal error: Prompt is too long' } } } }
+  const reply = { type: 'assistant/message', seq: 1, data: { message: { content: [{ type: 'text', text: 'partial answer' }] } } }
+  const tool = { type: 'tool/call', seq: 1, data: { name: 'kode_native_commandExecution', arguments: JSON.stringify({ kind: 'execute', title: 'Write a file' }), callId: 'work' } }
+  assert.ok(rejectedLegacyHistory({ snapshotEvents: () => [marker, failure] }, binding))
+  for (const event of [reply, tool]) assert.equal(rejectedLegacyHistory({ snapshotEvents: () => [marker, event, failure] }, binding), false)
+})
+
+for (const scenario of ['in-place', 'legacy pending', 'legacy rejected']) test(`${scenario}: a large edited Claude conversation sends a bounded ACP prompt and keeps its DSH identity`, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'kode-history-large-')), log = join(root, 'rpc.jsonl')
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const profile = { id: 'fixture', name: 'Claude fixture', type: 'claude', executable: process.execPath,
+    args: [fileURLToPath(new URL('./fixture-acp-server.js', import.meta.url))], env: { KODE_ACP_FIXTURE_LOG: log, KODE_ACP_OVERSIZED_HISTORY_SESSION: 'old-native' } }
+  let profiles = await new AgentProfiles(join(root, 'profiles.json')).open([profile])
+  // The production failure included more than 18 MB in the first native prompt.
+  const largeText = 'large earlier answer. '.repeat(20_000)
+  const retained = Array.from({ length: 44 }, (_, i) => [
+    { kind: 'text', role: 'user', text: `earlier request ${i}` },
+    { kind: 'text', role: 'agent', text: largeText },
+  ]).flat()
+  assert.ok(Buffer.byteLength(largeText) * 44 > 18_000_000)
+  const events = buildHistorySeed({ timeline: [...retained, ...timeline] }, selection), id = 'large-claude'
+  const seq = targetSeq(events)
+  const header = { ...Session.create(id).header, cwd: root }
+  const legacy = scenario !== 'in-place'
+  const session = Session.create(id, legacy ? events.slice(0, seq - 3) : events, header)
+  if (legacy) {
+    assert.equal(session.snapshotEvents().at(-1).type, 'session/end-seed')
+    session.append(HISTORY_EDIT, { sourceId: 'legacy-source', editedSeq: seq, fingerprint: 'a'.repeat(64) }, { ignorable: true })
+  }
+  const user = (messageId, text) => ({ id: messageId, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] })
+  const previousInput = user('history-edit-' + 'b'.repeat(64), 'REJECTED_PREVIOUS_ATTEMPT')
+  function appendTurn(message, rejected = false) {
+    const turn = session.snapshotEvents().filter(event => event.type === 'turn/start').length + 1
+    const step = 1
+    session.append('turn/start', { turn })
+    session.append('step/start', { turn, step })
+    session.append('user/message', message, { surfaceOp: 'append' })
+    if (rejected) {
+      // Claude reported only its unsuccessful automatic compaction, which is
+      // recorded by Kode as a display tool, before returning the API failure.
+      const callId = 'old-native:compact', item = { id: 'compact', type: 'commandExecution', kind: 'think', title: 'Compact conversation', status: 'in_progress' }
+      const nativeEvent = (method, params) => session.append('plugin:kode/native-event', { turn, step,
+        event: { method, params: { threadId: 'old-native', turnId: 'rejected', ...params } } }, { ignorable: true })
+      nativeEvent('turn/started', { turn: { id: 'rejected' } })
+      nativeEvent('item/started', { item })
+      const name = 'kode_native_commandExecution', args = JSON.stringify(item)
+      session.append('assistant/message', { turn, step, stream: [], message: { id: 'old-compact', role: 'assistant',
+        source: { kind: 'model', ...selection }, content: [{ type: 'tool-call', id: callId, name, arguments: args }] } }, { surfaceOp: 'append' })
+      session.append('tool/call', { turn, step, callId, name, arguments: args })
+      const failedItem = { ...item, status: 'failed' }
+      nativeEvent('item/completed', { item: failedItem })
+      session.append('tool/result', { turn, step, message: { id: 'old-result', role: 'tool', source: { kind: 'tool', callId },
+        toolCallId: callId, isError: true, content: [{ type: 'text', text: JSON.stringify(failedItem) }] } }, { surfaceOp: 'append' })
+      session.append('step/end', { turn, step })
+      session.append('turn/end', { turn, reason: { kind: 'error', error: { code: 'NATIVE_AGENT', message: 'Internal error: Prompt is too long' } } })
+    }
+    return turn
+  }
+  const rejected = scenario === 'legacy rejected'
+  if (rejected) appendTurn(previousInput, true)
+  const message = legacy ? user('new-input', 'EDITED_REQUEST') : commitEdit(session, seq, 'EDITED_REQUEST').data
+  const openTurn = legacy ? appendTurn(message) : undefined
+  await profiles.bind(id, 'fixture')
+  if (legacy) await profiles.patchBinding(id, { historyBranch: true, ...(rejected ? {
+    threadId: 'old-native', historyBootstrapped: true, lastOutcome: 'uncertain', seenInputs: [previousInput.id],
+  } : {}) })
+  else await profiles.patchBinding(id, { threadId: 'old-native' })
+  const agent = { id, session, ctx: { sessions: { flush: async () => {} }, parallel: async () => {}, get: () => undefined } }
+  const ctx = { agents: { get: key => key === id ? agent : undefined },
+    sessionProjections: { stateOf: () => ({ lastTurn: openTurn ?? 1, lastStepBoundary: { kind: 'start', step: 1 } }) } }
+  const handlers = { recordNative: () => {}, resolveProfile: async p => ({ ...p, type: 'custom', protocol: 'acp' }) }
+  let adapter = new AgentRuntimeAdapter(ctx, profiles, handlers)
+  const send = async message => {
+    let reply = ''
+    for await (const chunk of adapter.stream({ sessionId: id, provider: selection.provider, model: 'fixture-fast', tools: [], messages: [message], signal: AbortSignal.timeout(10000) })) {
+      if (chunk.type === 'text-delta') reply += chunk.text
+    }
+    return reply
+  }
+  try {
+    assert.match(await send(message), /acp:/)
+    if (legacy) {
+      session.append('step/end', { turn: openTurn, step: 1 })
+      session.append('turn/end', { turn: openTurn, reason: { kind: 'completed' } })
+    }
+    await adapter.close()
+    profiles = await new AgentProfiles(profiles.path).open()
+    agent.session = Session.create(id, session.snapshotEvents(), header)
+    assert.equal(agent.session.id, id)
+    assert.ok(agent.session.deriveMessages().some(row => row.id === message.id))
+    adapter = new AgentRuntimeAdapter(ctx, profiles, handlers)
+    assert.match(await send(user('next-input', 'FOLLOWUP')), /acp: FOLLOWUP/)
+    const requests = (await readFile(log, 'utf8')).trim().split('\n').map(JSON.parse)
+    assert.equal(requests.filter(row => row.method === 'session/new').length, 1)
+    assert.deepEqual(requests.filter(row => row.method === 'session/load').map(row => row.params.sessionId), ['same-native-session'])
+    const prompts = requests.filter(row => row.method === 'session/prompt').map(row => row.params.prompt)
+    assert.equal(prompts.length, 2)
+    assert.equal(prompts[0].at(-1).text, 'EDITED_REQUEST')
+    const first = prompts[0].slice(0, -1).map(part => part.text).join('')
+    assert.ok(Buffer.byteLength(first) <= HISTORY_CONTEXT_BYTES)
+    assert.match(first, /EARLIER_QUESTION/)
+    assert.doesNotMatch(first, /ORIGINAL_TO_EDIT|EXCLUDED/)
+    assert.equal(first.includes('REJECTED_PREVIOUS_ATTEMPT'), rejected)
+    assert.doesNotMatch(first, /EDITED_REQUEST/)
+    assert.deepEqual(prompts[1], [{ type: 'text', text: 'FOLLOWUP' }])
+    assert.equal(profiles.binding(id).threadId, 'same-native-session')
+  } finally { await adapter.close() }
 })
 
 test('editing preserves attachments while refusing injected/replacement/non-user rows and blank text', () => {

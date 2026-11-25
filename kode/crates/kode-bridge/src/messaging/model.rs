@@ -2,6 +2,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const MAX_CONTENT_BYTES: usize = 64 * 1024;
+pub const MAX_TITLE_CHARS: usize = 80;
 pub const MAX_PENDING: usize = 256;
 pub const LEASE_MS: u64 = 60_000;
 pub fn now() -> u64 {
@@ -13,6 +14,12 @@ pub fn valid_id(s: &str) -> bool {
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))
 }
+pub(crate) fn valid_message_title(title: &str) -> bool {
+    !title.trim().is_empty()
+        && title.chars().count() <= MAX_TITLE_CHARS
+        && !title.chars().any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Address {
@@ -45,6 +52,8 @@ pub struct Message {
     pub source: Address,
     pub target: Address,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub idempotency_key: String,
     pub in_reply_to: Option<String>,
     /// Bounds automatic reply chains across runtimes.
@@ -62,6 +71,8 @@ pub struct SendRequest {
     pub source: Option<String>,
     pub target: Address,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub idempotency_key: String,
     pub in_reply_to: Option<String>,
     #[serde(default = "default_ttl")]

@@ -93,6 +93,7 @@ mod tests {
                 source: a.clone(),
                 target: a,
                 content: "中🦊".into(),
+                title: None,
                 idempotency_key: "key".into(),
                 in_reply_to: None,
                 hop_count: 2,

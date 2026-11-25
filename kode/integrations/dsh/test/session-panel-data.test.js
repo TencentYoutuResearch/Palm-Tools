@@ -29,8 +29,8 @@ test('review links are unique, canonical and obtained from visible session messa
 test('inbound and outbound Kode messages keep their real peer and transport status', () => {
   const source = { node_id: 'host.example', session_id: 'source-session' }
   const target = { node_id: 'local.example', session_id: 'target-session' }
-  const inbound = relayInput({ id: 'incoming', source, target, content: 'A requested review', in_reply_to: 'earlier' }, 'input-id')
-  const outbound = { id: 'outgoing', target: source, content: 'Reviewed', status: 'queued', in_reply_to: inbound.id }
+  const inbound = relayInput({ id: 'incoming', source, target, content: 'A requested review', title: 'Review details', in_reply_to: 'earlier' }, 'input-id')
+  const outbound = { id: 'outgoing', target: source, content: 'Reviewed', title: 'Review complete', status: 'queued', in_reply_to: 'incoming' }
   const result = (id, payload) => ({ type: 'tool/result', data: { message: { source: { callId: id }, content: text(JSON.stringify(payload)) } } })
   const state = project(
     { type: 'user/message', data: { ...inbound, source: { kind: 'user' } } },
@@ -42,7 +42,52 @@ test('inbound and outbound Kode messages keep their real peer and transport stat
     result('direct-call', { message: outbound }),
   )
   assert.deepEqual(state.relays, [
-    { id: 'incoming', nodeId: source.node_id, sessionId: source.session_id, direction: 'received', reply: true, content: 'A requested review' },
-    { id: 'outgoing', nodeId: source.node_id, sessionId: source.session_id, direction: 'sent', reply: true, status: 'queued', content: 'Reviewed' },
+    { id: 'incoming', nodeId: source.node_id, sessionId: source.session_id, direction: 'received', reply: true, replyTo: 'earlier', title: 'Review details', content: 'A requested review' },
+    { id: 'outgoing', nodeId: source.node_id, sessionId: source.session_id, direction: 'sent', reply: true, replyTo: 'incoming', title: 'Review complete', status: 'queued', content: 'Reviewed' },
   ])
+})
+
+test('explicit wait associates a reply with the creation assignment and ignores unrelated rows', () => {
+  const local = { node_id: 'local.example', session_id: 'me' }
+  const peer = { node_id: 'peer.example', session_id: 'reviewer' }
+  const request = { id: 'request', source: local, target: peer, content: 'Please read the report', title: 'Report review' }
+  const reply = { id: 'reply', source: peer, target: local, content: 'Reviewed it', title: 'Review result', in_reply_to: 'request' }
+  const result = (callId, payload) => ({ type: 'tool/result', data: { message: { source: { callId }, content: text(JSON.stringify(payload)) } } })
+  const state = project(
+    { type: 'tool/call', data: { callId: 'create', name: 'kode_sessions_create' } },
+    result('create', { title: 'Feat-Report', assignment: request }),
+    { type: 'tool/call', data: { callId: 'wait', name: 'kode_native_mcpToolCall', arguments: JSON.stringify({ tool: 'kode_sessions_wait' }) } },
+    result('wait', { result: { structuredContent: { events: [
+      { message: { ...request, status: 'accepted' } },
+      { message: { ...reply, id: 'other', source: { ...peer, session_id: 'other' } } },
+      { message: { ...reply, id: 'unrelated', in_reply_to: 'other' } },
+      { message: reply },
+      { message: { ...reply, status: 'accepted' } },
+    ] } } }),
+  )
+  assert.equal(state.relays[0].answered, true)
+  assert.deepEqual(state.relays.map(({ id, direction, title, replyTo }) => ({ id, direction, title, replyTo })), [
+    { id: 'request', direction: 'sent', title: 'Report review', replyTo: undefined },
+    { id: 'reply', direction: 'received', title: 'Review result', replyTo: 'request' },
+  ])
+})
+
+test('a confirmed reply survives an idempotent send retry after the reply leaves the recent list', () => {
+  const local = { node_id: 'local.example', session_id: 'me' }
+  const peer = { node_id: 'peer.example', session_id: 'reviewer' }
+  const request = { id: 'request', source: local, target: peer, content: 'Review the report', title: 'Report review' }
+  const send = callId => [
+    { type: 'tool/call', data: { callId, name: 'kode_sessions_send' } },
+    { type: 'tool/result', data: { message: { source: { callId }, content: text(JSON.stringify({ message: request })) } } },
+  ]
+  const inbound = (id, in_reply_to) => ({
+    type: 'user/message',
+    data: relayInput({ id, source: peer, target: local, content: 'Peer message', in_reply_to }, `input-${id}`),
+  })
+  const view = project(
+    ...send('send'), inbound('reply', 'request'), ...send('retry'),
+    ...Array.from({ length: 23 }, (_, i) => inbound(`more-${i}`)),
+  )
+  assert.equal(view.relays.some(row => row.id === 'reply'), false)
+  assert.equal(view.relays.find(row => row.id === 'request').answered, true)
 })

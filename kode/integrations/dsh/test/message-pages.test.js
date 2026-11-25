@@ -4,6 +4,7 @@ import {
   eventPage,
   messagePage,
   messagePreview,
+  readRelayEnvelope,
   relayInput,
 } from '../src/message-pages.js'
 const message = (content) => ({
@@ -122,4 +123,26 @@ test('automatic relay fits the full input object and preserves full-text continu
     () => relayInput({ ...message('x'), id: 'x'.repeat(9000) }, 'id'),
     /metadata/,
   )
+})
+
+test('title is preserved independently of the body and its continuation offsets', () => {
+  const title = '审阅 "SSH" 状态 🦊'
+  const source = { ...message('🦊'.repeat(4000)), title, in_reply_to: 'original' }
+  const input = relayInput(source, 'input-id')
+  const parsed = readRelayEnvelope(input.content[0].text)
+  const offset = Number(/offset=(\d+);/.exec(parsed.content)[1])
+  assert.ok(Buffer.byteLength(JSON.stringify(input)) <= 8192)
+  assert.equal(parsed.title, title)
+  assert.equal(parsed.replyTo, 'original')
+  assert.equal(parsed.content.split('\n')[0], '🦊'.repeat(offset))
+  const page = messagePage(source, offset)
+  assert.equal(page.title, title)
+  assert.equal(page.offset, offset)
+  assert.equal(eventPage({ events: [{ seq: 1, message: source }] }).events[0].message.title, title)
+
+  for (const content of ['Title: legacy body', '[Kode message title: malformed]\nLegacy body']) {
+    const old = readRelayEnvelope(relayInput(message(content), 'old-id').content[0].text)
+    assert.equal(old.content, content)
+    assert.equal(old.title, undefined)
+  }
 })

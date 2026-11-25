@@ -103,12 +103,15 @@ async function recoverHostService(host, { request, readSettings, delay, signal, 
     signal.throwIfAborted()
     progress(job)
     if (['failed', 'cancelled'].includes(job.status)) throw new Error(job.error || '服务恢复未完成，请重试。')
-    if (host === 'local' || job.status === 'done') {
+    if (job.status === 'done' || (host === 'local' && !job.id)) {
       try { return await readSettings() } catch (error) {
         if (error.status === 401 || error.status === 403) throw error
       }
-    } else job = await request(undefined, job.id)
-    await delay(1500, signal)
+      await delay(1500, signal)
+    } else {
+      await delay(1500, signal)
+      job = await request(undefined, job.id)
+    }
   }
   throw new Error('等待服务恢复超时，请检查服务状态后重新连接。')
 }
@@ -130,7 +133,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   const { useState, useEffect, useMemo, useRef, useCallback, useSyncExternalStore } = React
   const CARD_SECTIONS = 'conversation.session.panel.section'
   const CARD_ENVIRONMENT = 'conversation.session.panel.environment.row'
-  const { Menu, Modal, Button, Toast, MarkdownText, TerminalBlock, FishLogo, StateDot, IconApiOutlineRegular, IconEditOutlineRegular, IconChevronDownOutlineRegular, IconAgentPresetOutlineRegular, MenuItemButton, IconFolderCloseRegular, IconPlusOutlineRegular, IconGlobeOutlineRegular, IconPaperPlaneOutlineRegular, IconPauseOutlineRegular, IconPlayOutlineRegular, IconCloseOutlineRegular, IconGoalOutlineRegular, IconCheckOutlineRegular, IconClockOutlineRegular, IconSearchOutlineRegular, IconLoadingOutlineRegular, IconUsersOutlineRegular, IconWarningOutlineRegular, IconBranchOutlineRegular, IconChevronRightOutlineRegular } = require('@deepseek-ai/dsh-client-ui-primitives')
+  const { Menu, Modal, Button, Toast, Tooltip, MarkdownText, TerminalBlock, FishLogo, StateDot, IconApiOutlineRegular, IconEditOutlineRegular, IconChevronDownOutlineRegular, IconAgentPresetOutlineRegular, MenuItemButton, IconFolderCloseRegular, IconPlusOutlineRegular, IconGlobeOutlineRegular, IconPaperPlaneOutlineRegular, IconPauseOutlineRegular, IconPlayOutlineRegular, IconCloseOutlineRegular, IconGoalOutlineRegular, IconCheckOutlineRegular, IconClockOutlineRegular, IconSearchOutlineRegular, IconLoadingOutlineRegular, IconUsersOutlineRegular, IconWarningOutlineRegular, IconBranchOutlineRegular, IconChevronRightOutlineRegular } = require('@deepseek-ai/dsh-client-ui-primitives')
   const markdownLabels = { code: { copyLabel: '复制', copiedLabel: '已复制', toolbarLabels: { codeLabel: '代码', wrapLabel: '自动换行', unwrapLabel: '取消自动换行' } }, footnotes: '脚注' }
   const API = '/api/kode/agents', stores = new Map()
   const startupRetryDelays = [250, 500, 1000, 2000, 4000, 8000]
@@ -672,20 +675,21 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   }
   function ServiceRecovery({ host, settings, onBusyChange }) {
     const { data: hosts } = useProjectHosts()
-    const [busy, setBusy] = useState(false), [job, setJob] = useState(null), [error, setError] = useState('')
+    const [busy, setBusy] = useState(false), [job, setJob] = useState(null), [error, setError] = useState(''), [success, setSuccess] = useState(false)
     const task = React.useRef(null)
     useEffect(() => () => task.current?.abort(), [])
     useEffect(() => { onBusyChange?.(busy); return () => onBusyChange?.(false) }, [busy, onBusyChange])
-    const supported = host === 'local' ? hosts.localRecoverySupported !== false : hosts.deploymentSupported !== false
+    const supported = host === 'local' ? hosts.localRecoverySupported === true : hosts.deploymentSupported !== false
+    const hintId = React.useId()
     const recover = async () => {
       if (task.current) return
       const controller = new AbortController(); task.current = controller
-      setBusy(true); setError('')
+      setBusy(true); setError(''); setSuccess(false)
       try {
         await recoverHostService(host, {
           signal: controller.signal, progress: setJob, readSettings: () => settings.request(undefined, controller.signal),
           request: async (body, id) => {
-            const response = await fetch(`/api/kode/project-hosts?current=local${id ? `&deployment=${encodeURIComponent(id)}` : ''}`, { credentials: 'same-origin', cache: 'no-store', signal: controller.signal, ...(body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}) })
+            const response = await fetch(`/api/kode/project-hosts?current=local${id ? `&${host === 'local' ? 'recovery' : 'deployment'}=${encodeURIComponent(id)}` : ''}`, { credentials: 'same-origin', cache: 'no-store', signal: controller.signal, ...(body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}) })
             let value
             try { value = await parseHostJson(response) } catch (error) { if (error.code === 'KODE_SERVICE_UPDATE_REQUIRED') throw new Error('此计算机的 Host 尚不支持自动恢复，请先更新并重启 Web Host 和 Kode 服务。'); throw error }
             if (!response.ok) throw new Error(value.error === '未知项目操作。' ? '此计算机的 Host 尚不支持自动恢复，请先更新并重启 Web Host 和 Kode 服务。' : value.error || '无法恢复服务，请重试。')
@@ -698,16 +702,21 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
             signal.addEventListener('abort', abort, { once: true })
           }),
         })
-        if (!controller.signal.aborted) settings.retry()
+        if (!controller.signal.aborted) { setSuccess(true); settings.retry() }
       } catch (error) { if (!controller.signal.aborted) setError(error.message) }
       finally { if (!controller.signal.aborted) setBusy(false); task.current = null }
     }
-    const hint = supported ? (host === 'local' ? '使用已安装的服务版本重启 Web Host 和 Kode 后端。有运行中或排队会话时会停止操作，请等待任务结束后重试。' : '通过已保存的 SSH 配置更新并重启此主机的服务。有运行中或排队会话时会停止部署，请等待任务结束后重试。') : '此启动方式不支持自动恢复。请更新 Kode 插件和服务，退出并重新打开 Desktop，或手动重启 Web Host 和 Kode 后端。'
+    const hint = host !== 'local' ? '通过 SSH 更新并重启所选主机的服务。'
+      : supported ? '使用已安装的版本重启 Kode 后端。有运行中或排队的会话时不会重启。'
+        : hosts.localRecoverySupported === false ? '此启动方式不支持在这里重启本机服务，请在服务部署处重启后重新连接。' : ''
     return h('div', { className: 'kode-service-recovery', 'aria-busy': busy },
-      h('div', { className: 'kode-service-recovery-actions', title: hint },
-        supported && h(Button, { disabled: busy, onClick: () => void recover() }, busy ? host === 'local' ? '正在重启…' : '正在更新部署…' : host === 'local' ? '重启服务' : '更新并部署服务'),
-        h(Button, { variant: 'outline', disabled: busy, onClick: settings.retry }, '重新连接')),
-      busy && h('p', { className: 'kode-config-note', role: 'status', 'aria-live': 'polite' }, job?.steps?.find(step => step.status === 'running')?.message || (host === 'local' ? '正在等待服务重新启动并检查接口…' : job?.status === 'done' ? '部署完成，正在检查接口…' : '正在准备部署…')),
+      h('div', { className: 'kode-service-recovery-actions' },
+        supported && h(Button, { 'aria-describedby': hintId, disabled: busy, onClick: () => void recover() }, busy ? host === 'local' ? '正在重启…' : '正在更新部署…' : host === 'local' ? '重启服务' : '更新并部署服务'),
+        h(Button, { variant: 'outline', disabled: busy, onClick: () => { setSuccess(false); settings.retry() } }, '重新连接')),
+      hint && h('p', { id: hintId, className: 'kode-config-note kode-service-hint' }, hint),
+      (busy || success) && h('p', { className: 'kode-config-note', role: 'status', 'aria-live': 'polite' },
+        success ? (host === 'local' ? '服务已重启' : '服务已更新并连接')
+          : job?.steps?.find(step => step.status === 'running')?.message || (host === 'local' ? '正在等待服务重新启动…' : job?.status === 'done' ? '部署完成，正在检查接口…' : '正在准备部署…')),
       h(Failure, { text: error }))
   }
   function ServiceRecoveryLink({ host, slots }) {
@@ -734,11 +743,23 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   }
   function IntegrationSettingsBody({ host, hubHost, hosts, slots, sessions }) {
     const settings = useIntegrationSettings(host), { data, busy, error, update } = settings
+    const integration = (key, label, detail) => h('label', { className: 'kode-integration-row' },
+      h('span', null, h('strong', null, label), h('span', { className: 'kode-config-note' }, detail)),
+      h('input', { type: 'checkbox', role: 'switch', checked: data.settings[key], disabled: busy, onChange: event => void update({ action: 'configure', settings: { [key]: event.target.checked } }) }))
+    const namingPrompt = data?.settings.session_naming_prompt
     return h(React.Fragment, null,
       h('div', { className: 'kode-settings-group', 'aria-label': '内置能力' },
         h('h3', { className: 'kode-settings-group-title' }, '内置能力'),
         !data && !error && h('p', { role: 'status', className: 'kode-config-note' }, '正在读取集成配置…'),
-        data && h('div', { className: 'kode-settings-card' }, [{ key: 'messaging_enabled', label: '会话通信', detail: 'kode-communication：允许 Agent 发现其他会话、发送任务和接收回复。' }, { key: 'memory_enabled', label: '共享记忆', detail: 'kode-memory：允许 Agent 搜索已审核的记忆并提交待审核提议。' }].map(item => h('label', { className: 'kode-integration-row', key: item.key }, h('span', null, h('strong', null, item.label), h('span', { className: 'kode-config-note' }, item.detail)), h('input', { type: 'checkbox', role: 'switch', checked: data.settings[item.key], disabled: busy, onChange: event => void update({ action: 'configure', settings: { [item.key]: event.target.checked } }) })))),
+        data && h('div', { className: 'kode-settings-card' },
+          h('div', { className: 'kode-messaging-settings', role: 'group', 'aria-label': '会话通信' },
+            integration('messaging_enabled', '会话通信', '允许 Agent 发现其他会话、发送任务和接收回复。'),
+            typeof namingPrompt === 'string' ? h(SessionNamingSettings, { prompt: namingPrompt, busy, update })
+              : h('div', { className: 'kode-session-naming' },
+                h('strong', null, 'Agent 会话命名'),
+                h('p', { className: 'kode-config-note' }, '当前 Kode 服务不支持自定义命名。更新服务后即可设置。'),
+                h(ServiceRecoveryLink, { host, slots }))),
+          integration('memory_enabled', '共享记忆', '允许 Agent 搜索已审核的记忆并提交待审核提议。')),
         h(Failure, { text: error }), settings.recoveryNeeded && h(ServiceRecoveryLink, { host, slots })),
       h(HubSettings, { key: hubHost, host: hubHost, hosts, sessions }))
   }
@@ -756,7 +777,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     return h('form', { className: 'kode-session-naming', onSubmit: event => { event.preventDefault(); if (dirty && !busy) void save(value.trim()) } },
       h('label', { className: 'kode-field' },
         h('strong', null, 'Agent 会话命名'),
-        h('span', { className: 'kode-config-note' }, '用自然语言描述命名偏好。标题最多 4 个词，意图前缀也计入。'),
+        h('span', { className: 'kode-config-note' }, '适用于 Agent 通过会话通信创建的会话。用自然语言描述命名偏好，标题最多 4 个词，含意图前缀。'),
         h('textarea', { rows: 3, value, maxLength: 2000, disabled: busy,
           placeholder: '留空使用默认规则，例如 Feat-Session Panel、Bug-SSH Workspace、MR-Review Sync',
           onChange: event => { setDraft(event.target.value); setSaved(false) } })),
@@ -767,7 +788,6 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   }
   function SessionBehaviorSettings({ host, slots }) {
     const settings = useIntegrationSettings(host), { data, busy, error, update } = settings
-    const namingPrompt = data?.settings.session_naming_prompt
     return h(React.Fragment, null,
       h('h3', { className: 'kode-settings-group-title' }, '会话行为'),
       h('p', { className: 'kode-config-note' }, '此计算机的会话行为；远端主机保留各自的配置。'),
@@ -775,8 +795,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       data && h('div', { className: 'kode-settings-card' },
         h('label', { className: 'kode-integration-row' },
           h('span', null, h('strong', null, '重启后自动续接'), h('span', { className: 'kode-config-note' }, '自动继续因应用重启或异常退出而中断的任务；已完成、主动停止及已归档的会话不会续接。')),
-          h('input', { type: 'checkbox', role: 'switch', checked: data.settings.auto_resume_interrupted, disabled: busy, onChange: event => void update({ action: 'configure', settings: { auto_resume_interrupted: event.target.checked } }) })),
-        typeof namingPrompt === 'string' && h(SessionNamingSettings, { prompt: namingPrompt, busy, update })),
+          h('input', { type: 'checkbox', role: 'switch', checked: data.settings.auto_resume_interrupted, disabled: busy, onChange: event => void update({ action: 'configure', settings: { auto_resume_interrupted: event.target.checked } }) }))),
       h(Failure, { text: error }), settings.recoveryNeeded && h(ServiceRecoveryLink, { host, slots }))
   }
   function MobileSettingsBody({ host, slots }) {
@@ -1589,7 +1608,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       window.dispatchEvent(new CustomEvent('kode-handoff-dialog', { detail: { sessionId, host: transport?.current ?? 'local' } }))
     }
     const icon = h(IconPaperPlaneOutlineRegular, { size: 16, 'aria-hidden': true })
-    return panel ? h(SessionPanelRow, { icon, label: '交接给其他 Agent', onClick: open }) :
+    return panel ? h(Button, { className: 'kode-environment-handoff', variant: 'ghost', size: 'sm', 'aria-label': '交接会话到其他 Agent', title: '交接会话', onClick: open }, icon, h('span', { className: 'kode-environment-handoff-label' }, '交接')) :
       h(Button, { variant: 'outline', className: 'kode-handoff-trigger', 'aria-label': '交接会话到其他 Agent', title: '交接会话', onClick: open }, icon, '交接')
   }
   function HandoffOverlay({ sessions }) {
@@ -2025,17 +2044,33 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
         openAvatarDialog({ sessionId, host, profile })
       }
     }
-    const avatar = h(AgentAvatar, { profile, host, size: panel ? 20 : 24, status: status ?? (currentSession?.running ? 'running' : 'idle') })
+    const avatar = h(AgentAvatar, { profile, host, size: panel ? 28 : 24, status: status ?? (currentSession?.running ? 'running' : 'idle') })
     if (panel) {
-      const model = selectedCatalogModel(data.models ?? [], data.selection)
-      const modelId = model?.id ?? data.selection?.model
-      const modelName = modelId && modelId !== 'auto' && modelId !== 'default' ? model?.name ?? modelId : null
-      return h(SessionPanelRow, { icon: avatar, label: profile.name, detail: modelName ?? (profile.name === type ? undefined : type),
-        actionLabel: bot ? `编辑伙伴 ${bot.name}` : `设置 ${profile.name} 的头像与背景`,
-        trailing: h(IconEditOutlineRegular, { size: 14, 'aria-hidden': true }), onClick: choose })
+      return h(SessionIdentitySection, null, h('div', { className: 'kode-environment-identity' },
+        h(SessionPanelRow, { icon: avatar, label: profile.name, detail: profile.name === type ? undefined : type,
+          actionLabel: bot ? `编辑伙伴 ${bot.name}` : `设置 ${profile.name} 的头像与背景`,
+          trailing: h(IconEditOutlineRegular, { size: 14, 'aria-hidden': true }), onClick: choose }),
+        h(HandoffAction, { sessionId, sessions, panel: true, dismissOverlay })))
     }
     return h('span', { className: 'kode-agent-identity', title: bot ? `${bot.name} · 伙伴（${base.name}）` : `${profile.name} · ${type}` },
       h('button', { type: 'button', className: 'kode-session-avatar-button', 'aria-label': bot ? '编辑伙伴' : '设置会话头像与背景', onClick: choose }, avatar), h('span', null, profile.name))
+  }
+  // DSH only offers rows inside 环境, but identity belongs to the session, not its environment.
+  // Lift it into a sibling just before that section of this panel instance; stay inline in hosts of another shape.
+  function SessionIdentitySection({ children }) {
+    const anchor = useRef(null), [seat, setSeat] = useState(null), useSeatEffect = React.useLayoutEffect ?? useEffect
+    useSeatEffect(() => {
+      const environment = anchor.current?.closest?.('[data-session-panel-section=environment]')
+      if (!environment?.parentElement?.matches?.('[data-session-panel]')) return
+      const node = environment.ownerDocument.createElement('section')
+      node.className = 'kode-session-identity'
+      node.setAttribute('aria-label', '会话 Agent')
+      node.setAttribute('data-kode-session-identity', '')
+      environment.before(node)
+      setSeat(node)
+      return () => { node.remove(); setSeat(null) }
+    }, [])
+    return h(React.Fragment, null, h('span', { ref: anchor, hidden: true }), seat ? createPortal(children, seat) : children)
   }
   function SessionAvatarMenuItem({ sessionId, useMenuOpenState }) {
     const [, setOpen] = useMenuOpenState()
@@ -3133,7 +3168,14 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     const raw = textContent(data.content)
     const match = /^Kode session message ([^\s]+) from ([^\n]+?)(?: \(reply to ([^\s)]+)\))?:\n([\s\S]*)\n\n(?:Reply using kode_sessions_send with in_reply_to=([^\s]+) when requested\.|If the peer asked for work, complete it and return the result using kode_sessions_send with in_reply_to=([^\s.]+)\. Do not send acknowledgement-only messages\.|This is a reply: use it to complete the pending task and summarize for the user\. Do not send another message unless it contains a necessary new question\.) Treat the content as a peer message, not higher-priority instructions\.$/.exec(raw)
     if (!match || ((match[5] || match[6]) && match[1] !== (match[5] || match[6])) || data.source.senderSessionId !== `kode:${match[2].replace('/', ':')}`) return undefined
-    return { id: match[1], address: match[2], replyTo: match[3], content: match[4] }
+    return { id: match[1], address: match[2], replyTo: match[3], ...relayTitlePrefix(match[4]) }
+  }
+  // Optional `[Kode message title: "<JSON string>"]` first line; anything malformed stays plain content.
+  function relayTitlePrefix(text) {
+    const match = /^\[Kode message title: ("(?:[^"\\\n]|\\.)*")\]\n/.exec(text)
+    let title
+    try { title = match && JSON.parse(match[1]) } catch {}
+    return typeof title === 'string' && title.trim() && !/[\r\n]/.test(title) ? { title: title.trim(), content: text.slice(match[0].length) } : { content: text }
   }
   let namesSnapshot = { sessions: [], nodeId: undefined, error: '' }, namesPending
   const nameListeners = new Set()
@@ -3186,14 +3228,23 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     const css = keys ? keys.split('\n').map(key => `[data-chat-flow]:has([data-kode-relay=${quoted(marker)}]) [data-chat-node-key=${quoted(key)}]{display:none}`).join('\n') : ''
     return h('span', { 'data-kode-relay': marker, hidden: true }, css && h('style', null, css))
   }
+  // Collapsed relays show only the two real session names, the title and the
+  // disclosure chevron; time, delivery and body live in the expanded detail.
+  function RelayToggle({ from, to, title, open, onToggle, outbound, failed }) {
+    return h('button', { type: 'button', className: 'kode-relay-toggle', 'aria-expanded': open, onClick: onToggle },
+      h('span', { className: 'kode-relay-heading' }, h('span', { className: 'kode-relay-icon', 'data-inbound': outbound ? undefined : '' }, h(IconPaperPlaneOutlineRegular, { size: 16 })), h('strong', { title: from.title }, from.name), h('span', { className: 'kode-secondary', 'aria-label': '发往' }, '→'), h('strong', { title: to.title }, to.name)),
+      failed && h('span', { className: 'kode-relay-failed kode-error', role: 'img', 'aria-label': '通信未成功', title: '通信未成功' }, h(IconWarningOutlineRegular, { size: 14 })),
+      h(IconChevronDownOutlineRegular, { size: 12 }),
+      h('span', { className: 'kode-relay-title' }, title))
+  }
+  const currentEnd = name => ({ name, title: `${name}（当前会话）` })
   function RelayCard({ relay, time, nameOf, sessionId, node, useChat }) {
+    const [open, setOpen] = useState(false)
     const slash = relay.address.indexOf('/'), sender = nameOf(relay.address.slice(0, slash), relay.address.slice(slash + 1))
-    return h('section', { className: 'kode-relay', 'aria-label': '会话消息' },
+    return h('section', { className: 'kode-relay', 'aria-label': '会话消息', 'data-open': open ? '' : undefined },
       useChat && h(RelayEchoVisibility, { node, sessionId, useChat }),
-      h('div', { className: 'kode-relay-heading' }, h(IconPaperPlaneOutlineRegular, { size: 16 }), h('strong', null, sender), h('span', { className: 'kode-secondary' }, '→'), h('strong', null, `${nameOf(undefined, sessionId)}（当前）`), Number.isFinite(time) && h('time', { dateTime: new Date(time).toISOString() }, new Date(time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))),
-      h('div', { className: 'kode-relay-source' }, relay.replyTo ? '回复了这段对话' : '发来一条消息'),
-      h('p', { className: 'kode-relay-preview', style: relay.content.length <= 180 && relay.content.split('\n').length <= 3 ? { WebkitLineClamp: 'unset' } : undefined }, relay.content),
-      (relay.content.length > 180 || relay.content.split('\n').length > 3) && h('details', null, h('summary', null, '展开完整消息'), h('p', { className: 'kode-relay-body' }, relay.content)),
+      h(RelayToggle, { from: { name: sender, title: sender }, to: currentEnd(nameOf(undefined, sessionId)), title: relayTitle(relay), open, onToggle: () => setOpen(!open) }),
+      open && h('div', { className: 'kode-relay-detail' }, h('p', { className: 'kode-panel-meta' }, relay.replyTo ? '回复了这段对话' : '发来一条消息', Number.isFinite(time) && ' · ', Number.isFinite(time) && h('time', { dateTime: new Date(time).toISOString() }, new Date(time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))), h('p', { className: 'kode-relay-body' }, relay.content)),
     )
   }
   function HistoricalRelay({ sessions, ...props }) {
@@ -3216,22 +3267,77 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       return hasPanel ? null : h(Component, props)
     }
   }
-  function SessionPanelRow({ icon, label, detail, trailing, actionLabel, onClick, expanded, href }) {
+  // `hint` names what the leading icon shows: a tooltip for pointers and hidden text for screen readers.
+  function SessionPanelRow({ icon, label, hint, detail, trailing, actionLabel, onClick, expanded, href, compact, tone }) {
     const body = [
-      h('span', { key: 'icon', 'data-row-part': 'icon', 'aria-hidden': true }, icon),
+      h('span', { key: 'icon', 'data-row-part': 'icon', 'aria-hidden': true, title: hint }, icon),
       h('span', { key: 'label', 'data-row-part': 'lines' },
         h('span', { 'data-row-part': 'content', title: label }, label),
+        hint && h('span', { className: 'kode-sr-only' }, `，${hint}`),
         detail && h('span', { 'data-row-part': 'detail', title: detail }, detail)),
     ]
-    return h('div', { 'data-session-panel-row': '', 'data-kode-panel-row': '' },
+    return h('div', { 'data-session-panel-row': '', 'data-kode-panel-row': '', 'data-kode-compact': compact ? '' : undefined, 'data-kode-tone': tone },
       href ? h('a', { 'data-row-part': 'body', className: 'kode-panel-link', href, target: '_blank', rel: 'noopener noreferrer', 'aria-label': actionLabel }, body) :
         onClick ? h('button', { type: 'button', 'data-row-part': 'body', 'aria-label': actionLabel, 'aria-expanded': expanded, onClick }, body) :
           h('span', { 'data-row-part': 'body' }, body),
       trailing && h('span', { 'data-row-part': 'trailing' }, trailing))
   }
+  function SessionGitLocation({ git }) {
+    if (!git?.root || !['primary', 'worktree'].includes(git.kind)) return null
+    const branch = git.branch || (git.commit ? `游离 HEAD · ${git.commit.slice(0, 8)}` : '游离 HEAD')
+    const kind = git.kind === 'worktree' ? '独立 worktree' : '主工作区'
+    return h('div', { className: 'kode-environment-git', role: 'group', 'aria-label': 'Git 工作位置' },
+      h(IconBranchOutlineRegular, { size: 14, 'aria-hidden': true }),
+      h('div', { className: 'kode-environment-ref' },
+        h(Tooltip, { label: git.branch ? `当前分支：${git.branch}` : git.commit || branch, side: 'left', delayMs: 400, portal: true },
+          h('code', { tabIndex: 0 }, branch)),
+        h('span', { title: git.root, className: 'kode-environment-kind' }, kind)))
+  }
+  function SessionProjectLocation({ native, ...props }) {
+    const { sessionId, useProjection, useSessions } = props
+    const current = useProjection('workingDirectory'), created = useSessions(snapshot => snapshot.byId[sessionId]?.cwd)
+    const cwd = current ?? created
+    const running = useSessions(snapshot => snapshot.byId[sessionId]?.running === true)
+    const host = useSyncExternalStore(
+      useCallback(listener => transport?.subscribe(listener) ?? (() => {}), []),
+      useCallback(() => transport?.current ?? 'local', []))
+    const key = JSON.stringify([host, sessionId, cwd]), [snapshot, setSnapshot] = useState(null)
+    useEffect(() => {
+      if (!sessionId) return
+      const lifetime = new AbortController()
+      let loading = false
+      const refresh = async () => {
+        if (document.visibilityState === 'hidden' || loading) return
+        loading = true
+        try {
+          const query = new URLSearchParams({ sessionId })
+          const response = await fetchHost(`/api/kode/session-environment?${query}`, {
+            credentials: 'same-origin', cache: 'no-store',
+            signal: AbortSignal.any([lifetime.signal, AbortSignal.timeout(6000)]),
+          }, host)
+          const value = response.ok ? await response.json() : null
+          if (!lifetime.signal.aborted) setSnapshot({ key, git: value?.git })
+        } catch {
+          if (!lifetime.signal.aborted) setSnapshot({ key, git: null })
+        } finally { loading = false }
+      }
+      void refresh()
+      window.addEventListener('focus', refresh)
+      document.addEventListener('visibilitychange', refresh)
+      return () => {
+        lifetime.abort()
+        window.removeEventListener('focus', refresh)
+        document.removeEventListener('visibilitychange', refresh)
+      }
+    }, [key, host, sessionId, running])
+    const git = snapshot?.key === key ? snapshot.git : null
+    return h('div', { className: 'kode-environment-project', 'data-git': git ? git.kind : undefined },
+      git && h(SessionGitLocation, { git }),
+      h(native, props))
+  }
   function PanelList({ rows, renderFactorySlot, renderRow }) {
     const [expanded, setExpanded] = useState(false)
-    const limit = 4, foldable = rows.length > limit
+    const limit = 3, foldable = rows.length > limit
     const label = expanded ? '收起' : `显示另外 ${rows.length - limit} 项`
     return h(React.Fragment, null,
       (expanded ? rows : rows.slice(0, limit)).map(renderRow),
@@ -3242,7 +3348,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     return h(PanelList, { rows, renderFactorySlot, renderRow: row => {
       const expanded = selected === row.id
       return h(React.Fragment, { key: row.id },
-        h(SessionPanelRow, { ...rowProps(row), expanded, onClick: () => setSelected(expanded ? null : row.id) }),
+        h(SessionPanelRow, { ...rowProps(row), compact: true, expanded, onClick: () => setSelected(expanded ? null : row.id) }),
         expanded && h('div', { className: 'kode-panel-detail' }, content(row)))
     } })
   }
@@ -3253,24 +3359,47 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     const rank = { awaiting: 0, running: 1 }
     const rows = Object.values(state).reverse().sort((a, b) => (rank[a.status] ?? 2) - (rank[b.status] ?? 2))
     return h(DisclosurePanelRows, { key: cardKey(sessionId), rows, renderFactorySlot,
-      rowProps: child => ({ label: childTitle(child), detail: [childStatusLabel(child), child.model].filter(Boolean).join(' · '), icon: childStateDot(child),
+      rowProps: child => ({ label: childTitle(child), hint: childStatusLabel(child), detail: child.model, icon: childStateDot(child),
         trailing: h(IconChevronDownOutlineRegular, { size: 14, 'aria-hidden': true }) }),
       content: child => h(React.Fragment, null,
+        h('p', { className: 'kode-panel-meta' }, [childStatusLabel(child), child.model].filter(Boolean).join(' · ')),
         child.task && h('p', null, child.task),
         child.output ? h('pre', null, child.output) : h('p', null, '暂无输出记录。')),
     })
+  }
+  // The projection's answered flag wins; otherwise only a received relay that names a sent request in its reply-to answers it. Delivery receipts never do.
+  const relayKinds = {
+    waiting: { label: '等待对方回复', icon: IconClockOutlineRegular, tone: 'waiting' },
+    answered: { label: '已收到回复', icon: IconCheckOutlineRegular, tone: 'answered' },
+    replied: { label: '已回复对方', icon: IconPaperPlaneOutlineRegular },
+    reply: { label: '收到对方回复', icon: IconPaperPlaneOutlineRegular, inbound: true },
+    incoming: { label: '收到消息', icon: IconPaperPlaneOutlineRegular, inbound: true },
+  }
+  function relayKind(row, rows) {
+    if (row.direction !== 'sent') return row.reply ? 'reply' : 'incoming'
+    if (row.reply) return 'replied'
+    if (row.answered === true) return 'answered'
+    return rows.some(other => other.direction === 'received' && other.replyTo === row.id && other.nodeId === row.nodeId && other.sessionId === row.sessionId) ? 'answered' : 'waiting'
+  }
+  // Untitled history gets a generic label so a collapsed card never leaks message content.
+  function relayTitle(row) {
+    return row.title?.trim() || (row.reply || row.replyTo ? '会话回复' : '会话消息')
   }
   function CommunicationRows({ sessionId, sessions, messages, renderFactorySlot }) {
     const nameOf = useNames(sessions)
     return h(DisclosurePanelRows, { key: cardKey(sessionId), rows: messages.toReversed(), renderFactorySlot,
       rowProps: row => {
-        const sent = row.direction === 'sent', status = deliveryStatusLabels[row.status]
-        const direction = sent ? (row.reply ? '回复给' : '发往') : (row.reply ? '收到回复' : '收自')
-        return { icon: h(IconPaperPlaneOutlineRegular, { size: 16 }), label: row.content.trim().split('\n', 1)[0] || '会话消息',
-          detail: [`${direction} · ${nameOf(row.nodeId, row.sessionId)}`, sent && status ? `发送时${status}` : null].filter(Boolean).join(' · '),
+        const kind = relayKinds[relayKind(row, messages)]
+        return { icon: h('span', { className: 'kode-relay-icon', 'data-inbound': kind.inbound ? '' : undefined }, h(kind.icon, { size: 16 })),
+          label: relayTitle(row), hint: kind.label, tone: kind.tone,
           trailing: h(IconChevronDownOutlineRegular, { size: 14, 'aria-hidden': true }) }
       },
-      content: row => h('p', null, row.content),
+      content: row => {
+        const kind = relayKinds[relayKind(row, messages)], status = row.direction === 'sent' && deliveryStatusLabels[row.status]
+        return h(React.Fragment, null,
+          h('p', { className: 'kode-panel-meta' }, [kind.label, `${row.direction === 'sent' ? '发往' : '来自'} ${nameOf(row.nodeId, row.sessionId)}`, status && `发送时${status}`].filter(Boolean).join(' · ')),
+          h('p', null, row.content))
+      },
     })
   }
   function KodeCommunication(props) {
@@ -3282,7 +3411,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     const tracked = new Set((nativeChanges ?? []).map(entry => entry.url?.split(/[?#]/)[0].replace(/\/$/, '')))
     const rows = reviews?.filter(row => /^https?:\/\//i.test(row.url) && !tracked.has(row.url)).toReversed()
     return rows?.length ? h(PanelList, { key: cardKey(sessionId), rows, renderFactorySlot,
-      renderRow: row => h(SessionPanelRow, { key: row.url, href: row.url, icon: h(IconBranchOutlineRegular, { size: 16 }),
+      renderRow: row => h(SessionPanelRow, { key: row.url, href: row.url, compact: true, icon: h(IconBranchOutlineRegular, { size: 16 }),
         label: `${row.kind} #${row.number}`, detail: row.repo, actionLabel: `打开 ${row.repo} 的 ${row.kind} #${row.number}`,
         trailing: h(IconChevronRightOutlineRegular, { size: 14, 'aria-hidden': true }) }),
     }) : null
@@ -3298,10 +3427,11 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     const session = sessionId => ({ sessionId, sessions: ctx.sessions, slots: ctx.slots })
     ctx.slots.inject(CARD_ENVIRONMENT, function* () {
       yield ctx.slots.register({ name: CARD_ENVIRONMENT, id: 'kode-agent-profile', order: -10, inject: session }, props => h(AgentIdentity, { ...props, panel: true }))
-      yield ctx.slots.register({ name: CARD_ENVIRONMENT, id: 'kode-agent-handoff', order: 50, inject: session }, props => h(HandoffAction, { ...props, panel: true }))
     })
+    wrapSlot(ctx, CARD_ENVIRONMENT, entry => entry.options.id === 'project',
+      native => props => h(SessionProjectLocation, { ...props, native }))
     ctx.slots.inject(CARD_SECTIONS, function* () {
-      yield ctx.slots.register({ name: CARD_SECTIONS, id: 'kode-review-links', order: 100, label: () => 'PR / MR', inject: session },
+      yield ctx.slots.register({ name: CARD_SECTIONS, id: 'kode-review-links', order: 100, label: () => '代码评审', inject: session },
         props => h(FallbackPanelSection, { ...props, nativeId: 'change-requests', component: SessionReviewLinks }))
       yield ctx.slots.register({ name: CARD_SECTIONS, id: 'kode-child-agents', order: 200, label: () => '子 Agent', inject: session },
         props => h(FallbackPanelSection, { ...props, nativeId: 'subagents', component: NativeSubagentRows }))
@@ -3439,11 +3569,17 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     try { result = JSON.parse(raw) } catch {}
     const title = { kode_sessions_list: '查找会话', kode_sessions_create: '创建协作会话', kode_sessions_send: args?.text('in_reply_to') ? '回复会话' : '发送会话消息', kode_sessions_read: '读取会话消息', kode_sessions_wait: '等待会话回复' }[toolName]
     const status = block.isError ? '调用失败' : phase !== 'result' ? '进行中' : result?.message ? `发送时：${deliveryStatusLabels[result.message.status] ?? result.message.status}` : result?.timed_out ? '暂未收到新消息' : '已返回'
+    if (toolName === 'kode_sessions_send' && target) {
+      const peer = nameOf(args?.text('node_id'), args?.text('session_id'))
+      return h('section', { className: 'kode-relay', 'aria-label': title, 'data-open': open ? '' : undefined },
+        h(RelayToggle, { from: currentEnd(nameOf(undefined, sessionId)), to: { name: peer, title: peer }, title: relayTitle({ title: args?.text('title') ?? result?.message?.title ?? relayTitlePrefix(content).title, replyTo: args?.text('in_reply_to') }), open, onToggle: () => setOpen(!open), outbound: true, failed: block.isError }),
+        open && h('div', { className: 'kode-relay-detail' }, h('p', { className: 'kode-panel-meta' }, `${title} · `, h('span', { className: block.isError ? 'kode-error' : undefined }, status)), content && h('p', { className: 'kode-relay-body' }, relayTitlePrefix(content).content), h('p', { className: 'kode-config-note' }, '投递状态不代表目标任务已完成。'), block.isError && h(Failure, { text: '通信未成功，可在轨迹中查看原因。' })),
+      )
+    }
     return h('section', { className: 'kode-message-tool' }, h('button', { type: 'button', className: 'kode-tool-heading', onClick: () => setOpen(!open), 'aria-expanded': open }, h(IconPaperPlaneOutlineRegular, { size: 14 }), h('span', null, title), h('span', { className: block.isError ? 'kode-error' : 'kode-secondary' }, status), h(IconChevronDownOutlineRegular, { size: 12 })),
       target && h('div', { className: 'kode-tool-target' }, `${nameOf(undefined, sessionId)}（当前） → `, nameOf(args?.text('node_id'), args?.text('session_id'))),
       toolName === 'kode_sessions_create' && h('div', { className: 'kode-tool-target' }, `新会话：${result?.title ?? args?.text('title') ?? '协作助手'}${args?.text('host') ? ` · ${args.text('host')}` : ''}`),
-      content && h('p', { className: 'kode-relay-preview' }, content),
-      open && h('div', { className: 'kode-tool-detail' }, content && h('p', { className: 'kode-relay-body' }, content), toolName === 'kode_sessions_send' && h('p', { className: 'kode-config-note' }, '投递状态不代表目标任务已完成。'), block.isError && h(Failure, { text: '通信未成功，可在轨迹中查看原因。' }), Array.isArray(result?.sessions) && h('ul', null, ...result.sessions.map(s => h('li', { key: `${s.address.node_id}/${s.address.session_id}` }, nameOf(s.address.node_id, s.address.session_id)))), Array.isArray(result?.events) && h('div', null, ...result.events.map((event, index) => h('p', { key: index }, event.message?.content ?? event.content ?? '收到一条投递状态更新')))),
+      open && h('div', { className: 'kode-tool-detail' }, block.isError && h(Failure, { text: '通信未成功，可在轨迹中查看原因。' }), Array.isArray(result?.sessions) && h('ul', null, ...result.sessions.map(s => h('li', { key: `${s.address.node_id}/${s.address.session_id}` }, nameOf(s.address.node_id, s.address.session_id)))), Array.isArray(result?.events) && h('div', null, ...result.events.map((event, index) => h('p', { key: index }, event.message?.content ?? event.content ?? '收到一条投递状态更新')))),
     )
   }
 
@@ -3594,14 +3730,50 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
 .kode-conversation-loading{display:flex;align-items:center;justify-content:center;gap:8px;color:var(--dsw-alias-label-secondary);font-size:13px}
 .kode-conversation-loading>svg{animation:kode-loading-spin 850ms linear infinite}
 @keyframes kode-loading-spin{to{transform:rotate(360deg)}}
-@media(prefers-reduced-motion:reduce){.kode-conversation-loading>svg{animation:none}}
+@media(prefers-reduced-motion:reduce){.kode-conversation-loading>svg{animation:none}.kode-relay-toggle>svg,.kode-tool-heading>svg{transition:none}}
 .kode-panel-link{color:inherit;text-decoration:none}
 @media(hover:hover){[data-session-panel-row]:has(>.kode-panel-link):hover{background:var(--dsw-alias-interactive-bg-hover)}}
 .kode-panel-link:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px;border-radius:var(--dsw-radius-sm)}
 [data-kode-panel-row]:has(>button[aria-expanded=true])>[data-row-part=trailing]{transform:rotate(180deg)}
-.kode-panel-detail{display:grid;gap:6px;padding:4px 6px 8px 30px;color:var(--dsw-alias-label-secondary);font:var(--dsw-font-xxs-12)}
+/* Kode's own card lists keep one line per item: the detail trails the title and the disclosure still shows everything. */
+[data-kode-panel-row][data-kode-compact] [data-row-part=lines]{flex-direction:row;align-items:baseline;gap:6px}
+[data-kode-panel-row][data-kode-compact] [data-row-part=content]{flex:0 1 auto}
+[data-kode-panel-row][data-kode-compact] [data-row-part=content]{min-width:2em}
+.kode-sr-only{position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.kode-relay-icon{display:inline-flex;color:var(--dsw-alias-label-secondary)}
+.kode-relay-icon[data-inbound]>svg{transform:scaleX(-1)}
+[data-kode-tone=waiting] .kode-relay-icon{color:#d29922}
+[data-kode-tone=answered] .kode-relay-icon{color:#3fae7a}
+.kode-panel-meta{color:var(--dsw-alias-label-tertiary)}
+[data-kode-panel-row][data-kode-compact] [data-row-part=detail]{flex:1 1 0;min-width:0}
+.kode-panel-detail{display:grid;gap:6px;padding:2px 8px 8px 32px;color:var(--dsw-alias-label-secondary);font:var(--dsw-font-xxs-12);min-width:0}
+[data-kode-panel-row] [data-row-part=icon]:has(>.kode-agent-avatar){width:auto;height:auto;flex:none}
+[data-kode-panel-row] .kode-agent-avatar{position:relative;overflow:visible}
+[data-kode-panel-row] .kode-agent-avatar img{border-radius:6px}
+[data-kode-panel-row] [data-row-part=lines]{min-width:0}
+[data-kode-panel-row] [data-row-part=content],[data-kode-panel-row] [data-row-part=detail]{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kode-session-identity{display:grid;min-width:0;padding:4px 0 8px;border-bottom:.5px solid var(--dsw-alias-border-l2);margin-bottom:2px}
+.kode-environment-identity{display:flex;align-items:center;gap:4px;min-width:0;container-type:inline-size}
+.kode-environment-identity>[data-kode-panel-row]{flex:1;min-width:0}
+.kode-environment-identity [data-row-part=content]{font-weight:600}
+.kode-environment-handoff{flex:none}
+@container(max-width:256px){.kode-environment-handoff-label{display:none}}
+.kode-environment-project{min-width:0;margin-top:4px}
+.kode-environment-project[data-git]{display:grid;gap:0}
+.kode-environment-project[data-git] [data-session-panel-project] [data-row-part=content]{font-size:12px;color:var(--dsw-alias-label-secondary)}
+.kode-environment-git{display:grid;grid-template-columns:16px minmax(0,1fr);align-items:center;gap:8px;min-height:28px;padding:2px 6px;box-sizing:border-box;border-radius:var(--dsw-radius-sm);color:var(--dsw-alias-label-secondary)}
+@media(hover:hover){.kode-environment-git:hover{background:var(--dsw-alias-interactive-bg-hover)}}
+.kode-environment-git:has(code:focus-visible){outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:-2px}
+.kode-environment-git>svg{margin:0 auto}
+.kode-environment-ref{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 8px;min-width:0}
+.kode-environment-ref code{display:block;flex:1 1 10ch;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-primary);font-family:ui-monospace,SFMono-Regular,monospace;font-size:12px;line-height:18px}
+.kode-environment-ref code:focus-visible{outline:none}
+.kode-environment-kind{padding:0 4px;border-radius:4px;background:var(--dsw-alias-interactive-bg-hover);font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary);white-space:nowrap}
+.kode-environment-project[data-git=worktree] .kode-environment-kind{background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 13%,transparent);color:var(--dsw-alias-label-primary)}
+
 .kode-panel-detail p,.kode-panel-detail pre{margin:0;max-block-size:12rem;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}
 .kode-panel-detail pre{padding:8px;background:var(--dsw-alias-bg-layer-2);border-radius:var(--dsw-radius-sm)}
+@media(max-width:520px){.kode-panel-detail{padding-inline-start:8px}.kode-panel-detail p,.kode-panel-detail pre{max-block-size:8rem}}
 .kode-subagent-trigger{gap:5px;padding-inline:6px;font-variant-numeric:tabular-nums}
 .kode-subagent-menu-item{display:flex;flex-direction:column;gap:2px;min-width:0;max-width:220px}
 .kode-subagent-menu-item>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -3618,12 +3790,20 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
 .kode-remote-computer{display:inline-block;flex-shrink:0;background:currentColor;mask-size:contain;mask-repeat:no-repeat;mask-position:center;-webkit-mask-size:contain;-webkit-mask-repeat:no-repeat;-webkit-mask-position:center}.kode-project-dialog{width:min(580px,calc(100vw - 32px))}.kode-project-source{padding:20px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);display:flex;flex-wrap:wrap;justify-content:center;gap:12px}.kode-project-source>.kode-field{width:100%;margin-bottom:8px}.kode-project-path{width:100%;overflow-wrap:anywhere;text-align:center;color:var(--dsw-alias-label-secondary);font-size:13px}.kode-hero-controls{flex-wrap:wrap;column-gap:6px;row-gap:4px}.kode-hero-controls>button,.kode-hero-controls>.kode-mode-control{flex:0 1 auto;min-width:0;max-width:100%;white-space:nowrap}.kode-hero-controls>.kode-mode-control{display:inline-flex}.kode-hero-controls .kode-trigger{max-width:100%;white-space:nowrap;flex-shrink:0}.kode-hero-controls .kode-trigger>svg,.kode-hero-controls .kode-trigger>.kode-hub-settings .kode-agent-row-head{flex-wrap:wrap}.kode-hub-settings h4{margin:16px 0 0}[data-composer-seat]>:has(.kode-goal-bar){row-gap:0}.kode-goal-bar{--kode-goal-state-color:var(--dsw-alias-label-secondary);box-sizing:border-box;width:calc(100% - var(--dsh-composer-side-clearance) - var(--dsh-composer-side-clearance) - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset));max-width:calc(var(--dsh-composer-card-max-width) - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset));margin:0 auto -1px;padding:0 var(--dsh-composer-dock-inset);flex:none;font-size:13px;color:var(--dsw-alias-label-primary)}.kode-goal-panel{display:flex;flex-wrap:wrap;align-items:center;gap:8px;box-sizing:border-box;width:100%;min-height:36px;padding:4px 12px;border:.5px solid var(--dsw-alias-border-l1);border-bottom:none;border-radius:var(--dsw-radius-lg) var(--dsw-radius-lg) 0 0;background:var(--dsw-specific-menu);backdrop-filter:var(--dsw-menu-backdrop-filter)}.kode-goal-status{color:var(--dsw-alias-label-secondary);white-space:nowrap}.kode-goal-objective{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:0;background:transparent;color:inherit;text-align:left;font:inherit;cursor:pointer}.kode-goal-objective:focus-visible{outline:2px solid var(--dsw-focus-ring-color)}.kode-goal-actions{display:flex;align-items:center;gap:4px;flex:none;margin-left:auto}.kode-goal-icon{display:grid;place-items:center;box-sizing:border-box;width:28px;height:28px;padding:0;border:0;border-radius:999px;background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer}.kode-goal-icon:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}.kode-goal-icon:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:-2px}.kode-goal-icon:disabled{cursor:default;opacity:.45}.kode-goal-leading{display:grid;place-items:center;flex:none;color:var(--kode-goal-state-color)}.kode-goal-bar[data-goal-status=active]{--kode-goal-state-color:var(--dsw-alias-state-business-primary)}.kode-goal-bar[data-goal-status=complete]{--kode-goal-state-color:var(--dsw-alias-state-success-primary)}.kode-goal-bar:is([data-goal-status=blocked],[data-goal-status=usageLimited],[data-goal-status=budgetLimited]){--kode-goal-state-color:var(--dsw-alias-state-warning-primary)}.kode-goal-bar[data-goal-status=active] .kode-goal-panel{border-color:color-mix(in srgb,var(--kode-goal-state-color) 35%,var(--dsw-alias-border-l1))}.kode-goal-sidebar{display:flex;flex-direction:column;gap:12px;box-sizing:border-box;height:100%;padding:12px;overflow:auto}.kode-goal-sidebar form{display:flex;flex-direction:column;gap:12px;flex:1;min-height:0}.kode-goal-sidebar .kode-field{flex:1;min-height:0}.kode-goal-sidebar textarea{box-sizing:border-box;width:100%;min-height:180px;flex:1;resize:vertical;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit;line-height:1.6}.kode-goal-sidebar form>button{align-self:flex-end}.kode-goal-bar form{display:flex;flex-wrap:wrap;align-items:end;gap:8px;width:100%}.kode-goal-bar .kode-field{flex:1;min-width:160px}.kode-hub-targets{display:flex;flex-wrap:wrap;gap:12px;border:0;padding:8px 0;margin:0}.kode-hub-targets label{display:flex;align-items:center;gap:4px}.kode-agent-row p{margin:0;overflow-wrap:anywhere}
 .kode-agent-avatar{flex-shrink:0}.kode-hero-controls .kode-trigger>span:not(.kode-agent-avatar){min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-hero-controls>.kode-error{flex-basis:100%;margin:0}.kode-hero-controls .kode-mode-control>.kode-trigger{flex-shrink:1}@media(max-width:600px){.kode-hero-controls{row-gap:4px;column-gap:6px}.kode-hero-controls>button,.kode-hero-controls .kode-trigger{height:auto;min-height:44px;padding-inline:8px}.kode-hero-controls>.kode-agent-trigger{max-width:100%}}
 .kode-host-location{gap:6px;padding:0 8px;white-space:nowrap}.kode-workspace-menu{width:min(400px,calc(100vw - 32px));max-width:calc(100vw - 32px)}.kode-workspace-search{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary)}.kode-workspace-search input{font:inherit;color:var(--dsw-alias-label-primary);background:transparent;border:0;outline:none;min-width:0;width:100%}.kode-workspace-search:focus-within{box-shadow:inset 0 -2px var(--dsw-focus-ring-color)}.kode-workspace-caption{font-size:12px;color:var(--dsw-alias-label-secondary);padding:10px 12px 4px}.kode-workspace-option{display:flex;flex-direction:column;gap:3px;min-width:0;max-width:310px}.kode-workspace-option>span,.kode-workspace-option small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-workspace-option small{font-size:12px;color:var(--dsw-alias-label-secondary)}
-.kode-relay{border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);padding:12px 16px;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary);font-size:13px;min-width:0}.kode-relay-heading{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.kode-relay-heading strong{font-weight:500;overflow-wrap:anywhere;min-width:0;max-width:100%}.kode-relay-heading time{margin-left:auto;font-size:12px;color:var(--dsw-alias-label-secondary)}.kode-relay-source{display:flex;align-items:center;gap:10px;margin-top:8px;color:var(--dsw-alias-label-secondary);font-size:12px;overflow-wrap:anywhere}.kode-relay-preview{margin:8px 0;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}.kode-relay summary{cursor:pointer;color:var(--dsw-alias-label-secondary);font-size:12px;padding:4px 0}.kode-relay-body{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.65;max-height:320px;overflow:auto}[data-step-process-body]{--dsh-chat-flow-gap:2px}[data-step-process-content][data-chat-flow]>:not([hidden]):not(:empty)~:not([hidden]):not(:empty){margin-top:2px}[data-step-process-content] .kode-message-tool{padding-block:0}[data-step-process-content] .kode-tool-heading{padding-block:2px;min-height:26px}[data-chat-running]{padding-block:4px;font-variant-numeric:tabular-nums}[data-chat-running]>[aria-hidden=true]{display:none}
-.kode-message-tool{min-width:0;font-size:13px;padding:4px 0}.kode-tool-heading{display:flex;align-items:center;gap:8px;flex-wrap:wrap;cursor:pointer;background:none;border:0;color:var(--dsw-alias-label-primary);padding:4px 0;font:inherit;text-align:left}.kode-tool-target{font-size:12px;color:var(--dsw-alias-label-secondary);white-space:normal;overflow-wrap:anywhere;line-height:1.6;padding-left:22px}.kode-message-tool>.kode-relay-preview{margin-left:22px;color:var(--dsw-alias-label-secondary)}.kode-tool-detail{padding-left:22px}.kode-relay button:focus-visible,.kode-relay summary:focus-visible,.kode-tool-heading:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}
+.kode-relay{border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);padding:12px 16px;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary);font-size:13px;min-width:0}.kode-relay-heading{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.kode-relay-heading strong{font-weight:500;overflow-wrap:anywhere;min-width:0;max-width:100%}.kode-relay-heading time{margin-left:auto;font-variant-numeric:tabular-nums;font-size:12px;color:var(--dsw-alias-label-secondary)}.kode-relay-source{display:flex;align-items:center;gap:10px;margin-top:8px;color:var(--dsw-alias-label-secondary);font-size:12px;overflow-wrap:anywhere}.kode-relay summary{cursor:pointer;color:var(--dsw-alias-label-secondary);font-size:12px;padding:4px 0}.kode-relay:has(>.kode-relay-toggle){padding:0}.kode-relay-toggle{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;column-gap:8px;row-gap:2px;width:100%;min-width:0;padding:8px 12px;border:0;border-radius:inherit;background:none;color:inherit;font:inherit;text-align:left;cursor:pointer}@media(hover:hover){.kode-relay-toggle:hover{background:var(--dsw-alias-interactive-bg-hover)}}.kode-relay-toggle .kode-relay-heading{flex-wrap:nowrap;min-width:0}.kode-relay-toggle .kode-relay-heading>strong{flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-relay-toggle .kode-relay-heading>*{flex-shrink:0}.kode-relay-toggle .kode-relay-heading>strong{flex-shrink:1}.kode-relay-failed{grid-area:1/2;display:inline-flex}.kode-relay-toggle>svg{grid-area:1/3;color:var(--dsw-alias-label-tertiary);transition:transform 160ms ease}.kode-relay[data-open] .kode-relay-toggle>svg,.kode-message-tool .kode-tool-heading[aria-expanded=true]>svg:last-child{transform:rotate(180deg)}.kode-relay-title{display:block;grid-column:1/-1;margin:0;padding-left:24px;font-weight:600;overflow-wrap:anywhere}.kode-relay-detail{padding:0 12px 10px 36px}.kode-relay-detail>.kode-panel-meta{margin:0 0 4px;font-size:12px}.kode-relay-detail>.kode-relay-body{margin:0}.kode-relay-detail>.kode-config-note{margin:4px 0 0}.kode-tool-target.kode-relay-title{color:var(--dsw-alias-label-primary);font-size:13px}.kode-relay-body{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.65;max-height:320px;overflow:auto}[data-step-process-body]{--dsh-chat-flow-gap:2px}[data-step-process-content][data-chat-flow]>:not([hidden]):not(:empty)~:not([hidden]):not(:empty){margin-top:2px}[data-step-process-content] .kode-message-tool{padding-block:0}[data-step-process-content] .kode-tool-heading{padding-block:2px;min-height:26px}[data-chat-running]{padding-block:4px;font-variant-numeric:tabular-nums}[data-chat-running]>[aria-hidden=true]{display:none}
+.kode-message-tool{min-width:0;font-size:13px;padding:4px 0}.kode-tool-heading{display:flex;align-items:center;gap:8px;flex-wrap:wrap;cursor:pointer;background:none;border:0;color:var(--dsw-alias-label-primary);padding:4px 0;font:inherit;text-align:left}.kode-tool-target{font-size:12px;color:var(--dsw-alias-label-secondary);white-space:normal;overflow-wrap:anywhere;line-height:1.6;padding-left:22px}.kode-tool-detail{padding-left:22px}.kode-relay button:focus-visible,.kode-relay summary:focus-visible,.kode-tool-heading:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}
 .kode-trigger{border-radius:var(--dsw-radius-sm);min-width:0;max-width:240px;height:28px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:transparent;border:0;align-items:center;gap:4px;padding:0 4px 0 8px;font:inherit;font-size:13px;line-height:20px;display:inline-flex}
 .kode-trigger>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kode-trigger svg{flex:none}.kode-trigger:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}.kode-trigger:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:2px}.kode-trigger:disabled{color:var(--dsw-alias-label-dimmed);cursor:default}.kode-agent-trigger{color:var(--dsw-alias-label-primary)}.kode-chevron-open{transform:rotate(180deg)}
 .kode-deployment-progress{height:4px;width:100%;overflow:hidden;border-radius:2px;background:var(--dsw-alias-border-l2)}.kode-deployment-progress>span{display:block;width:100%;height:100%;background:var(--dsw-alias-label-primary);transform-origin:left center;transition:transform 280ms cubic-bezier(.16,1,.3,1)}.kode-deployment-steps{list-style:none;padding:0;margin:20px 0;display:flex;flex-direction:column;gap:12px}.kode-deployment-steps li{display:flex;gap:12px;align-items:flex-start;font-size:13px;line-height:1.5}.kode-deployment-state{display:inline-flex;align-items:center;justify-content:center;flex:0 0 16px;width:16px;height:20px}.kode-deployment-steps li[data-status=pending]{color:var(--dsw-alias-label-tertiary)}.kode-deployment-steps small{display:block;font-size:12px;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}
-.kode-unified-workspaces [data-kode-status-avatar]{position:relative;width:20px;height:20px;flex:0 0 20px}.kode-unified-workspaces [data-kode-status-avatar]>[data-state]{visibility:hidden}.kode-unified-workspaces [data-kode-status-avatar]>[data-state] *{animation:none}.kode-status-avatar-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}.kode-status-avatar-body{display:inline-flex;position:relative;width:20px;height:20px;flex:none}.kode-agent-avatar[data-avatar-state=running]::after,.kode-agent-avatar[data-avatar-state=awaiting]::after,.kode-agent-avatar[data-avatar-state=done]::after{content:"";position:absolute;inset:-2px;border:1.5px solid;border-radius:7px;pointer-events:none;opacity:.85;animation:kode-avatar-status-pulse 2000ms ease-in-out infinite}.kode-agent-avatar[data-avatar-state=running]::after{border-color:#5b8def}.kode-agent-avatar[data-avatar-state=awaiting]::after{border-color:#f0bd55}.kode-agent-avatar[data-avatar-state=done]::after{border-color:#65c799}.kode-agent-avatar[data-avatar-state=running]::before,.kode-agent-avatar[data-avatar-state=awaiting]::before,.kode-agent-avatar[data-avatar-state=done]::before{content:"";position:absolute;right:-1px;bottom:-1px;z-index:2;box-sizing:border-box;width:6px;height:6px;border:1px solid var(--dsw-alias-bg-layer-1,var(--dsw-alias-bg-base));border-radius:50%;animation:kode-avatar-status-pulse 2000ms ease-in-out infinite}.kode-agent-avatar[data-avatar-state=running]::before{background:#5b8def}.kode-agent-avatar[data-avatar-state=awaiting]::before{background:#f0bd55}.kode-agent-avatar[data-avatar-state=done]::before{background:#65c799}.kode-status-avatar-body::after{content:"";position:absolute;inset:-2px;border:1.5px solid;border-radius:7px;pointer-events:none;opacity:.85}.kode-status-avatar-body[data-status=ongoing]::after,.kode-status-avatar-body[data-status=awaiting]::after{display:none}.kode-status-avatar-body[data-status=done]::after{border-color:#65c799;opacity:.8;animation:kode-avatar-status-pulse 2000ms ease-in-out infinite}.kode-motion-paused .kode-status-avatar-body::after{animation-play-state:paused}@keyframes kode-avatar-status-pulse{0%,100%{opacity:.85;transform:scale(1)}50%{opacity:.45;transform:scale(1.04)}}.kode-unified-workspaces [data-kode-workspace-status]{position:relative}.kode-workspace-status{position:absolute;right:-3px;bottom:-2px;z-index:2;box-sizing:border-box;width:10px;height:10px;border:2px solid var(--dsw-alias-bg-layer-1,var(--dsw-alias-bg-base));border-radius:50%}.kode-workspace-status[data-status=ongoing]{background:#5b8def;animation:kode-workspace-status-pulse 2000ms ease-in-out infinite}.kode-workspace-status[data-status=awaiting]{background:#f0bd55;animation:kode-workspace-status-pulse 2000ms ease-in-out infinite}.kode-workspace-status[data-status=done]{background:#65c799;opacity:.85;animation:kode-workspace-status-pulse 2000ms ease-in-out infinite}.kode-motion-paused .kode-workspace-status{animation-play-state:paused}@keyframes kode-workspace-status-pulse{0%,100%{opacity:1}50%{opacity:.55}}@media(prefers-reduced-motion:reduce){.kode-status-avatar-body::after,.kode-workspace-status,.kode-agent-avatar[data-avatar-state=running]::after,.kode-agent-avatar[data-avatar-state=running]::before,.kode-agent-avatar[data-avatar-state=awaiting]::after,.kode-agent-avatar[data-avatar-state=awaiting]::before,.kode-agent-avatar[data-avatar-state=done]::after,.kode-agent-avatar[data-avatar-state=done]::before{animation:none;opacity:.85}}
+.kode-unified-workspaces [data-kode-status-avatar]{position:relative;width:20px;height:20px;flex:0 0 20px}.kode-unified-workspaces [data-kode-status-avatar]>[data-state]{visibility:hidden}.kode-unified-workspaces [data-kode-status-avatar]>[data-state] *{animation:none}.kode-status-avatar-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}.kode-status-avatar-body{display:inline-flex;position:relative;width:20px;height:20px;flex:none}/* Session state rides the avatar's own outline: it follows the artwork's radius, never covers it, and each state has its own stroke so color is not the only cue. */
+.kode-agent-avatar[data-avatar-state=running],.kode-agent-avatar[data-avatar-state=awaiting],.kode-agent-avatar[data-avatar-state=done]{outline:2px solid var(--kode-avatar-ring);outline-offset:2px}
+.kode-agent-avatar[data-avatar-state=running]{--kode-avatar-ring:#3b82f6;animation:kode-avatar-ring-breathe 1800ms ease-in-out infinite}
+.kode-agent-avatar[data-avatar-state=awaiting]{--kode-avatar-ring:#e5a72e;outline-style:dashed}
+.kode-agent-avatar[data-avatar-state=done]{--kode-avatar-ring:#3fae7a;outline-width:3px;outline-style:double;outline-offset:1px}
+@keyframes kode-avatar-ring-breathe{0%,100%{outline-offset:2px}50%{outline-offset:3.5px}}
+.kode-status-avatar-body::after{content:none}
+.kode-motion-paused .kode-agent-avatar{animation-play-state:paused}
+.kode-unified-workspaces [data-kode-workspace-status]{position:relative}.kode-workspace-status{position:absolute;right:-3px;bottom:-2px;z-index:2;box-sizing:border-box;width:10px;height:10px;border:2px solid var(--dsw-alias-bg-layer-1,var(--dsw-alias-bg-base));border-radius:50%}.kode-workspace-status[data-status=ongoing]{background:#3b82f6;animation:kode-workspace-status-pulse 2000ms ease-in-out infinite}.kode-workspace-status[data-status=awaiting]{background:#f0bd55;animation:kode-workspace-status-pulse 2000ms ease-in-out infinite}.kode-workspace-status[data-status=done]{background:#65c799;opacity:.85;animation:kode-workspace-status-pulse 2000ms ease-in-out infinite}.kode-motion-paused .kode-workspace-status{animation-play-state:paused}@keyframes kode-workspace-status-pulse{0%,100%{opacity:1}50%{opacity:.55}}@media(prefers-reduced-motion:reduce){.kode-workspace-status,.kode-agent-avatar[data-avatar-state]{animation:none}.kode-workspace-status{opacity:.85}}
 .kode-tool-action{flex:none;white-space:nowrap}.kode-tool-heading{width:100%;min-width:0;color:var(--dsw-alias-label-secondary);font-size:12px}.kode-tool-heading>svg{flex:none}.kode-tool-terminal{--dsh-content-font-size-secondary:12px;--dsh-content-font-delta-secondary:0px;font-size:12px}.kode-tool-terminal pre,.kode-tool-terminal code{font-size:12px;line-height:1.5}
 .kode-tool-summary{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;font-size:12px;color:var(--dsw-alias-label-secondary)}
 .kode-status-dot{display:block;flex:none}.kode-deployment-steps li[data-status=running]>div>span{font-weight:500}.kode-deployment-steps li[data-status=done] .kode-deployment-state{animation:kode-step-complete 220ms cubic-bezier(.16,1,.3,1)}.kode-motion-paused .kode-status-dot *{animation-play-state:paused}@keyframes kode-step-complete{from{opacity:.35;transform:scale(.75)}to{opacity:1;transform:scale(1)}}
@@ -3685,9 +3865,13 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
 .kode-settings-card>.kode-integration-row+.kode-integration-row{border-top:.5px solid var(--dsw-alias-border-l2)}
 .kode-settings-card>.kode-config-note{margin:0 0 14px}
 .kode-settings-card>.kode-config-note:only-child{margin:14px 0}
-.kode-session-naming{display:grid;gap:12px;padding:14px 0;border-top:.5px solid var(--dsw-alias-border-l2)}
+.kode-messaging-settings{border-bottom:.5px solid var(--dsw-alias-border-l2)}
+.kode-messaging-settings>.kode-integration-row{border:0}
+.kode-session-naming{display:grid;gap:8px;padding:0 0 14px;min-width:0}
 .kode-session-naming>.kode-field,.kode-session-naming .kode-config-note{margin:0}
-.kode-session-naming>.kode-field strong{font-size:14px;font-weight:500}
+.kode-session-naming strong{font-size:14px;font-weight:500}
+.kode-service-recovery .kode-service-hint{margin:8px 0 0;max-width:48ch}
+.kode-service-recovery>[role=status]{margin:8px 0 0}
 .kode-session-naming textarea{resize:vertical}
 .kode-session-naming-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:8px}
 .kode-settings-page .kode-notification-permission{font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary);flex-wrap:wrap;gap:8px 20px}
@@ -3766,13 +3950,14 @@ html[data-kode-embed] .kode-token-notch{display:none}
       if (!scope.layout?.selectPanel) return
       const KodeMainPage = () => h('div', { className: 'kode-settings-main' }, h(KodeSettings, { sessions: scope.sessions, slots: scope.slots, close: () => {} }))
       scope.slots.inject('main', () => scope.slots.register({ name: 'main', key: 'kode-settings' }, KodeMainPage))
-      // Kode's own entries (settings, back to terminals, resume) sit in the
-      // sidebar's More menu; the list keeps conversations and bots in front.
-      const KodeMoreItems = ({ onDismiss }) => h(React.Fragment, null,
-        h(MenuItemButton, { icon: h(IconAgentPresetOutlineRegular, { size: 16 }), onSelect: () => { onDismiss?.(); scope.layout.selectPanel('kode-settings') } }, 'Kode 设置'),
-        kodeEmbedded() && h(MenuItemButton, { icon: glyph(TERMINAL_GLYPH), onSelect: () => { onDismiss?.(); scope.layout.selectPanel('kode-leave') } }, 'Kode 终端'),
-        kodeEmbedded() && h(MenuItemButton, { icon: glyph(HISTORY_GLYPH), onSelect: () => { onDismiss?.(); scope.layout.selectPanel('kode-resume') } }, '恢复会话'))
-      scope.slots.inject('sidebar.panellist.actions', () => scope.slots.register({ name: 'sidebar.panellist.actions', id: 'kode-entries', order: -10 }, KodeMoreItems))
+      // Native panels can be pinned or moved to More using the sidebar's controls.
+      scope.slots.inject('sidebar.panellist', () => scope.slots.register({ name: 'sidebar.panellist', id: 'kode-settings', order: 6, label: 'Kode 设置' }, IconAgentPresetOutlineRegular))
+      if (kodeEmbedded()) {
+        const KodeMoreItems = ({ onDismiss }) => h(React.Fragment, null,
+          h(MenuItemButton, { icon: glyph(TERMINAL_GLYPH), onSelect: () => { onDismiss?.(); scope.layout.selectPanel('kode-leave') } }, 'Kode 终端'),
+          h(MenuItemButton, { icon: glyph(HISTORY_GLYPH), onSelect: () => { onDismiss?.(); scope.layout.selectPanel('kode-resume') } }, '恢复会话'))
+        scope.slots.inject('sidebar.panellist.actions', () => scope.slots.register({ name: 'sidebar.panellist.actions', id: 'kode-entries', order: -10 }, KodeMoreItems))
+      }
       scope.slots.inject('main', () => scope.slots.register({ name: 'main', key: 'kode-bots' }, () => h(KodeBotsPage, { ui: () => scope.get('uiWorkspace') })))
       const openBotSession = async id => { scope.layout.selectPanel(null); await scope.get('uiWorkspace')?.openSession(id) }
       scope.slots.inject('sidebar.panellist.trailing', () => scope.slots.register({ name: 'sidebar.panellist.trailing', id: 'schedules' }, () => h('span', { className: 'kode-schedules-marker', hidden: true })))

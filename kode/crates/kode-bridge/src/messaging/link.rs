@@ -233,14 +233,22 @@ fn requested_version(headers: &HeaderMap) -> Result<u32> {
 }
 const CANCEL_FEATURE: &str = "input_cancellation_v1";
 const DELIVERY_FEATURE: &str = "delivery_observations_v1";
+const MESSAGE_TITLE_FEATURE: &str = "message_title_v1";
 #[derive(Default)]
 struct DeliveryLink {
     enabled: bool,
     sent_through: u64,
     cancel_enabled: bool,
     cancel_after: String,
+    message_titles: bool,
 }
 impl DeliveryLink {
+    fn negotiate(&mut self, features: &[String]) {
+        self.enabled = features.iter().any(|feature| feature == DELIVERY_FEATURE);
+        self.cancel_enabled = features.iter().any(|feature| feature == CANCEL_FEATURE);
+        self.message_titles = features.iter().any(|feature| feature == MESSAGE_TITLE_FEATURE);
+    }
+
     fn frames(
         &mut self,
         hub: &Hub,
@@ -248,6 +256,13 @@ impl DeliveryLink {
         sent: &mut HashMap<String, Status>,
     ) -> Result<Vec<Frame>> {
         let mut frames = frames(hub, peer, sent)?;
+        if !self.message_titles {
+            for frame in &mut frames {
+                if let Frame::Message { message } = frame {
+                    message.title = None;
+                }
+            }
+        }
         if self.enabled {
             let entries = hub.store.delivery_batch(peer)?;
             if let Some(last) = entries.last() {
@@ -273,7 +288,7 @@ impl DeliveryLink {
 }
 fn capabilities() -> Frame {
     Frame::Capabilities {
-        features: vec![DELIVERY_FEATURE.into(), CANCEL_FEATURE.into()],
+        features: vec![DELIVERY_FEATURE.into(), CANCEL_FEATURE.into(), MESSAGE_TITLE_FEATURE.into()],
     }
 }
 fn check_capabilities(text: &str) -> Result<Vec<String>> {
@@ -369,9 +384,7 @@ async fn serve(
         let AxMessage::Text(text) = frame else {
             bail!("expected capabilities")
         };
-        let features = check_capabilities(&text)?;
-        delivery.enabled = features.iter().any(|f| f == DELIVERY_FEATURE);
-        delivery.cancel_enabled = features.iter().any(|f| f == CANCEL_FEATURE);
+        delivery.negotiate(&check_capabilities(&text)?);
     }
     hub.remember_cancel_peer(peer, delivery.cancel_enabled)?;
     let mut sent = HashMap::new();
@@ -476,9 +489,7 @@ async fn dial(hub: &Arc<Hub>, peer: &Peer, url: &str) -> Result<()> {
         let TungMessage::Text(text) = frame else {
             bail!("expected capabilities")
         };
-        let features = check_capabilities(&text)?;
-        delivery.enabled = features.iter().any(|f| f == DELIVERY_FEATURE);
-        delivery.cancel_enabled = features.iter().any(|f| f == CANCEL_FEATURE);
+        delivery.negotiate(&check_capabilities(&text)?);
     }
     hub.remember_cancel_peer(&peer.node_id, delivery.cancel_enabled)?;
     let mut sent = HashMap::new();
@@ -552,7 +563,7 @@ mod protocol_tests {
         .is_err());
         assert_eq!(
             check_capabilities(&serde_json::to_string(&capabilities()).unwrap()).unwrap(),
-            [DELIVERY_FEATURE, CANCEL_FEATURE,]
+            [DELIVERY_FEATURE, CANCEL_FEATURE, MESSAGE_TITLE_FEATURE]
         );
     }
     #[tokio::test]
@@ -569,6 +580,7 @@ mod protocol_tests {
                 session_id: "worker".into(),
             },
             content: "fixture".into(),
+            title: None,
             idempotency_key: "receipt-replay".into(),
             in_reply_to: None,
             hop_count: 0,
@@ -691,6 +703,15 @@ mod protocol_tests {
                 owner_token: None,
             })
             .unwrap();
+        let message = hub.send("worker", SendRequest {
+            source: None,
+            target: Address { node_id: "old".into(), session_id: "other".into() },
+            content: "Inspect this fixture".into(),
+            title: Some("Fixture review".into()),
+            idempotency_key: "title-negotiation".into(),
+            in_reply_to: None,
+            ttl_seconds: 300,
+        }).unwrap();
         let expected = json!({"type":"directory","sessions":[{"address":{"node_id":"new","session_id":"worker"},"title":"Fixture","runtime":"dsh","online":true,"updated_at":registered.session.updated_at}]});
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!(
@@ -699,7 +720,7 @@ mod protocol_tests {
         );
         let router = hub.router();
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        for version in [1, 2] {
+        for (version, wants_title) in [(1, false), (2, false), (2, true)] {
             let mut request = url.clone().into_client_request().unwrap();
             request
                 .headers_mut()
@@ -724,13 +745,17 @@ mod protocol_tests {
                 let caps = ws.next().await.unwrap().unwrap().into_text().unwrap();
                 assert_eq!(
                     check_capabilities(&caps).unwrap(),
-                    [DELIVERY_FEATURE, CANCEL_FEATURE,]
+                    [DELIVERY_FEATURE, CANCEL_FEATURE, MESSAGE_TITLE_FEATURE]
                 );
                 assert!(tokio::time::timeout(Duration::from_millis(50), ws.next())
                     .await
                     .is_err());
+                let mut flags = vec![DELIVERY_FEATURE, CANCEL_FEATURE];
+                if wants_title {
+                    flags.push(MESSAGE_TITLE_FEATURE);
+                }
                 ws.send(TungMessage::Text(
-                    serde_json::to_string(&capabilities()).unwrap(),
+                    json!({"type":"capabilities","features":flags}).to_string(),
                 ))
                 .await
                 .unwrap();
@@ -746,6 +771,13 @@ mod protocol_tests {
                 serde_json::from_str::<serde_json::Value>(&data).unwrap(),
                 expected
             );
+            let wire_message = tokio::time::timeout(Duration::from_secs(2), ws.next())
+                .await.unwrap().unwrap().unwrap().into_text().unwrap();
+            let wire_message: serde_json::Value = serde_json::from_str(&wire_message).unwrap();
+            assert_eq!(wire_message["message"]["id"], message.id);
+            assert_eq!(wire_message["message"]["content"], message.content);
+            assert_eq!(wire_message["message"].get("title").and_then(|title| title.as_str()),
+                       if wants_title { message.title.as_deref() } else { None });
             ws.close(None).await.unwrap();
         }
         hub.shutdown();

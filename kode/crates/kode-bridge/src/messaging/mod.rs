@@ -85,6 +85,18 @@ pub struct Hub {
     /// Wakes peer links when a workspace request is queued for them.
     link_wake: tokio::sync::Notify,
 }
+
+fn native_message_body(message: &Message) -> std::borrow::Cow<'_, str> {
+    match &message.title {
+        Some(title) => format!(
+            "[Kode message title: {}]\n{}",
+            serde_json::json!(title),
+            message.content
+        ).into(),
+        None => message.content.as_str().into(),
+    }
+}
+
 impl Hub {
     pub fn open(config: Config, ctx: &Arc<crate::Ctx>) -> Result<Arc<Self>> {
         let home = std::env::var_os("KODE_AGENT_HUB_HOME").map(PathBuf::from).or_else(dirs::home_dir).ok_or_else(||anyhow::anyhow!("Host home unavailable"))?;
@@ -219,6 +231,9 @@ impl Hub {
         {
             bail!("invalid message, idempotency key or ttl")
         }
+        if req.title.as_deref().is_some_and(|title| !valid_message_title(title)) {
+            bail!("message title must be a nonempty single line of at most {MAX_TITLE_CHARS} characters");
+        }
         if !self
             .store
             .sessions()?
@@ -273,6 +288,7 @@ impl Hub {
             },
             target: req.target,
             content: req.content,
+            title: req.title.map(|title| title.trim().to_owned()),
             idempotency_key: req.idempotency_key,
             in_reply_to: req.in_reply_to,
             hop_count,
@@ -297,6 +313,7 @@ impl Hub {
             || !valid_id(&m.idempotency_key)
             || m.content.trim().is_empty()
             || m.content.len() > MAX_CONTENT_BYTES
+            || m.title.as_deref().is_some_and(|title| !valid_message_title(title))
             || m.hop_count > 8
             || m.expires_at.saturating_sub(m.created_at) > 86400 * 1000
         {
@@ -479,7 +496,7 @@ impl Hub {
             if let Some(m) = self.claim(&sid)?.first() {
                 let text = format!(
                     "[Session message {} from {}/{}]\n{}",
-                    m.id, m.source.node_id, m.source.session_id, m.content
+                    m.id, m.source.node_id, m.source.session_id, native_message_body(m)
                 );
                 match crate::submit_text_input(&ctx, id, &text).await {
                     Ok(()) => {
@@ -507,7 +524,7 @@ impl Hub {
             if !ctx.runtimes.available("gui") || crate::pending_interaction(&ctx,id).is_some(){continue}
             let sid=format!("kode:runtime:gui:{id}");
             if let Some(message)=self.claim(&sid)?.first(){
-                let text=format!("[Session message {} from {}/{}]\n{}",message.id,message.source.node_id,message.source.session_id,message.content);
+                let text=format!("[Session message {} from {}/{}]\n{}",message.id,message.source.node_id,message.source.session_id,native_message_body(message));
                 let result=ctx.runtimes.command(id,"input",serde_json::json!({"text":text}),&message.id).await;
                 self.settle(&sid,&message.id,if result.is_ok(){Status::Accepted}else{Status::Uncertain},Some(if result.is_ok(){"submitted to runtime; processing is not confirmed"}else{"runtime submission unconfirmed; do not automatically retry"}.into()))?;
             }

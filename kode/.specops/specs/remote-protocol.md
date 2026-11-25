@@ -660,6 +660,10 @@ archive and unarchive operations retain the original runtime identity.
 
 ### Session 通信的有界模型读取
 
+支持消息标题的 Hub 在 `GET /api/v1/messaging/node` 返回 `message_titles: true`。新客户端的 `kode_sessions_send` 提示 Agent 为请求和回复撰写单行短标题，并将完整描述放入原有 `content`。REST 请求、持久化消息、事件和续读页均可携带可选 `title`，最多 80 个 Unicode 码点。省略标题的旧请求继续有效。重试同一幂等键需使用相同标题。回复以 `in_reply_to` 关联原消息，投递回执不代表已回复。支持标题的 Hub 上，`kode_sessions_create` 用新会话名称作为首条任务消息的标题，按消息长度上限截取。升级前已发送的无标题创建任务继续使用原记录和投递状态。
+
+v2 链路双端通告 `message_title_v1` 时转发标题。v1 或缺少该能力的节点仍接收原正文。接收方跨版本重连时，相同消息 ID 因协商变化遗漏标题会沿用首次持久化的记录及投递状态。历史回放中的 relay 保留原有首行和模型指令，可在正文第一行附加 `[Kode message title: <JSON 字符串>]`，续读偏移仍只统计正文。
+
 现有消息持久化格式和参与者鉴权沿用 `/api/v1/messaging/messages/:id`。
 DSH Host、独立 JavaScript MCP 和桌面 Rust MCP 的 `kode_sessions_read` / `kode_sessions_wait`
 将事件投影为最多 16 条、序列化 JSON 不超过 8192 UTF-8 字节的页面。
@@ -671,6 +675,8 @@ DSH Host、独立 JavaScript MCP 和桌面 Rust MCP 的 `kode_sessions_read` / `
 均以 Unicode 码点计数，`next=null` 表示结束。全文工具只允许消息的发送方和接收方访问。
 自动注入接收会话的 relay 输入也遵循 8192 字节预算，并提供相同续读指令。
 预览不会被当作完整回复已读而移除尚未注入的自动回复。
+
+接收方 DSH Host 默认优先把消息插入正在运行且支持中途插入的原生 Agent。空闲、不支持插入或等待用户操作时按下一轮投递。正在调用 `kode_sessions_wait` 的会话优先由该调用取回回复。原生接口明确拒绝插入时回到队列，结果不确定时不重发。投递继续使用原消息 ID 和持久化输入绑定，各节点无需新增协议字段。
 
 原始 HTTP 事件接口继续返回完整消息，每批最多 200 条并限制累计消息数据为 256 KiB。
 首条合法大消息仍会返回，以保证游标可前进。收件箱和定时轮询使用状态索引，

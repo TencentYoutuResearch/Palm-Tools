@@ -1,6 +1,6 @@
 import { createDeliveryTracker, deliveryInputId, DeliveryEvidenceUnavailable } from './delivery-tracker.js'
 /** Kode Host integration: durable backend messaging and independently owned native Agent execution. */
-import { eventPage, messagePage, relayInput } from './message-pages.js'
+import { eventPage, messagePage, messageTitleParameter, relayInput, sessionAssignmentTitle } from './message-pages.js'
 import { retainClientBatches } from './client-asset-retention.js'
 import { randomUUID, createHash } from 'node:crypto'
 import { readFile, writeFile, mkdir, rename } from 'node:fs/promises'
@@ -118,7 +118,7 @@ export async function apply(ctx, config = {}) {
       await client.call(`${PREFIX}sessions/${encodeURIComponent(agent.id)}/offline`, {})
       return
     }
-    const entry = { agent, client, registration, stop: new AbortController(), task: undefined, tools: [], receipts: [], readReplies: new Set(), queuedReplies: new Map(), title: registration.session.title, titleRetryAt: 0 }
+    const entry = { agent, client, registration, stop: new AbortController(), task: undefined, tools: [], receipts: [], readReplies: new Set(), queuedReplies: new Map(), activeWaits: 0, title: registration.session.title, titleRetryAt: 0 }
     if (node.delivery_tracking) entry.delivery = createDeliveryTracker(agent, client)
     entry.inputCancellation = node.input_cancellation === true
     active.set(agent.id, entry)
@@ -161,7 +161,11 @@ export async function apply(ctx, config = {}) {
         if (!creator) throw new Error('Session creation service is unavailable')
         created = await creator.create(args, agent)
       }
-      const assignment = await client.call(`${PREFIX}messages`, { target: created.address, content: args.task, idempotency_key: `create:${createHash('sha256').update(args.idempotency_key).digest('hex')}`, in_reply_to: null }, signal)
+      const assignment = await client.call(`${PREFIX}messages`, {
+        target: created.address, content: args.task, in_reply_to: null,
+        idempotency_key: `create:${createHash('sha256').update(args.idempotency_key).digest('hex')}`,
+        ...(node.message_titles === true ? { title: sessionAssignmentTitle(created.title) } : {}),
+      }, signal)
       return { ...created, status: 'assigned', assignment }
     })
     if (entry.inputCancellation) add('kode_sessions_cancel_input', 'Request cancellation of your own message with a runtime input binding. Queue removal is distinct from stopping execution. Active/shared/unsupported execution may remain cancel_unconfirmed. Remote cancellation requires negotiated peer support; queued offline requests remain pending.', {
@@ -177,10 +181,12 @@ export async function apply(ctx, config = {}) {
       node_id: { type: 'string', required: true }, session_id: { type: 'string', required: true },
       content: { type: 'string', required: true }, idempotency_key: { type: 'string', required: true, description: 'Stable key for one logical send; reuse only when retrying the same content.' },
       in_reply_to: { type: 'string' },
+      ...(node.message_titles === true ? { title: messageTitleParameter } : {}),
     }
-    add('kode_sessions_send', 'Ask a named peer for help or send a requested result. Discover the peer from the session list first. Acceptance is not task completion: use read/wait to collect its answer. Reply with in_reply_to when answering a request; do not send acknowledgement-only replies or answer a completed reply again.', params, async (args, signal) => ({ message: await client.call(`${PREFIX}messages`, {
+    add('kode_sessions_send', (node.message_titles === true ? 'Write a concise title and put the description in content. ' : '') + 'Ask a named peer for help or send a requested result. Discover the peer from the session list first. Acceptance is not task completion: use read/wait to collect its answer. Reply with in_reply_to when answering a request; do not send acknowledgement-only replies or answer a completed reply again.', params, async (args, signal) => ({ message: await client.call(`${PREFIX}messages`, {
       target: { node_id: args.node_id, session_id: args.session_id }, content: args.content,
       idempotency_key: args.idempotency_key, in_reply_to: args.in_reply_to ?? null,
+      ...(node.message_titles === true && args.title !== undefined ? { title: args.title } : {}),
     }, signal) }))
     const readEvents = async (after, signal) => {
       const cursor = Math.max(0, after ?? 0)
@@ -200,13 +206,16 @@ export async function apply(ctx, config = {}) {
     add('kode_sessions_read', 'Read bounded message and receipt previews after a durable cursor. Follow cursor until empty. Use the continuation tool for truncated content.', { after: { type: 'integer' } }, async (args, signal) => readEvents(args.after, signal))
     add('kode_sessions_wait', 'Wait up to 30 seconds for a message or receipt event. Does not send or interrupt.', { after: { type: 'integer', required: true }, timeout_seconds: { type: 'integer' } }, async (args, signal) => {
       const until = Date.now() + Math.max(1, Math.min(30, args.timeout_seconds ?? 15)) * 1000
-      do {
-        const events = await readEvents(args.after, signal)
-        if (events.events.length) return events
-        await sleep(500, signal)
-        signal?.throwIfAborted()
-      } while (Date.now() < until)
-      return { events: [], cursor: args.after, timed_out: true }
+      entry.activeWaits++
+      try {
+        do {
+          const events = await readEvents(args.after, signal)
+          if (events.events.length) return events
+          await sleep(500, signal)
+          signal?.throwIfAborted()
+        } while (Date.now() < until)
+        return { events: [], cursor: args.after, timed_out: true }
+      } finally { entry.activeWaits-- }
     })
     for (const tool of memoryTools) add(tool.name, tool.description, tool.parameters, (args, signal) => client.call(`${PREFIX}memory/tool`, { name: tool.name, arguments: args }, signal))
     entry.task = pump(entry)
@@ -272,10 +281,13 @@ export async function apply(ctx, config = {}) {
               continue
             }
             signal.throwIfAborted()
-            // followup queues a distinct turn; it never answers an outstanding approval.
             const inputId = entry.delivery ? deliveryInputId(message.id) : randomUUID()
             if (message.in_reply_to) entry.queuedReplies.set(message.id, inputId)
-            agent.followup(relayInput(message, inputId))
+            const input = relayInput(message, inputId)
+            // An active wait can return the reply itself. Leave its inbox copy
+            // removable so an ACP restart cannot interrupt that same wait.
+            if (!(message.in_reply_to && entry.activeWaits) && agent.canSteerRelay?.()) agent.steer(input)
+            else agent.followup(input)
             // Acceptance is reported only after the inbox has reached persistence listeners.
             if (!entry.delivery) await agent.ctx.parallel('session/flush', agent.session)
           } catch {
