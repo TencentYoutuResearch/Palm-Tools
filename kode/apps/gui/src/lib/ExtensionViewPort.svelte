@@ -17,6 +17,7 @@
     visible,
     blocked,
     phase = $bindable('starting'),
+    onFallbackToTui,
   }: {
     target: ViewTarget
     /** Runtime session id the view should open (dsh session id). */
@@ -26,6 +27,8 @@
     blocked: boolean
     /** Whether the page is up; Kode keeps its chrome until it is. */
     phase?: 'starting' | 'ready' | 'error'
+    /** Escape hatch back to TUI if the extension view fails to start. */
+    onFallbackToTui?: () => void
   } = $props()
 
   const tr = (key: string, params?: Record<string, string | number>) => {
@@ -154,7 +157,12 @@
     <div class="ext-state error" role="alert">
       <strong>{tr('extensions.view.failed', { name: target.extensionName })}</strong>
       <pre>{error}</pre>
-      <button class="btn" onclick={retry}>{tr('extensions.view.retry')}</button>
+      <div class="ext-actions">
+        <button class="btn" onclick={retry}>{tr('extensions.view.retry')}</button>
+        {#if onFallbackToTui}
+          <button class="btn" onclick={onFallbackToTui}>{tr('extensions.progress.toTui')}</button>
+        {/if}
+      </div>
     </div>
   {/if}
 </div>
@@ -200,6 +208,10 @@
   }
   .ext-state.error strong {
     color: var(--st-err);
+  }
+  .ext-actions {
+    display: flex;
+    gap: var(--sp-2);
   }
   .btn {
     padding: var(--sp-1) var(--sp-3);
