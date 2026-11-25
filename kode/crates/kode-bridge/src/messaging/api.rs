@@ -81,6 +81,10 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
         .route("/api/v1/messaging/model-usage", get(model_usage))
         .route("/api/v1/messaging/integrations", get(integration_status).post(integration_configure))
         .route("/api/v1/messaging/memory/tool", post(memory_tool))
+        .route("/api/v1/messaging/memory/pending", get(memory_pending_list))
+        .route("/api/v1/messaging/memory/pending/:id/review", post(memory_pending_review))
+        .route("/api/v1/messaging/memory/facts", get(memory_facts_list))
+        .route("/api/v1/messaging/memory/facts/:id/deprecate", post(memory_fact_deprecate))
         .route("/api/v1/messaging/cloud/status", get(cloud_status))
         .route("/api/v1/messaging/cloud/status/ws", get(cloud_status_ws))
         .route("/api/v1/messaging/cloud/pair", post(cloud_pair))
@@ -323,7 +327,7 @@ async fn workbench_transcript(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(in
     let backend = kode_core::session::jsonl_tail::Backend::from_backend_key(protocol).ok_or_else(|| Error(StatusCode::BAD_REQUEST, "unsupported transcript format".into()))?;
     let messages = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
         let (limit,tail_bytes)=(input.limit.unwrap_or(80).clamp(1,1000),input.tail_bytes.unwrap_or(8*1024*1024).clamp(4096,64*1024*1024));
-        if let Some(path) = kode_core::session::jsonl_tail::resolve_session_path(backend, std::path::Path::new(&input.cwd), &input.session_id) {
+        if let Some(path) = kode_core::session::jsonl_tail::resolve_transcript_path(backend, std::path::Path::new(&input.cwd), &input.session_id) {
             return super::transcript::recent_before(&path,limit,tail_bytes,input.before);
         }
         let Some(path) = kode_core::session::jsonl_tail::find_compressed_codex_session(backend, &input.session_id) else { return Ok(json!({"messages":[],"available":false})); };
@@ -862,6 +866,72 @@ struct MemoryTool {name:String,arguments:serde_json::Value}
 async fn memory_tool(State(hub): State<Arc<Hub>>, h: HeaderMap,Json(input):Json<MemoryTool>)->Result<Json<serde_json::Value>> {
     let source=match auth(&hub,&h)? {Principal::Admin=>"owner".into(),Principal::Session(source)=>source};
     Ok(Json(super::integrations::tool(&hub,&source,&input.name,input.arguments).await?))
+}
+fn valid_memory_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+async fn memory_pending_list(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
+    admin(&hub, &h)?;
+    Ok(Json(super::integrations::memory_pending(&hub).await?))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemoryReviewRequest {
+    verdict: super::integrations::ReviewVerdict,
+}
+async fn memory_pending_review(
+    State(hub): State<Arc<Hub>>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+    Json(input): Json<MemoryReviewRequest>,
+) -> Result<Json<serde_json::Value>> {
+    admin(&hub, &h)?;
+    if !valid_memory_id(&id) {
+        return Err(Error(StatusCode::BAD_REQUEST, "Invalid memory ID".into()));
+    }
+    Ok(Json(super::integrations::memory_review(&hub, &id, input.verdict).await?))
+}
+#[derive(Deserialize)]
+struct MemoryFactsQuery {
+    q: Option<String>,
+    scope: Option<String>,
+    limit: Option<usize>,
+}
+async fn memory_facts_list(
+    State(hub): State<Arc<Hub>>,
+    h: HeaderMap,
+    Query(query): Query<MemoryFactsQuery>,
+) -> Result<Json<serde_json::Value>> {
+    admin(&hub, &h)?;
+    Ok(Json(
+        super::integrations::memory_facts(
+            &hub,
+            query.q.as_deref(),
+            query.scope.as_deref(),
+            query.limit.unwrap_or(50),
+        )
+        .await?,
+    ))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemoryDeprecateRequest {
+    #[serde(default)]
+    reason: String,
+}
+async fn memory_fact_deprecate(
+    State(hub): State<Arc<Hub>>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+    Json(input): Json<MemoryDeprecateRequest>,
+) -> Result<Json<serde_json::Value>> {
+    admin(&hub, &h)?;
+    if !valid_memory_id(&id) {
+        return Err(Error(StatusCode::BAD_REQUEST, "Invalid memory ID".into()));
+    }
+    Ok(Json(
+        super::integrations::memory_deprecate(&hub, &id, &input.reason).await?,
+    ))
 }
 
 #[derive(Deserialize)]
