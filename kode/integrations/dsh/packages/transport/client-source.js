@@ -87,7 +87,7 @@ export async function apply(ctx) {
         } finally { hideProgress(); switching = false; publish() }
       }
       signal.throwIfAborted()
-      if (target.sessionId) await openSessionTarget(ctx, target, signal)
+      if (target.sessionId) await openSessionTarget(ctx, target, signal, fetchHost)
       else if (target.workspaceId) await openWorkspaceTarget(ctx, target, signal)
       else if (target.create) window.dispatchEvent(new CustomEvent('kode-create-project', { detail: { name: target.name ?? '' } }))
       else {

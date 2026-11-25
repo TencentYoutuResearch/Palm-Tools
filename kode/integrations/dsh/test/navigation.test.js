@@ -75,3 +75,25 @@ test('a superseded workspace lookup cannot start a session on the new Host', asy
     workspaceId: 'original', workspacePath: '/project/example', startSession: true,
   }, controller.signal), /superseded/)
 })
+
+test('a workbench-only row is admitted by its exact native Host identity before the composer opens', async () => {
+  const byId = {}, calls = []
+  const sessions = {
+    list: { getSnapshot: () => ({ byId }) },
+    refresh: async () => { calls.push('refresh') },
+    handleSessionAdded(summary) { byId[summary.sessionId] = summary },
+  }
+  const services = { sessions, layout: { beginNavigation() {} }, uiWorkspace: {
+    openSession(id) { assert.equal(byId[id].sessionId, id); calls.push('open') },
+  } }
+  const ctx = { get: key => services[key] }, target = { sessionId: 'original' }
+  const open = summary => openSessionTarget(ctx, target, new AbortController().signal, async (_, init) => {
+    assert.deepEqual(JSON.parse(init.body), { sessionId: 'original', lookupOnly: true })
+    calls.push('lookup')
+    return { ok: true, json: async () => ({ summary }) }
+  })
+  await assert.rejects(open({ sessionId: 'wrong' }), /找不到/)
+  await open({ sessionId: 'original' })
+  await open()
+  assert.deepEqual(calls, ['refresh', 'lookup', 'refresh', 'lookup', 'open', 'open'])
+})
