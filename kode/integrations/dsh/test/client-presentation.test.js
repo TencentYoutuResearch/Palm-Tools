@@ -274,9 +274,9 @@ test('send receipts are historical delivery states, never task completion', () =
     const tree = render({ sessions: c.ctx.sessions, toolName: 'kode_sessions_send', phase: 'result', block: {
       args: { text: key => ({ content: 'review result', node_id: 'worker.example', session_id: 'same-id' })[key] },
       content: [{ type: 'text', text: JSON.stringify({ message: { status } }) }],
-    }, useDisclosure: () => ({ expanded: false, setExpanded() {} }) })
+    }, useDisclosure: () => ({ expanded: true, setExpanded() {} }) })
     assert.match(JSON.stringify(tree), /发送时：/)
-    assert.doesNotMatch(JSON.stringify(tree), /任务完成|已完成/)
+    assert.doesNotMatch(JSON.stringify(tree).replace('投递状态不代表目标任务已完成。', ''), /任务完成|已完成/)
   }
 })
 test('native command cards describe the command and outcome instead of protocol names and IDs',()=>{
@@ -943,12 +943,14 @@ test('running sessions use one steady avatar marker for default and custom artwo
  vm.runInNewContext(source.slice(source.indexOf('  const avatarStateRank'),source.indexOf('  function FederatedWorkspaceBrowser')),scope)
  const tree=scope.SessionStatusAvatars({root:{current:null},rows:{custom:{agent:{type:'codex',avatar:{id:'gallery/person'}}},default:{agent:{type:'claude'}},plain:{}}})
  assert.deepEqual(tree.children.map(overlay=>[overlay.children[0].props['data-status'],overlay.children[0].children[0].props.status]),[['ongoing','running'],['ongoing','running']])
- const css=source.slice(source.indexOf('.kode-agent-avatar[data-avatar-state=awaiting]::after,'),source.indexOf('.kode-tool-action{'))
- assert.match(css,/\[data-avatar-state=running\]::before\{[^}]*width:9px[^}]*background:#3b82f6;animation:none\}/,'the running core stays solid and does not fade')
- assert.match(css,/\[data-avatar-state=running\]::after\{[^}]*animation:kode-avatar-running-halo/,'only the small halo moves')
- assert.doesNotMatch(css,/\[data-avatar-state=running\]::after,/,'running no longer shares the large avatar frame')
- assert.match(css,/prefers-reduced-motion:reduce\)\{\.kode-agent-avatar\[data-avatar-state=running\]::after\{content:none\}/)
- assert.match(source,/\[data-kode-panel-row\] \.kode-agent-avatar\[data-avatar-state\]:not\(\[data-avatar-state=running\]\)::after\{content:none\}/)
+ const css=source.slice(source.indexOf('/* Session state rides the avatar'),source.indexOf('.kode-tool-action{'))
+ assert.match(css,/\[data-avatar-state=running\],[^{]*\[data-avatar-state=awaiting\],[^{]*\[data-avatar-state=done\]\{outline:2px solid var\(--kode-avatar-ring\);outline-offset:2px\}/,'the avatar outline carries every state')
+ assert.match(css,/\[data-avatar-state=awaiting\]\{[^}]*outline-style:dashed\}/,'awaiting differs by stroke, not only by color')
+ assert.match(css,/\[data-avatar-state=done\]\{[^}]*outline-style:double/)
+ assert.doesNotMatch(css,/data-avatar-state=[a-z]+\]::(before|after)/,'no corner dots or overlays on the artwork')
+ assert.doesNotMatch(css,/@keyframes kode-avatar-ring-breathe\{[^}]*opacity/,'the ring moves, the avatar never fades')
+ assert.match(css,/prefers-reduced-motion:reduce\)\{[^}]*\.kode-agent-avatar\[data-avatar-state\]\{animation:none\}/)
+ assert.match(css,/\.kode-status-avatar-body::after\{content:none\}/,'the sidebar overlay adds no second frame')
 })
 
 test('environment Git and folder rows are flat native-style rows with hover and focus feedback',()=>{
@@ -1554,8 +1556,83 @@ test('Kode review, subagent and communication rows stay one line and show three 
   assert.equal(folds[0].label, '显示另外 2 项', 'the native fold still reveals every item')
   assert.match(source, /\[data-kode-panel-row\]\[data-kode-compact\] \[data-row-part=lines\]\{flex-direction:row/)
   assert.match(source, /renderRow: row => h\(SessionPanelRow, \{ key: row\.url, href: row\.url, compact: true,/)
-  const lines = scope.SessionPanelRow({ label: '一个很长的外部 CLI 子 Agent 标题', status: '等待操作', detail: 'gpt-5-codex', compact: true }).children[0].children[0][1]
-  assert.deepEqual(lines.children.filter(Boolean).map(part => [part.props['data-row-part'], part.children[0]]), [['content', '一个很长的外部 CLI 子 Agent 标题'], ['status', '等待操作'], ['detail', 'gpt-5-codex']])
-  assert.match(source, /\[data-kode-panel-row\] \[data-row-part=status\]\{flex:none;white-space:nowrap/, 'status never truncates; model then title give way')
-  assert.match(source, /rowProps: child => \(\{ label: childTitle\(child\), status: childStatusLabel\(child\), detail: child\.model,/)
+  const sub = scope.SessionPanelRow({ label: '一个很长的外部 CLI 子 Agent 标题', hint: '等待操作', detail: 'gpt-5-codex', compact: true })
+  const [icon, lines] = sub.children[0].children[0]
+  assert.equal(icon.props.title, '等待操作', 'the status dot names its state on hover')
+  assert.deepEqual(lines.children.filter(Boolean).map(part => [part.props['data-row-part'] ?? part.props.className, part.children[0]]), [['content', '一个很长的外部 CLI 子 Agent 标题'], ['kode-sr-only', '，等待操作'], ['detail', 'gpt-5-codex']])
+  assert.match(source, /rowProps: child => \(\{ label: childTitle\(child\), hint: childStatusLabel\(child\), detail: child\.model,/)
+})
+
+test('communication rows show only a title and tell waiting from answered by the projected flag or reply-to, never by delivery receipts', () => {
+  const scope = vm.createContext({ IconClockOutlineRegular: 'clock', IconCheckOutlineRegular: 'check', IconPaperPlaneOutlineRegular: 'plane' })
+  vm.runInContext(source.slice(source.indexOf('  const relayKinds = {'), source.indexOf('  function CommunicationRows(')), scope)
+  const ask = { nodeId: 'n', sessionId: 'peer', id: 'ask', direction: 'sent', reply: false, status: 'accepted', content: '请评审 PR' }
+  const delivered = { nodeId: 'n', sessionId: 'peer', id: 'ask-2', direction: 'sent', reply: false, status: 'received', content: '另一个请求' }
+  const answer = { nodeId: 'n', sessionId: 'peer', id: 'ans', direction: 'received', reply: true, replyTo: 'ask', content: '评审完成' }
+  const reply = { nodeId: 'n', sessionId: 'peer', id: 'back', direction: 'sent', reply: true, replyTo: 'theirs', content: '已处理' }
+  const request = { nodeId: 'n', sessionId: 'peer', id: 'theirs', direction: 'received', reply: false, content: '# 帮我看看\n细节' }
+  const rows = [ask, delivered, answer, reply, request]
+  assert.deepEqual(rows.map(row => scope.relayKind(row, rows)), ['answered', 'waiting', 'reply', 'replied', 'incoming'])
+  assert.equal(scope.relayKind(ask, [ask]), 'waiting', 'an accepted receipt is not a reply')
+  assert.equal(scope.relayKind(ask, [ask, { ...answer, sessionId: 'stranger' }]), 'waiting', 'only the asked peer can answer')
+  assert.equal(scope.relayTitle({ title: ' 代码评审 ', content: 'body' }), '代码评审')
+  assert.equal(scope.relayTitle(request), '会话消息', 'untitled history never leaks its content')
+  assert.equal(scope.relayTitle(reply), '会话回复')
+  assert.equal(scope.relayTitle({ replyTo: 'm', content: '正文' }), '会话回复')
+  const reordered = { ...ask, answered: true }
+  assert.equal(scope.relayKind(reordered, [reordered]), 'answered', 'the projected answered flag wins even when the reply is not in view')
+  assert.equal(scope.relayKind({ ...ask, answered: false }, rows), 'answered', 'without the flag the real reply-to still counts')
+})
+
+test('relay cards consume an optional title line and keep malformed ones as body text', () => {
+  const scope = vm.createContext({})
+  vm.runInContext(source.slice(source.indexOf('  function relayTitlePrefix('), source.indexOf('  let namesSnapshot')), scope)
+  assert.deepEqual({ ...scope.relayTitlePrefix('[Kode message title: "代码评审"]\n正文') }, { title: '代码评审', content: '正文' })
+  assert.deepEqual({ ...scope.relayTitlePrefix('[Kode message title: nope]\n正文') }, { content: '[Kode message title: nope]\n正文' })
+  assert.deepEqual({ ...scope.relayTitlePrefix('普通消息') }, { content: '普通消息' })
+})
+
+test('chat relay cards start collapsed to route and title, and reveal the body only when expanded', () => {
+  let state = false
+  const h = (type, props, ...children) => ({ type, props: props ?? {}, children })
+  const scope = vm.createContext({ h, useState: initial => [state ?? initial, next => { state = next }], IconPaperPlaneOutlineRegular: 'plane', IconChevronDownOutlineRegular: 'chevron', IconWarningOutlineRegular: 'warning', RelayEchoVisibility: 'echo' })
+  const slice = (from, to) => source.slice(source.indexOf(from), source.indexOf(to))
+  vm.runInContext(slice('  function relayTitle(', '  function CommunicationRows') + slice('  // Collapsed relays show', '  function HistoricalRelay('), scope)
+  const text = node => node == null || node === false ? '' : typeof node === 'string' ? node : Array.isArray(node) ? node.map(text).join('') : text(node.children)
+  const find = (node, test) => !node || typeof node !== 'object' ? undefined : Array.isArray(node) ? node.map(child => find(child, test)).find(Boolean) : test(node) ? node : find(node.children, test)
+  const draw = relay => scope.RelayCard({ relay, time: Date.UTC(2026, 0, 1, 2, 42), nameOf: (node, id) => id === 'self' ? '当前会话' : '评审助手', sessionId: 'self' })
+  const relay = { address: 'n/peer', replyTo: 'm1', title: '代码评审结论', content: '机密正文第一行\n第二行' }
+  const expand = node => !node || typeof node !== 'object' ? node : Array.isArray(node) ? node.map(expand) : typeof node.type === 'function' ? expand(node.type(node.props)) : { ...node, children: expand(node.children) }
+  const render = relay => expand(draw(relay))
+  let card = render(relay)
+  const toggle = find(card, node => node.type === 'button')
+  assert.equal(toggle.props['aria-expanded'], false)
+  assert.equal(text(card), '评审助手→当前会话代码评审结论')
+  assert.equal(find(card, node => node.type === 'strong' && node.props.title === '当前会话（当前会话）') != null, true)
+  assert.equal(find(card, node => node.type === 'time'), undefined)
+  toggle.props.onClick()
+  card = render(relay)
+  assert.equal(find(card, node => node.type === 'button').props['aria-expanded'], true)
+  assert.match(text(card), /回复了这段对话 · \d\d:\d\d[^机]*机密正文第一行\n第二行/)
+  state = false
+  assert.match(text(render({ address: 'n/peer', content: '## 旧消息首行\n更多' })), /会话消息/)
+  assert.doesNotMatch(text(render({ address: 'n/peer', content: '## 旧消息首行\n更多' })), /旧消息|更多/)
+  assert.match(text(render({ address: 'n/peer', replyTo: 'm0', content: '旧回复正文' })), /会话回复/)
+  assert.doesNotMatch(text(render({ address: 'n/peer', replyTo: 'm0', content: '旧回复正文' })), /旧回复正文/)
+})
+
+test('sessions_send cards collapse to the two session names and title, with status, time and body only when expanded', () => {
+  const c = client(), render = c.entry('tool.call.toolview', 'kode_sessions_send')
+  const text = node => node == null || node === false ? '' : typeof node !== 'object' ? String(node) : Array.isArray(node) ? node.map(text).join('') : typeof node.type === 'function' ? text(node.type(node.props)) : text(node.children ?? node.props?.children)
+  const card = (expanded, isError) => render({ sessions: c.ctx.sessions, sessionId: 'current', toolName: 'kode_sessions_send', phase: 'result', block: {
+    isError, args: { text: key => ({ content: '机密正文', title: '代码评审', node_id: 'worker.example', session_id: 'peer' })[key] },
+    content: [{ type: 'text', text: JSON.stringify({ message: { status: 'accepted' } }) }],
+  }, useDisclosure: () => ({ expanded, setExpanded() {} }) })
+  const closed = JSON.stringify(card(false)), shown = text(card(false))
+  assert.match(shown, /代码评审/)
+  assert.doesNotMatch(shown, /机密正文|发送时|发送会话消息|（当前）|投递状态/)
+  assert.doesNotMatch(closed, /通信未成功/)
+  assert.match(text(card(true)), /发送会话消息 · 发送时：.*机密正文.*投递状态不代表目标任务已完成/)
+  const expand = node => !node || typeof node !== 'object' ? node : Array.isArray(node) ? node.map(expand) : typeof node.type === 'function' ? expand(node.type(node.props)) : { ...node, children: expand(node.children) }
+  assert.match(JSON.stringify(expand(card(false, true))), /"role":"img","aria-label":"通信未成功"/)
 })
