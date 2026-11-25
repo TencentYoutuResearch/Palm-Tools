@@ -14,6 +14,7 @@ import { askAcpForm } from './acp-questions.js'
 import { acpToolItem } from './native-tools.js'
 import { resolveAdvertisedModel } from './model-alias.js'
 import { modeAllowed } from './native-commands.js'
+import { ensureCursorAcpSession, ensureCursorCliChat } from './cursor-storage.js'
 
 const flattenOptions = options => (options ?? []).flatMap(o => o.options ?? [o])
 const effortOption = state => state?.configOptions?.find(option => option.type === 'select' && (option.category === 'thought_level' || /(?:^|[_-])effort(?:$|[_-])/i.test(option.id)))
@@ -50,7 +51,7 @@ export class AcpSession {
       this.lifetime.signal.throwIfAborted()
       this.process = spawnAgent(process.execPath, [fileURLToPath(import.meta.resolve('@agentclientprotocol/claude-agent-acp/dist/index.js'))], this.cwd, { ...this.profile.env, CLAUDE_CODE_EXECUTABLE: launcher })
     } else {
-      this.process = spawnAgent(this.profile.executable, [...(this.profile.args ?? []), ...(this.profile.type === 'cursor' ? ['acp'] : this.profile.type==='codebuddy'?['--acp']:[])], this.cwd, this.profile.env)
+      this.process = spawnAgent(this.profile.executable, [...(this.profile.args ?? []), ...(this.profile.type === 'cursor' || this.profile.type === 'antigravity' ? ['acp'] : this.profile.type==='codebuddy'?['--acp']:[])], this.cwd, this.profile.env)
     }
     const app = client({ name: 'kode-dsh' })
     // Preserve native extension updates alongside the standard ACP updates.
@@ -90,7 +91,13 @@ export class AcpSession {
   request(method, params, signal = this.lifetime.signal, timeoutMs = 15000) {
     const fused = AbortSignal.any([this.lifetime.signal, signal, ...(timeoutMs ? [AbortSignal.timeout(timeoutMs)] : [])])
     fused.throwIfAborted()
-    return abortable(this.connection.agent.request(method, params, { cancellationSignal: fused }), fused)
+    return abortable(this.connection.agent.request(method, params, { cancellationSignal: fused }), fused).catch(error => {
+      const detail = typeof error?.data?.message === 'string' ? error.data.message.trim() : ''
+      if (detail && typeof error.message === 'string' && !error.message.includes(detail)) {
+        error.message = `${error.message}: ${detail}`
+      }
+      throw error
+    })
   }
   initialize(signal) {
     return this.initialized ??= (async () => {
@@ -129,6 +136,7 @@ export class AcpSession {
       }
     } }
     try {
+      if (this.profile.type === 'cursor') await ensureCursorAcpSession(threadId, this.cwd, { ...process.env, ...this.profile.env })
       await this.request('session/load', { sessionId: threadId, cwd: this.cwd, mcpServers: [] }, signal)
       return { available: true, timeline: messages, history_window: { count: messages.length, truncated } }
     } finally { this.replay = undefined }
@@ -192,6 +200,7 @@ export class AcpSession {
       const resume = this.info.agentCapabilities?.sessionCapabilities?.resume
       if (!this.info.agentCapabilities?.loadSession && !resume) throw new Error('This ACP Agent cannot restore saved conversations; it will not silently start a new one')
       this.threadId = binding.threadId
+      if (this.profile.type === 'cursor') await ensureCursorAcpSession(this.threadId, this.cwd, { ...process.env, ...this.profile.env })
       this.state = await this.request(resume ? 'session/resume' : 'session/load', { sessionId: this.threadId, cwd: this.cwd, mcpServers, ...settings }, signal) ?? {}
     } else {
       this.state = await this.request('session/new', { cwd: this.cwd, mcpServers, ...settings }, signal)
@@ -224,7 +233,7 @@ export class AcpSession {
     const policy = this.handlers.policy?.() ?? { mode: 'read-only' }
     if (this.profile.fixedPolicy && (policy.mode !== this.profile.fixedPolicy.mode || (this.handlers.approvalPolicy?.() ?? 'ask') !== this.profile.fixedPolicy.approval)) throw new Error('此 dsh ACP 版本不支持运行中修改权限，请新建会话应用新的权限。')
     const available = this.state.modes?.availableModes ?? []
-    const preferred = policy.mode === 'read-only' ? ['plan', 'ask', 'read-only'] : policy.mode==='danger-full-access'?['bypassPermissions','fullAccess','yolo','default','agent','code']:['acceptEdits','default','agent','code']
+    const preferred = policy.mode === 'read-only' ? ['plan', 'ask', 'read-only'] : policy.mode==='danger-full-access'?['bypassPermissions','fullAccess','yolo','auto','default','agent','code']:['acceptEdits','accept-edits','default','agent','code']
     const requestedMode = this.handlers.mode?.()
     const mode = requestedMode && modeAllowed(requestedMode, policy.mode) ? available.find(mode => mode.id === requestedMode) : preferred.map(id => available.find(m => m.id === id)).find(Boolean)
     if (policy.mode === 'read-only' && !mode && !this.profile.policyManagedByHost) throw new Error('This ACP Agent advertises no read-only mode; choose an Agent with one or explicitly change the session file policy')
@@ -460,6 +469,9 @@ export class AcpSession {
       yield { method: 'turn/completed', params: { threadId: this.threadId, turn: { id: active.turnId, status: 'completed' } } }
     } finally {
       abortSignal.removeEventListener('abort', abort)
+      if (this.profile.type === 'cursor' && this.threadId) {
+        await ensureCursorCliChat(this.threadId, this.cwd, { ...process.env, ...this.profile.env }).catch(() => {})
+      }
       if (!completed) await this.close()
       this.active = undefined
     }
