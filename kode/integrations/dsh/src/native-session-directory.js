@@ -106,6 +106,7 @@ export function registerNativeSessionDirectory(ctx, backend) {
     try {
       if (req.method === 'GET') {
         const query = new URL(req.url, 'http://localhost').searchParams
+        if (query.has('summary')) return json(res, 200, await directory.open({ sessionId: query.get('summary'), lookupOnly: true }))
         const request = new AbortController()
         const cancel = () => request.abort()
         res.once('close', cancel)

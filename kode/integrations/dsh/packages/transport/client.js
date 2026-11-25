@@ -1733,13 +1733,10 @@ async function openSessionTarget(ctx, target, signal, fetchHost) {
     await sessions.refresh();
     signal.throwIfAborted();
   }
+  if (ctx.get("sessions") !== sessions) throw new Error("\u4F1A\u8BDD\u4E3B\u673A\u5DF2\u5207\u6362\uFF0C\u8BF7\u91CD\u65B0\u6253\u5F00\u3002");
   if (missing() && fetchHost && sessions.handleSessionAdded) {
-    const response = await fetchHost("/api/kode/native-sessions", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessionId: target.sessionId, lookupOnly: true }),
-      signal
-    });
+    const query = new URLSearchParams({ summary: target.sessionId });
+    const response = await fetchHost(`/api/kode/native-sessions?${query}`, { cache: "no-store", signal });
     const data = await response.json();
     signal.throwIfAborted();
     if (ctx.get("sessions") !== sessions) throw new Error("\u4F1A\u8BDD\u4E3B\u673A\u5DF2\u5207\u6362\uFF0C\u8BF7\u91CD\u65B0\u6253\u5F00\u3002");

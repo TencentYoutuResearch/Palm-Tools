@@ -14,11 +14,10 @@ export async function openSessionTarget(ctx, target, signal, fetchHost) {
     await sessions.refresh()
     signal.throwIfAborted()
   }
+  if (ctx.get('sessions') !== sessions) throw new Error('会话主机已切换，请重新打开。')
   if (missing() && fetchHost && sessions.handleSessionAdded) {
-    const response = await fetchHost('/api/kode/native-sessions', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ sessionId: target.sessionId, lookupOnly: true }), signal,
-    })
+    const query = new URLSearchParams({ summary: target.sessionId })
+    const response = await fetchHost(`/api/kode/native-sessions?${query}`, { cache: 'no-store', signal })
     const data = await response.json()
     signal.throwIfAborted()
     if (ctx.get('sessions') !== sessions) throw new Error('会话主机已切换，请重新打开。')

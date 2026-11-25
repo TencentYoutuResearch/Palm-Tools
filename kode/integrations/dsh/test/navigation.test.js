@@ -87,8 +87,9 @@ test('a workbench-only row is admitted by its exact native Host identity before 
     openSession(id) { assert.equal(byId[id].sessionId, id); calls.push('open') },
   } }
   const ctx = { get: key => services[key] }, target = { sessionId: 'original' }
-  const open = summary => openSessionTarget(ctx, target, new AbortController().signal, async (_, init) => {
-    assert.deepEqual(JSON.parse(init.body), { sessionId: 'original', lookupOnly: true })
+  const open = summary => openSessionTarget(ctx, target, new AbortController().signal, async (url, init) => {
+    assert.equal(url, '/api/kode/native-sessions?summary=original')
+    assert.equal(init.body, undefined)
     calls.push('lookup')
     return { ok: true, json: async () => ({ summary }) }
   })
