@@ -943,17 +943,15 @@
       return null
     }
 
-    // 11) click capture handler — Windows 单击链接时直接执行 reveal/open,
-    //   避免 mouse-reporting 模式吞掉点击;macOS 仍交给 xterm 的 Cmd+Click。
+    // 11) click capture handler — 链接命中时阻止文本选中。真正的 reveal/open
+    //   由 xterm link activate 执行一次;Windows 的 mousedown 由上面的
+    //   shouldIgnoreMouseDown 放行,不会被本地 click ownership 延迟或吞掉。
     const onClickCapture = (e: MouseEvent) => {
       if (!terminalLinkActivationEnabled(e, windowsPlatform)) return
       const target = terminalLinkTargetAtEvent(e)
       if (!target) return
       e.preventDefault()
       e.stopPropagation()
-      if (!windowsPlatform) return
-      e.stopImmediatePropagation()
-      activateTerminalLink(target)
     }
     containerEl.addEventListener('click', onClickCapture, { capture: true })
 
