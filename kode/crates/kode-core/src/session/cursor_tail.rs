@@ -427,18 +427,69 @@ fn cursor_transcript_path_from_meta(meta_path: &Path) -> Option<PathBuf> {
 /// directly from cwd, so it is deterministic once Cursor reports the UUID.
 pub fn cursor_transcript_path(cwd: &Path, session_id: &str) -> Option<PathBuf> {
     let home = dirs::home_dir()?;
+    Some(cursor_transcript_path_under(&home, cwd, session_id))
+}
+
+fn cursor_transcript_path_under(home: &Path, cwd: &Path, session_id: &str) -> PathBuf {
     let slug = cwd
         .to_string_lossy()
         .trim_start_matches('/')
         .replace('/', "-");
-    Some(
-        home.join(".cursor")
-            .join("projects")
-            .join(slug)
+    home.join(".cursor")
+        .join("projects")
+        .join(slug)
+        .join("agent-transcripts")
+        .join(session_id)
+        .join(format!("{session_id}.jsonl"))
+}
+
+/// Resolve an existing Cursor JSONL transcript for `session_id`:
+/// 1. direct `cwd`-derived path;
+/// 2. `meta.json`'s recorded `cwd` (handles symlinked / overridden cwds);
+/// 3. scan `~/.cursor/projects/*/agent-transcripts/<id>/<id>.jsonl`.
+pub fn resolve_cursor_transcript_path(cwd: &Path, session_id: &str) -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    resolve_cursor_transcript_path_under(&home, cwd, session_id)
+}
+
+fn resolve_cursor_transcript_path_under(
+    home: &Path,
+    cwd: &Path,
+    session_id: &str,
+) -> Option<PathBuf> {
+    let direct = cursor_transcript_path_under(home, cwd, session_id);
+    if direct.is_file() {
+        return Some(direct);
+    }
+    if let Some(meta_path) =
+        find_cursor_session_by_id_under(&home.join(".cursor").join("chats"), session_id)
+    {
+        if let Ok(text) = fs::read_to_string(&meta_path) {
+            if let Ok(parsed) = serde_json::from_str::<CursorMetaFile>(&text) {
+                if let Some(meta_cwd) = parsed.cwd.as_deref() {
+                    let from_meta =
+                        cursor_transcript_path_under(home, Path::new(meta_cwd), session_id);
+                    if from_meta.is_file() {
+                        return Some(from_meta);
+                    }
+                }
+            }
+        }
+    }
+    let projects = home.join(".cursor").join("projects");
+    let entries = fs::read_dir(&projects).ok()?;
+    let filename = format!("{session_id}.jsonl");
+    for entry in entries.flatten() {
+        let candidate = entry
+            .path()
             .join("agent-transcripts")
             .join(session_id)
-            .join(format!("{session_id}.jsonl")),
-    )
+            .join(&filename);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 fn extract_cursor_titles_from_transcript(path: &Path) -> (Option<String>, Option<String>) {
@@ -642,6 +693,52 @@ mod tests {
         assert!(path.ends_with(
             ".cursor/projects/Users-test-My App/agent-transcripts/session-1/session-1.jsonl"
         ));
+    }
+
+    #[test]
+    fn resolve_cursor_transcript_path_finds_direct_meta_and_scan_candidates() {
+        let home = temp_root("cursor-resolve");
+        let session_id = "01f704d9-c18e-4409-a738-8e97ef8b042f";
+        let cwd = Path::new("/tmp/cursor-proj");
+        let direct = cursor_transcript_path_under(&home, cwd, session_id);
+        std::fs::create_dir_all(direct.parent().unwrap()).unwrap();
+        std::fs::write(&direct, "{}\n").unwrap();
+
+        // Direct cwd match.
+        assert_eq!(
+            resolve_cursor_transcript_path_under(&home, cwd, session_id).as_deref(),
+            Some(direct.as_path())
+        );
+
+        // Meta cwd fallback when caller cwd differs.
+        let meta = home
+            .join(".cursor")
+            .join("chats")
+            .join("hash-1")
+            .join(session_id)
+            .join("meta.json");
+        std::fs::create_dir_all(meta.parent().unwrap()).unwrap();
+        std::fs::write(&meta, r#"{"cwd":"/tmp/cursor-proj","title":"Test"}"#).unwrap();
+        assert_eq!(
+            resolve_cursor_transcript_path_under(&home, Path::new("/other/cwd"), session_id)
+                .as_deref(),
+            Some(direct.as_path())
+        );
+
+        // Scan fallback when meta.json is absent and caller cwd differs.
+        std::fs::remove_file(&meta).unwrap();
+        assert_eq!(
+            resolve_cursor_transcript_path_under(&home, Path::new("/other/cwd"), session_id)
+                .as_deref(),
+            Some(direct.as_path())
+        );
+
+        // Missing transcript returns None (never meta.json).
+        std::fs::remove_file(&direct).unwrap();
+        std::fs::write(&meta, r#"{"cwd":"/tmp/cursor-proj","title":"Test"}"#).unwrap();
+        assert!(resolve_cursor_transcript_path_under(&home, cwd, session_id).is_none());
+
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

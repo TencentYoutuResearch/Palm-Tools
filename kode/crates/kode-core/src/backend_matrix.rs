@@ -264,7 +264,7 @@ fn resume_style_all() {
     }
 }
 
-/// ACP 能力：仅 codebuddy / opencode 支持,且两者启动方式不同。
+/// ACP 能力：codebuddy / opencode / antigravity 支持。
 #[test]
 fn acp_capability_all() {
     let cases = cases();
@@ -273,19 +273,23 @@ fn acp_capability_all() {
         .filter(|c| c.has_acp)
         .map(|c| c.key.as_str())
         .collect();
-    let expected: BTreeSet<&str> = ["codebuddy", "opencode"].into_iter().collect();
+    let expected: BTreeSet<&str> = ["antigravity", "codebuddy", "opencode"]
+        .into_iter()
+        .collect();
     assert_eq!(with_acp, expected);
 
     let codebuddy = cases.iter().find(|c| c.key == "codebuddy").unwrap();
     assert_eq!(codebuddy.cfg.acp.as_ref(), Some(&AcpSpec::flag()));
-    let opencode = cases.iter().find(|c| c.key == "opencode").unwrap();
-    let spec = opencode.cfg.acp.as_ref().expect("opencode acp");
-    assert_eq!(spec.args, vec!["acp"]);
-    assert!(spec.model_flag.is_none());
+    for key in ["antigravity", "opencode"] {
+        let entry = cases.iter().find(|c| c.key == key).unwrap();
+        let spec = entry.cfg.acp.as_ref().expect("acp spec");
+        assert_eq!(spec.args, vec!["acp"]);
+        assert!(spec.model_flag.is_none());
+    }
 }
 
-/// 能力分组与 golden 一致：有 jsonl 语义解析的是 8 个 backend(opencode 走 ACP、
-/// 其余 8 个 preset 无 tail);mcp_setup 只有其中 5 个 —— tclaude / tcodex 是
+/// 能力分组与 golden 一致：有 jsonl 语义解析的是 8 个 backend(opencode / antigravity 走 ACP、
+/// 其余 7 个 preset 无 tail);mcp_setup 有 6 个 —— tclaude / tcodex 是
 /// opt-in,出厂 `mcp_setup = None`(见 config.rs 的 t-backends 回归)。
 #[test]
 fn capability_groups_match_golden() {
@@ -293,6 +297,11 @@ fn capability_groups_match_golden() {
     let semantic: BTreeSet<&str> = cases
         .iter()
         .filter(|c| c.has_semantic)
+        .map(|c| c.key.as_str())
+        .collect();
+    let acp: BTreeSet<&str> = cases
+        .iter()
+        .filter(|c| c.has_acp)
         .map(|c| c.key.as_str())
         .collect();
     let mcp: BTreeSet<&str> = cases
@@ -313,6 +322,7 @@ fn capability_groups_match_golden() {
     .into_iter()
     .collect();
     let expected_mcp: BTreeSet<&str> = [
+        "antigravity",
         "claude",
         "claude-internal",
         "codebuddy",
@@ -321,10 +331,11 @@ fn capability_groups_match_golden() {
     ]
     .into_iter()
     .collect();
+    let structured_or_semantic: BTreeSet<&str> = semantic.union(&acp).copied().collect();
     assert_eq!(semantic, expected_semantic);
     assert_eq!(mcp, expected_mcp);
-    assert!(mcp.is_subset(&semantic));
-    assert_eq!(cases.len() - semantic.len(), 9, "8 presets + opencode have no semantic parser");
+    assert!(mcp.is_subset(&structured_or_semantic));
+    assert_eq!(cases.len() - semantic.len(), 9, "7 presets + opencode + antigravity have no jsonl semantic parser");
 }
 
 /// 骨架自检：17 × 6 个单元格全部被分类,且每个 Placeholder 都有登记的原因。
