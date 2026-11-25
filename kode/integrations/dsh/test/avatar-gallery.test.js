@@ -21,7 +21,7 @@ test('redrawn avatar frames get new URLs, so no view keeps a cached picture', as
   assert.notEqual(after.animations.idle[0], before.animations.idle[0])
 })
 
-test('avatar gallery exposes optional Discord-style banner alongside background and falls back cleanly', async () => {
+test('avatar gallery exposes optional banner alongside background and falls back cleanly', async () => {
   const root = await mkdtemp(join(tmpdir(), 'kode-avatar-banner-'))
   const dir = join(root, 'gallery', '01-kit')
   await mkdir(join(dir, 'idle'), { recursive: true })

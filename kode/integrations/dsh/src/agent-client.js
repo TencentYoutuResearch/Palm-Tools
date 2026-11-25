@@ -1237,7 +1237,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       h('span', { ref: seat, className: 'kode-bots-glyph' }, companionIcon(size)),
       host && createPortal(h(BotsNest, { openSession }), host))
   }
-  // Discord-inspired sidebar nameplate & card banner presets.
+  // Sidebar nameplate & card banner presets.
   const BOT_BANNER_PRESETS = [
     { id: 'preset:blurple', label: '靛蓝星云', css: 'linear-gradient(105deg, rgba(88,101,242,.22) 0%, rgba(88,101,242,.42) 52%, rgba(168,85,247,.52) 100%)' },
     { id: 'preset:aurora', label: '极光青翠', css: 'linear-gradient(105deg, rgba(16,185,129,.18) 0%, rgba(20,184,166,.36) 55%, rgba(56,189,248,.48) 100%)' },
@@ -1437,7 +1437,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
           h(Button, { type: 'button', variant: 'outline', disabled: busy, onClick: () => setPath(null) }, '取消'),
           h(Button, { type: 'submit', variant: 'primary', disabled: busy }, '保存'))))
   }
-  // A bot's card shows its Discord-style banner or avatar scene behind the header.
+  // A bot's card shows its banner or avatar scene behind the header.
   function BotCard({ bot, children }) {
     const library = useAvatarLibrary(Boolean(bot.avatar)), [display] = useBackgroundPreference()
     const banner = display !== 'off' ? botBannerStyle(library, bot) : null
