@@ -2046,14 +2046,31 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     }
     const avatar = h(AgentAvatar, { profile, host, size: panel ? 28 : 24, status: status ?? (currentSession?.running ? 'running' : 'idle') })
     if (panel) {
-      return h('div', { className: 'kode-environment-identity' },
+      return h(SessionIdentitySection, null, h('div', { className: 'kode-environment-identity' },
         h(SessionPanelRow, { icon: avatar, label: profile.name, detail: profile.name === type ? undefined : type,
           actionLabel: bot ? `编辑伙伴 ${bot.name}` : `设置 ${profile.name} 的头像与背景`,
           trailing: h(IconEditOutlineRegular, { size: 14, 'aria-hidden': true }), onClick: choose }),
-        h(HandoffAction, { sessionId, sessions, panel: true, dismissOverlay }))
+        h(HandoffAction, { sessionId, sessions, panel: true, dismissOverlay })))
     }
     return h('span', { className: 'kode-agent-identity', title: bot ? `${bot.name} · 伙伴（${base.name}）` : `${profile.name} · ${type}` },
       h('button', { type: 'button', className: 'kode-session-avatar-button', 'aria-label': bot ? '编辑伙伴' : '设置会话头像与背景', onClick: choose }, avatar), h('span', null, profile.name))
+  }
+  // DSH only offers rows inside 环境, but identity belongs to the session, not its environment.
+  // Lift it into a sibling just before that section of this panel instance; stay inline in hosts of another shape.
+  function SessionIdentitySection({ children }) {
+    const anchor = useRef(null), [seat, setSeat] = useState(null), useSeatEffect = React.useLayoutEffect ?? useEffect
+    useSeatEffect(() => {
+      const environment = anchor.current?.closest?.('[data-session-panel-section=environment]')
+      if (!environment?.parentElement?.matches?.('[data-session-panel]')) return
+      const node = environment.ownerDocument.createElement('section')
+      node.className = 'kode-session-identity'
+      node.setAttribute('aria-label', '会话 Agent')
+      node.setAttribute('data-kode-session-identity', '')
+      environment.before(node)
+      setSeat(node)
+      return () => { node.remove(); setSeat(null) }
+    }, [])
+    return h(React.Fragment, null, h('span', { ref: anchor, hidden: true }), seat ? createPortal(children, seat) : children)
   }
   function SessionAvatarMenuItem({ sessionId, useMenuOpenState }) {
     const [, setOpen] = useMenuOpenState()
@@ -3678,6 +3695,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
 [data-kode-panel-row] .kode-agent-avatar[data-avatar-state]::after{content:none}
 [data-kode-panel-row] [data-row-part=lines]{min-width:0}
 [data-kode-panel-row] [data-row-part=content],[data-kode-panel-row] [data-row-part=detail]{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kode-session-identity{display:grid;min-width:0;padding:4px 0 8px;border-bottom:.5px solid var(--dsw-alias-border-l2);margin-bottom:2px}
 .kode-environment-identity{display:flex;align-items:center;gap:4px;min-width:0;container-type:inline-size}
 .kode-environment-identity>[data-kode-panel-row]{flex:1;min-width:0}
 .kode-environment-identity [data-row-part=content]{font-weight:600}

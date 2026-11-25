@@ -433,7 +433,9 @@ test('the details card uses the composer profile without repeating its model acr
     const render = () => { const row = card.component(props); return row.type(row.props) }
     render()
     await new Promise(resolve => setImmediate(resolve))
-    const identity = render()
+    const block = render()
+    assert.equal(block.type.name, 'SessionIdentitySection')
+    const [identity] = block.children
     assert.equal(identity.props.className, 'kode-environment-identity')
     const [row, action] = identity.children
     assert.equal(row.props.label, name)
@@ -1062,7 +1064,7 @@ test('existing session identity remains visible when its runtime is idle or unlo
    openAvatarDialog: target => clicks.push(target),
  })
  const panelProps = { ...props, panel: true, dismissOverlay: () => clicks.push('close panel') }
- const companionRow = scope.AgentIdentity(panelProps).children[0].props
+ const companionRow = scope.AgentIdentity(panelProps).children[0].children[0].props
  assert.equal(companionRow.actionLabel, '编辑伙伴 柚子 PM')
  assert.equal(companionRow.icon.props.profile.avatar.id, 'gallery/yuzu')
  companionRow.onClick()
@@ -1070,7 +1072,7 @@ test('existing session identity remains visible when its runtime is idle or unlo
  assert.deepEqual(clicks, ['close panel', 'companions', 'kode-bot-edit'])
 
  scope.useWorkspaceDirectory = () => ({ current: 'remote-fixture', hosts: [{ id: 'remote-fixture', sessions: [{ id: 'saved-session', running: true, agent: { avatar: { id: 'gallery/remote' } } }] }] })
- const avatarRow = scope.AgentIdentity(panelProps).children[0].props
+ const avatarRow = scope.AgentIdentity(panelProps).children[0].children[0].props
  assert.equal(avatarRow.icon.props.status, 'running')
  avatarRow.onClick()
  assert.equal(clicks.at(-2), 'close panel')
@@ -1489,4 +1491,28 @@ test('imported relay contexts render the same communication card without requiri
   assert.equal(card.props.relay.address, 'worker.example/session-same-id')
   const rendered = card.type(card.props)
   assert.equal(rendered.props.className, 'kode-relay')
+})
+
+test('the session identity becomes a sibling before the native environment section, else stays inline', () => {
+  const start = source.indexOf('  function SessionIdentitySection('), end = source.indexOf('  function SessionAvatarMenuItem(', start)
+  let cleanup, seat = null, anchor
+  const scope = vm.createContext({ React: { Fragment: 'fragment' }, h: (type, props, ...children) => ({ type, props, children }),
+    createPortal: (element, node) => ({ portal: node, element }), useRef: () => anchor, useState: () => [seat, value => { seat = value }], useEffect: effect => { cleanup = effect() } })
+  vm.runInContext(source.slice(start, end), scope)
+  const inserted = [], attrs = {}
+  const node = { setAttribute: (key, value) => { attrs[key] = value }, remove: () => inserted.push('removed') }
+  const environment = { parentElement: { matches: selector => selector === '[data-session-panel]' }, ownerDocument: { createElement: tag => (node.tag = tag, node) }, before: added => inserted.push(added) }
+  anchor = { current: { closest: selector => selector === '[data-session-panel-section=environment]' ? environment : null } }
+  scope.SessionIdentitySection({ children: 'identity' })
+  assert.deepEqual(inserted, [node])
+  assert.equal(node.tag, 'section')
+  assert.equal(attrs['data-kode-session-identity'], '')
+  const lifted = scope.SessionIdentitySection({ children: 'identity' })
+  assert.deepEqual(lifted.children[1], { portal: node, element: 'identity' }, 'native heading stays on 环境; identity renders above it')
+  cleanup()
+  assert.equal(inserted.at(-1), 'removed')
+  assert.equal(seat, null)
+  anchor = { current: { closest: () => null } }
+  assert.equal(scope.SessionIdentitySection({ children: 'identity' }).children[1], 'identity', 'unknown hosts keep the identity inline')
+  assert.equal(cleanup, undefined)
 })
