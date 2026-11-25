@@ -556,7 +556,7 @@ export const ipc = {
   getLocale: () => invoke<string>('get_locale'),
   setLocale: (locale: LocaleMode) => invoke<void>('set_locale', { locale }),
 
-  /// 用系统默认程序打开路径或 URL(Windows 单击 / macOS Cmd+Click 触发)。
+  /// 用系统默认程序打开路径或 URL(桌面平台单击触发)。
   /// 绝对路径 / ~/... / http(s):// 白名单;失败时静默忽略。
   openPath: (path: string) => invoke<void>('open_path', { path }),
 

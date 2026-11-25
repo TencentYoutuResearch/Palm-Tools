@@ -4,19 +4,18 @@ import test from 'node:test'
 import { terminalLinkActivationEnabled } from '../src/lib/terminal_links.ts'
 import { terminalLinkTargets } from '../src/lib/terminal_path_links.ts'
 
-test('Windows terminal links open with a direct click', () => {
-  assert.equal(terminalLinkActivationEnabled({ metaKey: false, ctrlKey: false }, true), true)
-  assert.equal(terminalLinkActivationEnabled({ metaKey: false, ctrlKey: true }, true), true)
+test('desktop terminal links open with a direct click', () => {
+  assert.equal(terminalLinkActivationEnabled({ metaKey: false, ctrlKey: false }), true)
+  assert.equal(terminalLinkActivationEnabled({ metaKey: false, ctrlKey: true }), true)
 })
 
-test('macOS terminal links keep Cmd+Click as the modifier', () => {
-  assert.equal(terminalLinkActivationEnabled({ metaKey: true, ctrlKey: false }, false), true)
-  assert.equal(terminalLinkActivationEnabled({ metaKey: false, ctrlKey: true }, false), false)
+test('link activation is platform independent', () => {
+  assert.equal(terminalLinkActivationEnabled({ type: 'click' }), true)
 })
 
-test('missing mouse modifiers never open a link', () => {
-  assert.equal(terminalLinkActivationEnabled(undefined, true), false)
-  assert.equal(terminalLinkActivationEnabled(null, false), false)
+test('missing mouse events never open a link', () => {
+  assert.equal(terminalLinkActivationEnabled(undefined), false)
+  assert.equal(terminalLinkActivationEnabled(null), false)
 })
 
 test('URLs stay whole links and are never split into path segments', () => {

@@ -16,6 +16,31 @@ export type TerminalLinkTarget = {
   activation: 'open' | 'reveal'
 }
 
+export type WrappedTerminalCell = {
+  char: string
+  x: number
+  endX: number
+}
+
+export type WrappedTerminalRow = {
+  y: number
+  isWrapped: boolean
+  cells: WrappedTerminalCell[]
+}
+
+export type TerminalCellPosition = {
+  row: number
+  x: number
+  endX: number
+}
+
+export type LogicalTerminalLine = {
+  text: string
+  positions: TerminalCellPosition[]
+  startRow: number
+  endRow: number
+}
+
 function anchorLength(path: string): number {
   if (/^[A-Za-z]:[\\/]/.test(path)) return 3
   if (path.startsWith('\\\\')) {
@@ -110,4 +135,67 @@ export function terminalLinkTargets(raw: string): TerminalLinkTarget[] {
     revealChild: segment.revealChild,
     activation: segment.isFinal ? 'open' : 'reveal',
   }))
+}
+
+export function terminalLogicalRowBounds(
+  isWrappedAt: (index: number) => boolean | undefined,
+  requestedIndex: number,
+): { start: number; end: number } | null {
+  if (requestedIndex < 0 || isWrappedAt(requestedIndex) === undefined) return null
+  let start = requestedIndex
+  while (start > 0 && isWrappedAt(start) === true) start -= 1
+  let end = requestedIndex
+  while (isWrappedAt(end + 1) === true) end += 1
+  return { start, end }
+}
+
+export function joinWrappedTerminalRows(rows: WrappedTerminalRow[]): LogicalTerminalLine | null {
+  if (rows.length === 0) return null
+  let text = ''
+  const positions: TerminalCellPosition[] = []
+  for (const row of rows) {
+    for (const cell of row.cells) {
+      for (let offset = 0; offset < cell.char.length; offset += 1) {
+        text += cell.char[offset]
+        positions.push({ row: row.y, x: cell.x, endX: cell.endX })
+      }
+    }
+  }
+
+  while (text.endsWith(' ') && positions.length > 0) {
+    text = text.slice(0, -1)
+    positions.pop()
+  }
+
+  return {
+    text,
+    positions,
+    startRow: rows[0].y,
+    endRow: rows[rows.length - 1].y,
+  }
+}
+
+export function terminalRangeForOffsets(
+  line: LogicalTerminalLine,
+  start: number,
+  end: number,
+): { start: { x: number; y: number }; end: { x: number; y: number } } | null {
+  if (start < 0 || end <= start || end > line.positions.length) return null
+  const first = line.positions[start]
+  const last = line.positions[end - 1]
+  if (!first || !last) return null
+  return {
+    start: { x: first.x, y: first.row },
+    end: { x: last.endX, y: last.row },
+  }
+}
+
+export function terminalCharIndexAtPosition(
+  line: LogicalTerminalLine,
+  row: number,
+  x: number,
+): number {
+  return line.positions.findIndex(position =>
+    position.row === row && x >= position.x && x < position.endX
+  )
 }

@@ -50,8 +50,11 @@ paths:
 - Pointer interaction with expandable Codex/Tcodex terminal content must not
   terminate or interrupt the session. Codex-family terminals use the compatible
   click-versus-drag selection behavior.
-- On Windows, a direct click on a terminal URL opens it in the default browser.
-  macOS retains `Cmd+Click`. Only a link hit consumes the click.
+- On Windows, macOS, and Linux, a direct click on a terminal URL opens it in
+  the default browser. Only a link hit consumes the click.
+- Consecutive physical lines marked `isWrapped` are reconstructed as one
+  logical line before URL/path detection. Link ranges and click hit-testing map
+  back to their physical rows so any wrapped fragment activates the full target.
 - Terminal path output exposes non-overlapping path-component links. Clicking a
   parent component opens its directory and selects the next child; clicking the
   final component opens the file or directory. Relative and `~/` paths resolve

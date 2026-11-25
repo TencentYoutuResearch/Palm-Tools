@@ -1,12 +1,5 @@
-export type TerminalLinkEvent = {
-  metaKey: boolean
-  ctrlKey: boolean
-}
-
 export function terminalLinkActivationEnabled(
-  event: TerminalLinkEvent | null | undefined,
-  windowsPlatform: boolean,
+  event: unknown,
 ): boolean {
-  if (!event) return false
-  return windowsPlatform || event.metaKey
+  return event !== null && event !== undefined
 }
