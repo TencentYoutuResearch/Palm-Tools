@@ -37,6 +37,7 @@ function setup(
   getBackendKey?: () => string,
   safeMouseMode = false,
   deferSingleClickMs = 550,
+  shouldIgnoreMouseDown?: (event: MouseEvent) => boolean,
 ) {
   const host = new FakeElement()
   const selections: Array<[number, number, number]> = []
@@ -76,7 +77,15 @@ function setup(
   const dispose = installCodexMouseSelection(
     host as unknown as HTMLElement,
     terminal as any,
-    { now: () => clock.now, scheduler, forwardSingleClicks, getBackendKey, safeMouseMode, deferSingleClickMs },
+    {
+      now: () => clock.now,
+      scheduler,
+      forwardSingleClicks,
+      getBackendKey,
+      safeMouseMode,
+      deferSingleClickMs,
+      shouldIgnoreMouseDown,
+    },
   )
   const runTimers = () => {
     const callbacks = [...timers.values()]
@@ -93,6 +102,21 @@ function setup(
     runTimers,
   }
 }
+
+test('link mousedown is left for terminal link activation', () => {
+  const { host, dispose } = setup(
+    { now: 0 },
+    true,
+    undefined,
+    true,
+    550,
+    event => event.clientX === 10,
+  )
+  const down = new FakeMouseEvent('mousedown', { clientX: 10, clientY: 10, buttons: 1 })
+  host.dispatchEvent(down)
+  assert.equal(down.defaultPrevented, false)
+  dispose()
+})
 
 test('short mouse gesture replays one delayed CLI click without selecting text', () => {
   const { host, selections, dispose, runTimers } = setup()

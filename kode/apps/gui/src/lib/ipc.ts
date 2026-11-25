@@ -556,9 +556,12 @@ export const ipc = {
   getLocale: () => invoke<string>('get_locale'),
   setLocale: (locale: LocaleMode) => invoke<void>('set_locale', { locale }),
 
-  /// 用系统默认程序打开路径或 URL(Cmd+Click 触发)。
+  /// 用系统默认程序打开路径或 URL(Windows 单击 / macOS Cmd+Click 触发)。
   /// 绝对路径 / ~/... / http(s):// 白名单;失败时静默忽略。
   openPath: (path: string) => invoke<void>('open_path', { path }),
+
+  /// 打开目标所在目录并在系统文件管理器中选中目标。
+  revealPath: (path: string) => invoke<void>('reveal_path', { path }),
 
   /// 读系统剪贴板文本(Rust 侧,绕过 WKWebView 权限弹窗)。
   readClipboard: () => invoke<string>('read_clipboard'),
