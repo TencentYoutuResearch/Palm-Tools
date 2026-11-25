@@ -42,7 +42,11 @@ app.onRequest('session/new', async ({ params, client }) => { await record('sessi
 app.onRequest('session/load', async ({ params, client }) => {
   await record('session/load', params); await configureServers(params)
   sessionId = params.sessionId
-  if (process.env.KODE_ACP_FORK_AT === '1' && sessionId === 'original-thread') {
+  if (process.env.KODE_ACP_REPLAY_ROWS) {
+    for (const [role, id, text] of JSON.parse(process.env.KODE_ACP_REPLAY_ROWS)) {
+      await client.notify('session/update', { sessionId, update: { sessionUpdate: role + '_message_chunk', messageId: id, content: { type: 'text', text } } })
+    }
+  } else if (process.env.KODE_ACP_FORK_AT === '1' && sessionId === 'original-thread') {
     for (const [role, id, text] of [
       ['user', 'prior-user', 'EARLIER_QUESTION'], ['agent', 'prior-assistant', 'EARLIER_ANSWER'],
       ['user', 'target-user', 'ORIGINAL_TO_EDIT'], ['agent', 'target-assistant', 'EXCLUDED_ANSWER'],
@@ -52,9 +56,16 @@ app.onRequest('session/load', async ({ params, client }) => {
   await announceCommands(client)
   return { modes, configOptions }
 })
-app.onRequest('session/fork', { parse: value => value }, async ({ params }) => {
+app.onRequest('session/fork', { parse: value => value }, async ({ params, client }) => {
   await record('session/fork', params)
-  return { sessionId: 'fixture-checkpoint-thread' }
+  const forkedId = process.env.KODE_ACP_FORK_ID ?? 'fixture-checkpoint-thread'
+  if (process.env.KODE_ACP_FORK_RETURNS_STATE === '1') {
+    await configureServers(params)
+    sessionId = forkedId
+    await announceCommands(client)
+    return { sessionId: forkedId, modes, configOptions }
+  }
+  return { sessionId: forkedId }
 })
 app.onRequest('_session/rename', { parse: value => value }, async ({ params }) => { await record('_session/rename', params); return {} })
 app.onRequest('session/set_mode', async ({ params }) => { await record('session/set_mode', params); modes.currentModeId = params.modeId; return {} })

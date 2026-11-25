@@ -87,6 +87,11 @@ export async function hostOperation(ctx, input, config = {}) {
   }
   const allowed = { 'rename-workspace': 'rename', 'delete-workspace': 'delete', 'reorder-workspace': 'insertBefore', 'archive-session': 'archiveSession', 'unarchive-session': 'unarchiveSession', 'pin-session': 'pinSession', 'unpin-session': 'unpinSession' }
   if (input.operation === 'rename-session') return sessionController(ctx).rename({ sessionId: args.sessionId, title: args.title })
+  if (input.operation === 'fork-session') return sessionController(ctx).fork({
+    sessionId: args.sessionId,
+    ...(args.atSeq !== undefined ? { atSeq: args.atSeq } : {}),
+    increaseTitle: args.increaseTitle ?? true,
+  })
   if (!Object.hasOwn(allowed, input.operation)) throw new Error('未知目录操作。')
   const controller = ctx.get('workspaceController')
   if (!controller) throw new Error('工作区服务尚未就绪。')

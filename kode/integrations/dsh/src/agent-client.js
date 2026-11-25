@@ -3056,7 +3056,8 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     const source = props.useSessions(state => state), workspaceSource = props.useWorkspaces(state => state)
     const bots = useBots()
     const archivedFilter = props.useStore?.(state => state.archivedFilter) ?? 'default'
-    useEffect(() => { void refreshWorkspaceDirectory() }, [workspaceSource.archivedSessionIds])
+    const liveSessionKey = source.ids.filter(id => !source.byId[id]?.blank).join('\0')
+    useEffect(() => { void refreshWorkspaceDirectory() }, [workspaceSource.archivedSessionIds, liveSessionKey])
     const sessionStatusSource = avatarContext?.get?.('uiSession')?.sessionStatus
     const sessionStatuses = useSyncExternalStore(sessionStatusSource?.subscribe ?? emptyAvatarSubscribe, sessionStatusSource?.getSnapshot ?? emptyAvatarSnapshot)
     const merged = React.useMemo(() => {
@@ -3567,6 +3568,23 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
         name: 'clear', description: () => '清空上下文并开始同名新会话', icon: IconPlusOutlineRegular, available: canStartFresh,
         ui: { kind: 'action', run: session => freshSession(session, true) },
       }), 'kode.clear-session-command')
+      if (typeof commands.register === 'function') scope.effect(() => commands.register({
+        name: 'fork', description: () => '从当前对话拉出新分支', icon: IconPlusOutlineRegular,
+        available: session => Boolean(scope.sessions?.fork && scope.get('uiWorkspace') && !scope.sessions.list.getSnapshot().byId[session.sessionId]?.blank),
+        ui: { kind: 'action', run: session => {
+          const binding = scope.sessions.binding(session.sessionId)
+          return (async () => {
+            const forked = await scope.sessions.fork({ sessionId: session.sessionId, increaseTitle: true })
+            await scope.get('uiWorkspace')?.openSession(forked.sessionId)
+            await refreshWorkspaceDirectory()
+          })().catch(error => {
+            const text = /fork-unavailable|no completed turn/i.test(error?.message ?? '')
+              ? '仅可从已完成至少一轮对话的会话拉出分支。'
+              : (error?.message ?? '拉出分支失败。')
+            binding?.ctx.get('conversation')?.input.for(binding.ctx).notify('error', text)
+          })
+        } },
+      }), 'kode.fork-session-command')
       if (typeof commands.decorate === 'function') scope.effect(() => commands.decorate({
         name: 'resume',
         available: session => { const profile = directory(session.sessionId).getSnapshot().data?.currentProfile; return Boolean(profile && profile.type !== 'dsh') },

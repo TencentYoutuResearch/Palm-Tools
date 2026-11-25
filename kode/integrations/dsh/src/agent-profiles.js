@@ -176,6 +176,27 @@ export class AgentProfiles {
       return binding
     })
   }
+  bindFork(sessionId, profile, { seenInputs = [], forkSource = null } = {}) {
+    if (!profile) throw new Error('unknown Agent profile')
+    const snapshot = structuredClone(profile)
+    const inputs = [...new Set(seenInputs.filter(id => typeof id === 'string' && id))]
+    return this.update(state => {
+      const existing = Object.hasOwn(state.bindings, sessionId) ? state.bindings[sessionId] : undefined
+      if (existing) {
+        if (existing.profile.id !== snapshot.id) throw new Error('start a new conversation to change its Agent configuration')
+        return existing
+      }
+      const binding = {
+        profile: snapshot,
+        revision: profileRevision(snapshot),
+        seenInputs: inputs,
+        forkPending: true,
+        ...(forkSource ? { forkSource: structuredClone(forkSource) } : {}),
+      }
+      Object.defineProperty(state.bindings, sessionId, { value: binding, enumerable: true, configurable: true, writable: true })
+      return binding
+    })
+  }
   /** `empty`: the caller verified the dsh conversation shows nothing yet. A
    *  native thread opened for it (a send whose turn never reached the dsh log)
    *  is then dropped with the binding instead of locking the draft to that Agent. */

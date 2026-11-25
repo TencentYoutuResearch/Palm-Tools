@@ -182,6 +182,115 @@ export class AcpSession {
       if (this.rpc.closed) throw error
     } finally { this.replay = undefined }
   }
+  async forkBranch(sourceThreadId, { claudeBoundary, canUseLatest = false } = {}, tools = [], signal = this.lifetime.signal) {
+    if (!sourceThreadId) return undefined
+    signal.throwIfAborted()
+    await this.initialize(signal)
+    const capabilities = this.info.agentCapabilities
+    if (!capabilities?.sessionCapabilities?.fork) return undefined
+    let forkMeta
+    if (!canUseLatest) {
+      if (!claudeBoundary?.lastAssistantText || !capabilities.loadSession) return undefined
+      const { lastAssistantText, nextUserText, occurrence = 1, fingerprint } = claudeBoundary
+      const maxLen = Math.max(lastAssistantText.length, nextUserText?.length ?? 0)
+      const entries = []
+      let row
+      const settle = () => {
+        if (row) entries.push(row)
+        row = undefined
+      }
+      this.replay = { threadId: sourceThreadId, add: update => {
+        const role = update.sessionUpdate === 'user_message_chunk' ? 'user' : update.sessionUpdate === 'agent_message_chunk' ? 'agent' : undefined
+        if (!role) {
+          if (['tool_call', 'tool_call_update', 'plan'].includes(update.sessionUpdate)) { settle(); entries.push({ role: 'tool' }) }
+          return
+        }
+        const id = update.messageId
+        if (!id) { settle(); entries.push({ role: 'unknown' }); return }
+        if (id !== row?.id || role !== row.role) { settle(); row = { id, role, text: '' } }
+        if (update.content?.type !== 'text' || row.text === null || row.text.length + update.content.text.length > maxLen) row.text = null
+        else row.text += update.content.text
+      } }
+      try {
+        await this.request('session/load', { sessionId: sourceThreadId, cwd: this.cwd, mcpServers: [] }, signal)
+        settle()
+      } catch (error) {
+        signal?.throwIfAborted()
+        if (this.rpc.closed) throw error
+        return undefined
+      } finally { this.replay = undefined }
+      let found
+      if (nextUserText) {
+        const paired = []
+        for (let i = 0; i < entries.length - 1; i++) {
+          if (entries[i].role === 'agent' && entries[i].text === lastAssistantText && entries[i + 1].role === 'user' && entries[i + 1].text === nextUserText) {
+            paired.push(entries[i].id)
+          }
+        }
+        if (paired.length === 1) found = paired[0]
+      }
+      if (!found) {
+        const matching = entries.filter(entry => entry.role === 'agent' && entry.text === lastAssistantText)
+        if (occurrence >= 1 && matching.length >= occurrence) found = matching[occurrence - 1].id
+      }
+      if (!found) return undefined
+      forkMeta = {
+        jetbrains: {
+          air: {
+            fork: {
+              version: 1,
+              messageId: found,
+              ...(fingerprint ? { messageFingerprint: fingerprint } : {}),
+              ...(occurrence ? { messageOccurrence: occurrence } : {}),
+            },
+          },
+        },
+      }
+    }
+    const mcpServers = []
+    if (tools.length) {
+      this.proxy = await createToolProxy(tools, async (name, args) => {
+        if (!this.active) throw new Error('Agent tools require an active conversation turn')
+        return this.handlers.tool({ threadId: this.threadId, turnId: this.active.turnId, callId: randomUUID(), tool: name, arguments: args }, this.active.promptSignal ?? this.active.signal)
+      })
+      mcpServers.push(this.proxy.definition)
+    }
+    const claudeMeta = typeof this.profile.autoCompactEnabled === 'boolean'
+      ? { claudeCode: { options: { settings: { autoCompactEnabled: this.profile.autoCompactEnabled } } } }
+      : {}
+    const meta = { ...claudeMeta, ...(forkMeta ?? {}) }
+    this.opening = true
+    try {
+      const result = await this.request('session/fork', {
+        sessionId: sourceThreadId,
+        cwd: this.cwd,
+        mcpServers,
+        ...(Object.keys(meta).length ? { _meta: meta } : {}),
+      }, signal)
+      const forkedId = result?.sessionId
+      if (typeof forkedId !== 'string' || !forkedId || forkedId === sourceThreadId) {
+        this.setupUpdates.length = 0
+        await this.proxy?.close(); this.proxy = undefined
+        return undefined
+      }
+      if (result.modes || result.configOptions || result.models) {
+        this.tools = tools
+        this.threadId = forkedId
+        this.state = result
+        for (const update of this.setupUpdates.splice(0)) this.update(update)
+        return { sessionId: forkedId, opened: true }
+      }
+      this.setupUpdates.length = 0
+      await this.proxy?.close(); this.proxy = undefined
+      return { sessionId: forkedId, opened: false }
+    } catch (error) {
+      this.setupUpdates.length = 0
+      await this.proxy?.close(); this.proxy = undefined
+      signal?.throwIfAborted()
+      if (this.rpc.closed) throw error
+      return undefined
+    } finally { this.opening = false }
+  }
   async open(binding, tools, signal = this.lifetime.signal) {
     signal.throwIfAborted()
     await this.initialize(signal)

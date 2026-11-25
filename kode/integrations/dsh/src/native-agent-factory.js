@@ -8,6 +8,10 @@ import { historyEditProjection } from './history-edit.js'
 import { interruptedTurnClosers } from '@deepseek-ai/dsh-session'
 import { NativeAgentDriver, boundaryProjection, inboxProjection } from './native-agent-driver.js'
 import { installQueueSteering } from './queue-steering.js'
+import { extractForkSource, inheritedSeenInputs, readParentEvents } from './session-fork.js'
+const selectedConfigFrom = events =>
+  events?.findLast(event => event.type === 'model/selection')?.data
+  ?? events?.findLast(event => event.type === 'request/header')?.data?.header?.config
 export const name = 'kode-native-agent-factory'
 export const inject = ['agents', 'sessions', 'sessionProjections', 'sessionPersistence', 'kodeAgents', 'tools', 'agentPresets', 'agentLoop']
 export class NativeAgentFactory {
@@ -59,7 +63,7 @@ export class NativeAgentFactory {
   }
   async attach(owner, options, resume) {
     const ctx = this.ctx, id = options.resumeSessionId ?? options.sessionId
-    let handle, driver, detachSession, detachAgent, releaseOwner, published = false, closing
+    let handle, driver, detachSession, detachAgent, releaseOwner, published = false, closing, createdForkBinding = false
     let closed = false
     const setupDone = Promise.withResolvers(), ownerAbort = new AbortController()
     const signal = AbortSignal.any([this.stop.signal, ownerAbort.signal, ...(options.signal ? [options.signal] : [])])
@@ -76,12 +80,11 @@ export class NativeAgentFactory {
     const check = () => { signal.throwIfAborted(); owner.fiber.assertActive(); if (closed || this.stopping) throw new Error('Agent owner was disposed during setup') }
     try {
       check()
-      let session
+      let session, storedParentSource
       if (resume) {
         handle = await ctx.sessionPersistence.open(id, 'write', { signal }); check()
         const stored = await handle.read(0, undefined, { signal }); check()
-        const selected = stored.events.findLast(event => event.type === 'model/selection')?.data
-          ?? stored.events.findLast(event => event.type === 'request/header')?.data?.header?.config
+        const selected = selectedConfigFrom(stored.events)
         if (selected?.provider?.startsWith('kode-agent-')) {
           const { reasoningEffort: _fallbackEffort, ...fallback } = options.agentOptions ?? {}
           options = { ...options, agentOptions: { ...fallback, ...selected } }
@@ -94,16 +97,42 @@ export class NativeAgentFactory {
         }
         session = ctx.sessions.prepare(id, { seed: [...stored.events, ...closers], meta: handle.header, inheritedEventCount: handle.inheritedEventCount })
       } else {
+        const selected = selectedConfigFrom(options.seed)
+        if (selected?.provider?.startsWith('kode-agent-')) {
+          const { reasoningEffort: _fallbackEffort, ...fallback } = options.agentOptions ?? {}
+          options = { ...options, agentOptions: { ...fallback, ...selected } }
+        }
         session = ctx.sessions.prepare(id, { ...(options.meta ? { meta: options.meta } : {}), ...(options.seed ? { seed: options.seed } : {}), ...(options.inheritedEventCount ? { inheritedEventCount: options.inheritedEventCount } : {}) })
-        handle = await ctx.sessionPersistence.create(session.header, { signal, ...(options.inheritedEventCount ? { inheritedEventCount: options.inheritedEventCount } : {}) }); check()
+        storedParentSource = options.parentSource ? { ...options.parentSource, events: session.snapshotEvents() } : undefined
+        handle = await ctx.sessionPersistence.create(session.header, { signal, ...(options.inheritedEventCount ? { inheritedEventCount: options.inheritedEventCount } : {}), ...(storedParentSource ? { parentSource: storedParentSource } : {}) }); check()
       }
       driver = new NativeAgentDriver(ctx, id, options.agentOptions ?? {}, session, ctx.kodeAgents)
-      const storedCount = resume ? (await handle.read()).events.length : 0
+      const storedCount = resume || storedParentSource ? (await handle.read()).events.length : 0
       // DSH 0.2.2 requires store membership and completed session/created
       // publication before setup may append model/preset/binding events.
       const suffix = session.snapshotEvents(storedCount)
       if (suffix.length) await handle.append(suffix)
       check()
+      if (!resume && options.parentSource && ctx.kodeAgents.profiles?.bindFork && !ctx.kodeAgents.profiles.binding?.(id)) {
+        const parentId = options.parentSource.sessionId
+        const parentBinding = ctx.kodeAgents.profiles.binding?.(parentId)
+        const profileId = options.agentOptions?.provider?.startsWith('kode-agent-')
+          ? options.agentOptions.provider.slice('kode-agent-'.length)
+          : undefined
+        const profile = parentBinding?.profile ?? (profileId ? ctx.kodeAgents.profiles.get?.(profileId) : undefined)
+        if (profile) {
+          const inheritedCount = options.inheritedEventCount ?? options.parentSource.endSeq ?? 0
+          const inheritedEvents = session.snapshotEvents().slice(0, inheritedCount)
+          const parentEvents = await readParentEvents(ctx, parentId, signal); check()
+          const forkSource = extractForkSource({ parentId, parentBinding, inheritedEvents, parentEvents })
+          await ctx.kodeAgents.profiles.bindFork(id, profile, {
+            seenInputs: inheritedSeenInputs(inheritedEvents),
+            forkSource,
+          })
+          createdForkBinding = true
+          check()
+        }
+      }
       detachSession = driver.ctx.sessions.enter(session)
       driver.ctx.sessions.announce(session); check()
       const commit = await options.setup?.(driver.ctx, driver); check(); commit?.commit()
@@ -112,7 +141,12 @@ export class NativeAgentFactory {
       published = true; this.live.add(dispose); this.byId.set(id, dispose); ctx.kodeAgents.mountCommands?.(driver); driver.start()
       setupDone.resolve()
       return { agent: driver, dispose: async () => { try { await dispose() } finally { await releaseOwner() } } }
-    } catch (error) { setupDone.resolve(); try { await dispose() } finally { await releaseOwner() }; throw error }
+    } catch (error) {
+      setupDone.resolve()
+      if (createdForkBinding && !published) await ctx.kodeAgents.profiles?.clearUnusedBinding?.(id, { empty: true }).catch(() => {})
+      try { await dispose() } finally { await releaseOwner() }
+      throw error
+    }
     finally { if (!published) this.live.delete(dispose) }
   }
   /** Stop one session's native CLI process (app-server/ACP) without unloading
@@ -147,11 +181,22 @@ export function installNativeFactoryRouting(ctx, native) {
     return opened.agent
   }
   const remember = (owner, handle) => { officialHandles.set(handle.agent.id, {owner,handle}); return handle }
+  const forkOwns = (options, checkBinding = true) => {
+    if (!options.parentSource) return undefined
+    if (checkBinding && ctx.kodeAgents.profiles?.binding?.(options.parentSource.sessionId)) return true
+    if (nativeIds.has(options.parentSource.sessionId)) return true
+    const seeded = selectedConfigFrom(options.seed)
+    if (seeded?.provider) return seeded.provider.startsWith('kode-agent-')
+    if (options.meta?.agentPreset) return options.meta.agentPreset === 'kode-native'
+    return undefined
+  }
   const owns = async (options, restoring, storage = persistence, checkBinding = true) => {
     const id = options.resumeSessionId ?? options.sessionId
     if (checkBinding && ctx.kodeAgents.profiles?.binding?.(id)) return true
     const provider = options.agentOptions?.provider
     if (!restoring) {
+      const inherited = forkOwns(options, checkBinding)
+      if (inherited !== undefined) return inherited
       if (provider) return provider.startsWith('kode-agent-')
       return options.meta?.agentPreset === 'kode-native'
     }
@@ -159,8 +204,7 @@ export function installNativeFactoryRouting(ctx, native) {
     try {
       handle = await storage.open(id, 'read', { signal: options.signal })
       const stored = await handle.read()
-      const selected = stored.events.findLast(event => event.type === 'model/selection')?.data
-        ?? stored.events.findLast(event => event.type === 'request/header')?.data?.header?.config
+      const selected = selectedConfigFrom(stored.events)
       // Cold resume callers may carry global defaults. Durable ownership wins
       // before those defaults, including when the profile binding is unavailable.
       if (selected?.provider) return selected.provider.startsWith('kode-agent-')
@@ -206,7 +250,8 @@ export function installNativeFactoryRouting(ctx, native) {
   if (resumeWith) upstream.resumeWith = routing.wrappedResumeWith = resumeWithRouter
   return () => {
     if (upstream.createAgent === createRouter) upstream.createAgent = routing.wrappedCreate = function(owner, options) {
-      if (nativeIds.has(options.sessionId) || options.agentOptions?.provider?.startsWith('kode-agent-') || !options.agentOptions?.provider && options.meta?.agentPreset === 'kode-native') throw nativeUnavailable()
+      const inherited = forkOwns(options, false)
+      if (nativeIds.has(options.sessionId) || inherited === true || inherited === undefined && (options.agentOptions?.provider?.startsWith('kode-agent-') || !options.agentOptions?.provider && options.meta?.agentPreset === 'kode-native')) throw nativeUnavailable()
       return create.call(this, owner, options)
     }
     if (upstream.resume === resumeRouter) upstream.resume = routing.wrappedResume = async function(owner, options) {
@@ -216,8 +261,7 @@ export function installNativeFactoryRouting(ctx, native) {
       try {
         handle = await persistence.open(id, 'read')
         const stored = await handle.read()
-        const selected = stored.events.findLast(event => event.type === 'model/selection')?.data
-          ?? stored.events.findLast(event => event.type === 'request/header')?.data?.header?.config
+        const selected = selectedConfigFrom(stored.events)
         if (selected?.provider?.startsWith('kode-agent-') || !selected?.provider && ((stored.header ?? handle.header)?.agentPreset === 'kode-native' || options.agentOptions?.provider?.startsWith('kode-agent-'))) throw nativeUnavailable()
       } finally { await handle?.close() }
       return resume.call(this, owner, options)
