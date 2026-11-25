@@ -9,6 +9,7 @@ mod extensions;
 pub mod ext;
 pub mod bots;
 mod agent_updates;
+mod extension_auth;
 mod extension_files;
 mod extension_targets;
 mod handoff;

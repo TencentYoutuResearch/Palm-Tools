@@ -49,7 +49,7 @@ export function registerAgentHubApi(ctx, { hub, backend, service }) {
         let body = ''
         for await (const chunk of req) { body += chunk; if (Buffer.byteLength(body) > 128 * 1024) return send(res, 413, { error: 'Request too large' }) }
         input = JSON.parse(body)
-        if (!input || typeof input !== 'object' || Array.isArray(input) || !['power', 'save-source', 'sync-source', 'remove-source', 'goal', 'handoff', 'handoff-skill', 'agent-versions', 'update-agent'].includes(input.action)) throw new Error('Unknown operation')
+        if (!input || typeof input !== 'object' || Array.isArray(input) || !['mcp-status', 'mcp-login', 'power', 'save-source', 'sync-source', 'set-package-enabled', 'remove-source', 'goal', 'handoff', 'handoff-skill', 'agent-versions', 'update-agent'].includes(input.action)) throw new Error('Unknown operation')
         if (input.action === 'agent-versions' || input.action === 'update-agent') {
           if (input.action === 'update-agent' && typeof input.profileId !== 'string') throw new Error('请选择要更新的 Agent。')
           const command = input.action === 'update-agent'
@@ -66,9 +66,9 @@ export function registerAgentHubApi(ctx, { hub, backend, service }) {
           ])
           return send(res, 200, { ...versionInfo, dshVersion })
         }
-        if (['power', 'save-source', 'sync-source', 'remove-source'].includes(input.action)) {
+        if (['mcp-status', 'mcp-login', 'power', 'save-source', 'sync-source', 'set-package-enabled', 'remove-source'].includes(input.action)) {
           const value = await hub.change(input)
-          if (['sync-source', 'remove-source'].includes(input.action)) service.adapter.catalogs.clear()
+          if (['sync-source', 'set-package-enabled', 'remove-source'].includes(input.action)) service.adapter.catalogs.clear()
           return send(res, 200, value)
         }
       } else if (req.method !== 'GET') return send(res, 405, { error: 'GET or POST required' })

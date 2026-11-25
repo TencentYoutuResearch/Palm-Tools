@@ -1721,18 +1721,35 @@ function installSessionNotifications(ctx, transport, env = globalThis) {
 }
 
 // packages/transport/navigation.js
-async function openSessionTarget(ctx, target, signal) {
+async function openSessionTarget(ctx, target, signal, fetchHost) {
   signal.throwIfAborted();
   if (target.resume) {
     await ctx.get("workspaces").unarchiveSession(target.sessionId);
     signal.throwIfAborted();
-    await ctx.get("sessions").refresh();
+  }
+  const sessions = ctx.get("sessions");
+  const missing = () => sessions?.list && !sessions.list.getSnapshot().byId[target.sessionId] && !sessions.subagentAddress?.(target.sessionId);
+  if (target.resume || missing()) {
+    await sessions.refresh();
+    signal.throwIfAborted();
+  }
+  if (ctx.get("sessions") !== sessions) throw new Error("\u4F1A\u8BDD\u4E3B\u673A\u5DF2\u5207\u6362\uFF0C\u8BF7\u91CD\u65B0\u6253\u5F00\u3002");
+  if (missing() && fetchHost && sessions.handleSessionAdded) {
+    const query = new URLSearchParams({ summary: target.sessionId });
+    const response = await fetchHost(`/api/kode/native-sessions?${query}`, { cache: "no-store", signal });
+    const data = await response.json();
+    signal.throwIfAborted();
+    if (ctx.get("sessions") !== sessions) throw new Error("\u4F1A\u8BDD\u4E3B\u673A\u5DF2\u5207\u6362\uFF0C\u8BF7\u91CD\u65B0\u6253\u5F00\u3002");
+    if (!response.ok || data.summary?.sessionId !== target.sessionId) {
+      throw new Error(data.error || "\u5F53\u524D\u4E3B\u673A\u7684 DSH \u76EE\u5F55\u4E2D\u627E\u4E0D\u5230\u6B64\u4F1A\u8BDD\u3002");
+    }
+    sessions.handleSessionAdded(data.summary);
   }
   signal.throwIfAborted();
   const ui = ctx.get("uiWorkspace"), layout = ctx.get("layout");
   if (!ui || !layout) throw new Error("\u4F1A\u8BDD\u89C6\u56FE\u5C1A\u672A\u5C31\u7EEA\uFF0C\u8BF7\u91CD\u8BD5\u3002");
   layout.beginNavigation();
-  ui.openSession(target.sessionId);
+  await ui.openSession(target.sessionId);
 }
 async function openWorkspaceTarget(ctx, target, signal) {
   signal.throwIfAborted();
@@ -1873,7 +1890,7 @@ async function apply(ctx) {
         }
       }
       signal.throwIfAborted();
-      if (target.sessionId) await openSessionTarget(ctx, target, signal);
+      if (target.sessionId) await openSessionTarget(ctx, target, signal, fetchHost);
       else if (target.workspaceId) await openWorkspaceTarget(ctx, target, signal);
       else if (target.create) window.dispatchEvent(new CustomEvent("kode-create-project", { detail: { name: target.name ?? "" } }));
       else {

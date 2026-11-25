@@ -523,8 +523,8 @@ test('Plugin and Skills sources stay a multi-item list with an on-demand editor 
  assert.ok(findNode(editor,node=>node.props?.className==='kode-field kode-source-field-location'))
  assert.equal(findNode(editor,node=>node.props?.className==='kode-source-editor-actions').children.length,2)
  assert.match(source,/\.kode-source-editor\{display:grid;grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/)
- assert.match(source,/\.kode-source-field-location,\.kode-source-field-subdir,\.kode-source-editor-actions\{grid-column:1\/-1\}/)
- assert.match(source,/@media\(max-width:600px\)\{\.kode-source-editor\{grid-template-columns:minmax\(0,1fr\)\}/)
+ assert.match(source,/\.kode-source-field-location,\.kode-source-field-subdir\{grid-column:1\/-1\}/);assert.match(source,/\.kode-source-editor-actions\{grid-column:1\/-1/)
+ assert.match(source,/@media\(max-width:600px\)\{[^@]*\.kode-source-editor\{grid-template-columns:minmax\(0,1fr\)\}/)
  assert.equal(findNode(closed,node=>node.props?.label==='Agent'),undefined)
  const target = (tree, name) => findNode(tree,node=>node.props?.className==='kode-source-target-option'&&node.children.includes(name))
  assert.equal(target(editor,'DeepSeek Harness').props['aria-pressed'],true)
@@ -572,7 +572,7 @@ test('Kode settings use the native settings section and a pinnable sidebar panel
   const selected = [], c = client(undefined, {}, { layout: { selectPanel: id => selected.push(id) } })
   const settings = c.ctx.slots.entries('settings.section').find(row => row.options.id === 'agent-presets')
   assert.ok(settings, JSON.stringify(c.ctx.slots.entries('settings.section').map(row => row.options)))
-  assert.equal(settings.options.name, 'settings.section'); assert.equal(settings.options.label(), 'Kode')
+  assert.equal(settings.options.name, 'settings.section'); assert.equal(settings.options.label(), 'Kode 设置')
   assert.equal(c.ctx.slots.entries('settings.trigger').length, 0)
   const rows = c.ctx.slots.entries('sidebar.panellist')
   assert.equal(rows.find(row => row.options.id === 'kode-settings')?.options.label, 'Kode 设置')
@@ -1161,18 +1161,24 @@ test('Agent avatar edit marks use a small offset badge instead of covering the a
 test('service status and personalization use explicit labeled cards and fill the settings content width',()=>{
  assert.match(source,/className: 'kode-settings-group', 'aria-label': '服务状态'/)
  assert.match(source,/className: 'kode-settings-card kode-host-service'/)
- assert.match(source,/className: 'kode-host-service-body'/)
+ assert.doesNotMatch(source,/kode-host-service-body/)
+ assert.match(source,/className: 'kode-service-row' \},\n\s+h\('div', \{ className: 'kode-service-row-main' \}, status,/)
+ assert.match(source,/\.kode-service-row\{display:flex;align-items:center/)
+ assert.match(source,/\.kode-service-recovery-actions\{[^}]*margin-left:auto/)
+ assert.match(source,/@media\(max-width:600px\)\{[^@]*\.kode-service-row\{flex-direction:column;align-items:stretch\}/)
  assert.match(source,/\.kode-mobile-pairing,\.kode-host-service\{display:flex;flex-direction:column;gap:12px;padding:16px/)
  assert.match(source,/className: 'kode-personalization-session-label' \}, '当前会话'/)
  assert.match(source,/\.kode-personalization-session strong\{[^}]*font-size:14px;font-weight:500/)
  assert.match(source,/\.kode-settings-page \.kode-settings-section \.kode-agent-settings\{width:100%;max-width:none;min-width:0;box-sizing:border-box\}/)
- assert.match(source,/\.kode-settings-page \.kode-personalization \.kode-avatar-content,\.kode-settings-page \.kode-personalization \.kode-avatar-grid,\.kode-settings-page \.kode-personalization \.kode-avatar-preview\{width:100%;min-width:0;box-sizing:border-box\}/)
+ for(const part of ['content','grid','preview'])assert.match(source,new RegExp(`\\.kode-settings-page \\.kode-personalization \\.kode-avatar-${part}[,{][^}]*\\{?[^}]*width:100%;min-width:0;box-sizing:border-box`))
 })
 
 test('goal dock pause, resume and clear controls retain the current session identity',async()=>{
  const c=client(),render=c.entryById('kode-goal-bar')
  const walk=node=>Array.isArray(node)?node.flatMap(walk):node&&typeof node==='object'?[node,...walk(node.children??[])]:[]
- const view=status=>render({sessionId:'session-goal-fixture',useProjection:()=>({objective:'Fixture goal',status})})
+ // Without the DSH goal bundle (or its locale seat) the dock falls back to Kode's own strip.
+ const strip=props=>{const element=render(props);return element&&typeof element.type==='function'?element.type(element.props):element}
+ const view=status=>strip({sessionId:'session-goal-fixture',useProjection:()=>({objective:'Fixture goal',status})})
  for(const status of ['active','paused','complete','blocked']){
   const tree=view(status),rows=walk(tree)
   assert.equal(tree.props['data-goal-status'],status)
@@ -1186,7 +1192,7 @@ test('goal dock pause, resume and clear controls retain the current session iden
   assert.ok(button);assert.equal(button.children[0].type,icon);button.props.onClick();await new Promise(resolve=>setImmediate(resolve))
   assert.deepEqual(c.requests.at(-1),{action:'goal',sessionId:'session-goal-fixture',command})
  }
- assert.equal(render({sessionId:'session-goal-fixture',useProjection:()=>null}),null)
+ assert.equal(strip({sessionId:'session-goal-fixture',useProjection:()=>null}),null)
 })
 
 test('/clear creates a same-name fresh session for each Agent without copying its old thread', async () => {
@@ -1358,7 +1364,7 @@ test('Agent naming is grouped under conversation communication and missing suppo
   h: (type, props, ...children) => ({ type, props: props ?? {}, children }),
   React: { Fragment: 'fragment' }, Button: 'button', useState: value => [value, () => {}],
   useIntegrationSettings: () => ({ data, update() {}, busy: false, error: '' }),
-  HubSettings: 'HubSettings', Failure: 'Failure', ServiceRecoveryLink: 'ServiceRecoveryLink',
+  HubSettings: 'HubSettings', Failure: 'Failure', ServiceRecoveryLink: 'ServiceRecoveryLink', useRef: () => ({ current: null }), useEffect: () => {},
  }
  vm.runInNewContext(source.slice(source.indexOf('  function IntegrationSettingsBody('), source.indexOf('  function MobileSettingsBody(')), scope)
  const render = settings => { data = { settings }; return scope.IntegrationSettingsBody({ host: 'local' }) }
@@ -1377,16 +1383,17 @@ test('Agent naming is grouped under conversation communication and missing suppo
  assert.equal(findNode(general, node => node.type?.name === 'SessionNamingSettings'), undefined)
 })
 
-test('session naming settings save a semantic prompt and restore the default', async () => {
-  const state = [], writes = []
+test('session naming shows the effective rule, edits it in place, saves and restores the default', async () => {
+  const state = [], writes = [], defaultPrompt = 'Summarize the task as Intent-Detail.'
   let cursor = 0, prompt = ''
   const scope = {
     h: (type, props, ...children) => ({ type, props: props ?? {}, children }),
     useState: initial => {
       const index = cursor++
       if (!(index in state)) state[index] = initial
-      return [state[index], next => { state[index] = next }]
+      return [state[index], next => { state[index] = typeof next === 'function' ? next(state[index]) : next }]
     },
+    useRef: () => ({ current: null }), useEffect: () => {}, requestAnimationFrame: fn => fn(),
     Button: 'button',
   }
   vm.runInNewContext(source.slice(source.indexOf('  function SessionNamingSettings('), source.indexOf('  function SessionBehaviorSettings(')), scope)
@@ -1395,21 +1402,42 @@ test('session naming settings save a semantic prompt and restore the default', a
     prompt = input.settings.session_naming_prompt
     return { settings: input.settings }
   }
-  const render = () => { cursor = 0; return scope.SessionNamingSettings({ prompt, busy: false, update }) }
+  const render = () => { cursor = 0; return scope.SessionNamingSettings({ prompt, defaultPrompt, maxWords: 4, busy: false, update }) }
+  const button = (tree, label) => findNode(tree, node => node.type === 'button' && node.children.includes(label))
   const saveButton = tree => findNode(tree, node => node.type === 'button' && node.props.type === 'submit')
-  assert.equal(saveButton(render()).props.disabled, true)
+  // View state: the default rule is visible and marked as the default; nothing is editable yet.
+  let view = render()
+  assert.equal(findNode(view, node => node.type === 'pre').children[0], defaultPrompt)
+  assert.match(visibleText(view), /默认/); assert.match(visibleText(view), /最多 4 个词/)
+  assert.equal(findNode(view, node => node.type === 'textarea'), undefined)
+  // Edit state starts from the effective rule; unchanged text cannot be saved.
+  button(view, '编辑规则').props.onClick()
+  let form = render()
+  assert.equal(form.type, 'form')
+  assert.equal(findNode(form, node => node.type === 'textarea').props.value, defaultPrompt)
+  assert.equal(saveButton(form).props.disabled, true)
+  assert.equal(button(form, '恢复默认'), undefined)
   const custom = '评审时以 Review- 开头，使用中文细节'
-  findNode(render(), node => node.type === 'textarea').props.onChange({ target: { value: custom } })
-  const form = render()
+  findNode(form, node => node.type === 'textarea').props.onChange({ target: { value: custom } })
+  form = render()
   assert.equal(saveButton(form).props.disabled, false)
   form.props.onSubmit({ preventDefault() {} })
   await new Promise(resolve => setImmediate(resolve))
   assert.deepEqual(writes, [{ action: 'configure', settings: { session_naming_prompt: custom } }])
-  assert.match(visibleText(render()), /已保存/)
-  findNode(render(), node => node.type === 'button' && node.children.includes('恢复默认')).props.onClick()
+  view = render()
+  assert.notEqual(view.type, 'form')
+  assert.match(visibleText(view), /已保存/); assert.match(visibleText(view), /自定义/)
+  assert.equal(findNode(view, node => node.type === 'pre').children[0], custom)
+  // Escape cancels without writing.
+  button(view, '编辑规则').props.onClick()
+  render().props.onKeyDown({ key: 'Escape', preventDefault() {}, stopPropagation() {} })
+  assert.notEqual(render().type, 'form'); assert.equal(writes.length, 1)
+  // Restore default writes an empty override; typing the default text back also counts as the default.
+  button(render(), '编辑规则').props.onClick()
+  button(render(), '恢复默认').props.onClick()
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(writes.at(-1).settings.session_naming_prompt, '')
-  assert.equal(findNode(render(), node => node.type === 'textarea').props.value, '')
+  assert.equal(findNode(render(), node => node.type === 'pre').children[0], defaultPrompt)
 })
 
 test('global activity follows native subscriptions without any mounted shell or React component', () => {
@@ -1450,8 +1478,8 @@ test('goal pencil edits inline and saves the existing session goal', async () =>
     IconPauseOutlineRegular: 'pause', IconPlayOutlineRegular: 'play',
     IconCloseOutlineRegular: 'close', IconEditOutlineRegular: 'edit',
   }
-  vm.runInNewContext(source.slice(source.indexOf('  function GoalBar('), source.indexOf('  function HandoffAction(')), scope)
-  const render = () => { index = 0; return scope.GoalBar({ sessionId: 'goal-edit-fixture', useProjection: () => ({ objective: 'Original objective', status: 'active' }) }) }
+  vm.runInNewContext(source.slice(source.indexOf('  function KodeGoalStrip('), source.indexOf('  function HandoffAction(')), scope)
+  const render = () => { index = 0; return scope.KodeGoalStrip({ sessionId: 'goal-edit-fixture', goal: { objective: 'Original objective', status: 'active' } }) }
   const walk = node => Array.isArray(node) ? node.flatMap(walk) : node && typeof node === 'object' ? [node, ...walk(node.children ?? [])] : []
   walk(render()).find(node => node.props['aria-label'] === '编辑目标').props.onClick()
   const editing = walk(render()), input = editing.find(node => node.type === 'input')
@@ -1754,7 +1782,7 @@ test('settings controls use native Button variants, token focus rings and a fixe
  assert.match(source, /\.kode-settings-nav button:focus-visible\{[^}]*var\(--dsw-focus-ring-width,2px\)/)
  assert.match(source, /:is\(\.kode-project-dialog,\.kode-handoff-dialog,\.kode-subagent-dialog,\.kode-confirm-dialog\)\{[^}]*max-height:calc\(100dvh - 48px\)/)
  assert.match(source, /overflow-y:auto;overscroll-behavior:contain/)
- assert.match(source, /@media\(prefers-reduced-motion:reduce\)\{\.kode-settings-page \*[^{]*\{transition:none/)
+ assert.match(source, /@media\(prefers-reduced-motion:reduce\)\{[^@]*\.kode-settings-page \*[^{]*\{transition:none/)
  assert.match(source, /className: 'kode-confirm-dialog'/)
 })
 
@@ -1765,4 +1793,19 @@ test('subagent titles strip Markdown markers from the first task line', () => {
  assert.equal(childTitle({ task: '## 修复 `quietLine`' }), '修复 quietLine')
  assert.equal(childTitle({ name: 'reviewer', task: '**x**' }), 'reviewer')
  assert.equal(childTitle({ task: '**' }), '子 Agent')
+})
+
+test('goal dock borrows the public DSH GoalBar while Kode keeps Codex goal state',()=>{
+ assert.match(source,/require\('@deepseek-ai\/dsh-client-ui-goal'\)/)
+ assert.match(source,/require\.async\?\.\('@deepseek-ai\/dsh-client-ui-goal'\)/)
+ assert.match(source,/id: 'kode-goal-bar', order: 100, locale: 'goal'/)
+ assert.match(source,/if \(dshGoal\?\.goal\) return null/)
+ assert.match(source,/hubCall\(\{ action: 'goal', sessionId, command \}, host\)/)
+ const start=source.indexOf('  const KODE_GOAL_BLOCKED'), end=source.indexOf('  function useSessionProjection')
+ const nativeGoalSnapshot=vm.runInNewContext(source.slice(start,end)+'\nnativeGoalSnapshot')
+ assert.equal(nativeGoalSnapshot(null,'s1'),null)
+ assert.deepEqual({...nativeGoalSnapshot({objective:'ship',status:'paused'},'s1')},{id:'kode:s1:current',revision:1,objective:'ship',phase:'paused',maxGoalRounds:1})
+ const limited=nativeGoalSnapshot({objective:'ship',status:'budgetLimited'},'s1')
+ assert.equal(limited.phase,'blocked'); assert.equal(limited.blockedReason.code,'budgetLimited'); assert.equal(limited.blockedReason.message,'目标预算已用完')
+ assert.equal(nativeGoalSnapshot({objective:'ship',status:'complete'},'s1').phase,'complete')
 })

@@ -1132,6 +1132,82 @@ async fn agent_hub_is_backend_owned_owner_only_and_shared_by_independent_clients
     assert!(!s.hub.extensions.home.join(".claude/skills/team--skills--example").exists());
 }
 #[cfg(not(windows))]
+#[cfg(unix)]
+#[tokio::test]
+async fn extension_mcp_login_rechecks_the_same_cli_profile_without_exposing_its_output() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = server("mcp-login", vec![]).await;
+    let hub = &fixture.hub;
+    let root = fixture._root.path();
+    let origin = root.join("source");
+    let executable = root.join("claude");
+    std::fs::create_dir_all(origin.join(".claude-plugin")).unwrap();
+    std::fs::write(origin.join(".claude-plugin/plugin.json"),
+        r#"{"name":"demo","mcpServers":{"calendar":{"type":"http","url":"https://example.com/calendar"}}}"#).unwrap();
+    std::fs::write(&executable, r#"#!/bin/sh
+[ "$1" = "--plugin-dir" ] && [ -f "$2/.claude-plugin/plugin.json" ] && [ "$3" = "mcp" ] || exit 2
+case "$4" in
+get) [ "$5" = "plugin:demo:calendar" ] || exit 3
+     if [ -f "$PROBE_FILE" ]; then echo 'Status: ✓ Connected'; else echo 'Status: ⚠ Needs authentication'; fi
+     echo 'private-cli-output';;
+login) [ "$5" = "--" ] && [ "$6" = "plugin:demo:calendar" ] || exit 4
+       touch "$PROBE_FILE";;
+*) exit 5;;
+esac
+"#).unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let agents = hub.store.document("agents").unwrap();
+    let mut state = agents["value"].clone();
+    state["profiles"] = json!([{"id":"fixture","type":"claude","executable":executable,"env":{"PROBE_FILE":root.join("authorized")}}]);
+    hub.store.save_document("agents",agents["revision"].as_u64().unwrap(),state).unwrap();
+    hub.extensions.change(hub, json!({"action":"save-source","source":{"id":"sample","kind":"local","location":origin,"targets":["claude"]}})).unwrap();
+    hub.extensions.change(hub, json!({"action":"sync-source","id":"sample"})).unwrap();
+    let mut request = json!({"action":"mcp-status","id":"sample","profileId":"fixture"});
+    let expected = |status| json!({"rows":[{"name":"calendar","packageKey":".","status":status}]});
+    assert_eq!(super::extension_auth::execute(hub,&request).await.unwrap(), expected("login-required"));
+    request["action"] = json!("mcp-login");
+    request["packageKey"] = json!(".");
+    request["name"] = json!("wrong");
+    assert!(super::extension_auth::execute(hub,&request).await.is_err());
+    assert!(!root.join("authorized").exists());
+    request["name"] = json!("calendar");
+    assert_eq!(super::extension_auth::execute(hub,&request).await.unwrap(), expected("connected"));
+}
+
+#[tokio::test]
+async fn toggling_one_extension_uses_the_installed_release_and_preserves_siblings() {
+    let fixture = server("package-toggle", vec![]).await;
+    let hub = &fixture.hub;
+    let origin = fixture._root.path().join("packages");
+    for name in ["one", "two"] {
+        let p = origin.join(name);
+        std::fs::create_dir_all(p.join(".claude-plugin")).unwrap();
+        std::fs::create_dir_all(p.join("skills/tool")).unwrap();
+        std::fs::write(p.join(".claude-plugin/plugin.json"), json!({"name":name}).to_string()).unwrap();
+        std::fs::write(p.join("skills/tool/SKILL.md"), "test skill").unwrap();
+    }
+    let change = |input| hub.extensions.change(hub, input);
+    change(json!({"action":"save-source","source":{"id":"sample","kind":"local","location":origin,"targets":["claude"]}})).unwrap();
+    let synced = change(json!({"action":"sync-source","id":"sample"})).unwrap();
+    let toggle = |enabled| json!({"action":"set-package-enabled","id":"sample","packageKey":"one","release":synced["sources"][0]["release"],"enabled":enabled});
+    let off = change(toggle(false)).unwrap();
+    let source = &off["sources"][0];
+    assert_eq!(source["plugins"]["claude"].as_array().unwrap().len(), 1);
+    assert_eq!(source["plugins"]["claude"][0]["name"], "two");
+    assert_eq!(source["packages"][0]["enabled"], false);
+    assert_eq!(source["packages"][1]["enabled"], true);
+    let skills = hub.extensions.home.join(".claude/skills");
+    assert!(!skills.join("sample--one--skills--tool").exists());
+    assert!(skills.join("sample--two--skills--tool").exists());
+    let on = change(toggle(true)).unwrap();
+    assert_eq!(on["sources"][0]["plugins"]["claude"].as_array().unwrap().len(), 2);
+    assert!(skills.join("sample--one--skills--tool").exists());
+    change(toggle(false)).unwrap();
+    let synced = change(json!({"action":"sync-source","id":"sample"})).unwrap();
+    assert_eq!(synced["sources"][0]["packages"][0]["enabled"], false);
+    assert!(change(toggle(true)).is_err());
+}
+
 #[tokio::test]
 async fn backend_extension_preview_catalog_and_logo_are_safe_and_owner_only(){
     let s=server("extension-preview",vec![]).await;let client=reqwest::Client::new();

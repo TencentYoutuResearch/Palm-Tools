@@ -75,6 +75,12 @@ export class NativeSessionDirectory {
       return importSavedSession(this.ctx, this.backend, tab, { discovered: true })
     }
     if (typeof input.sessionId !== 'string' || input.sessionId.length > 256) throw new Error('无效的会话 ID。')
+    if (input.lookupOnly === true) {
+      const { items } = await this.ctx.get('sessionController').list({})
+      const summary = items.find(row => row.sessionId === input.sessionId)
+      if (!summary) throw new Error('当前主机的 DSH 目录中找不到此会话。')
+      return { sessionId: summary.sessionId, summary }
+    }
     const runtime = this.runtime()
     const binding = runtime.profiles.binding(input.sessionId)
     if (!binding?.threadId || binding.profile.type === 'dsh') return { sessionId: input.sessionId }
@@ -100,6 +106,7 @@ export function registerNativeSessionDirectory(ctx, backend) {
     try {
       if (req.method === 'GET') {
         const query = new URL(req.url, 'http://localhost').searchParams
+        if (query.has('summary')) return json(res, 200, await directory.open({ sessionId: query.get('summary'), lookupOnly: true }))
         const request = new AbortController()
         const cancel = () => request.abort()
         res.once('close', cancel)

@@ -1,5 +1,6 @@
 import { admitHostRequest } from './host-admission.js'
 import QRCode from 'qrcode'
+import { sessionNamingPolicy } from './session-create.js'
 
 /** Host-owner UI proxy. Browser clients never receive backend credentials. */
 export function registerIntegrationApi(ctx, backend) {
@@ -8,7 +9,11 @@ export function registerIntegrationApi(ctx, backend) {
     const admitted = admitHostRequest(ctx, req, peer)
     if ('rejection' in admitted || admitted.peer.principal.kind !== 'owner') return send(403, { error: 'Host owner required' })
     try {
-      if (req.method === 'GET') return send(200, { settings: await backend.call('/api/v1/messaging/integrations'), cloud: await backend.call('/api/v1/messaging/cloud/status') })
+      if (req.method === 'GET') {
+        // The built-in naming rule lives in this Host; show it so the settings page can display and edit it.
+        const { prompt: defaultPrompt, maxWords } = sessionNamingPolicy()
+        return send(200, { settings: await backend.call('/api/v1/messaging/integrations'), cloud: await backend.call('/api/v1/messaging/cloud/status'), sessionNaming: { defaultPrompt, maxWords } })
+      }
       if (req.method !== 'POST') return send(405, { error: 'GET or POST required' })
       let body = ''
       for await (const chunk of req) { body += chunk; if (body.length > 8192) return send(413, { error: 'Request too large' }) }

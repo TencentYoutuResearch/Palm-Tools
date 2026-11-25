@@ -481,3 +481,26 @@ test('reopening a blank copy of an empty native thread keeps its identity', asyn
     assert.equal(result.sessionId, id); assert.equal(result.imported, false)
   }
 })
+
+test('opening the active local DSH owner uses its native composer without importing history', async () => {
+  const h = importFixture()
+  const owner = 'local-owner'
+  const live = { runtime: 'dsh', backend_key: h.tab.backend_key, native_thread_id: h.tab.session_id,
+    runtime_session_id: owner, status: 'busy', owner_alive: true }
+  const ctx = { get: name => name === 'agents' ? new Map([[owner, {}]]) : h.ctx.get(name) }
+  ctx.get('kodeAgents').profiles.binding = id => id === owner ? { threadId: h.tab.session_id } : undefined
+  h.client.call = async path => { assert.ok(path.endsWith('/runtime/sessions')); return { sessions: [live] } }
+  assert.deepEqual(await importSavedSession(ctx, h.client, h.tab), { sessionId: owner, imported: false })
+  assert.deepEqual(await importSavedSession(h.ctx, h.client, h.tab), { sharedSession: live, imported: false })
+  assert.deepEqual(h.calls, [])
+})
+
+test('directory admission retrieves the exact Host summary without activating an Agent', async () => {
+  const summary = { sessionId: 'handoff', agentAvailable: true, running: false, updatedAt: 123 }
+  const directory = new NativeSessionDirectory({ get(name) {
+    assert.equal(name, 'sessionController')
+    return { list: async () => ({ items: [summary] }) }
+  } })
+  assert.deepEqual(await directory.open({ sessionId: 'handoff', lookupOnly: true }), { sessionId: 'handoff', summary })
+  await assert.rejects(directory.open({ sessionId: 'other', lookupOnly: true }), /找不到此会话/)
+})

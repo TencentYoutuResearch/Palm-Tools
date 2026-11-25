@@ -14,7 +14,7 @@ function fixture(open = () => {}) {
     NotificationSettingsBody: 'notifications', InterfaceSettingsBody: 'appearance', HubSettings: 'hub', AgentSettingsBody: 'agents', PersonalizationSettings: 'personalization', PowerSettings: 'power',
     useProjectHosts: () => ({ data: { current: 'local', hosts: [{ id: 'local', name: 'This computer' }, { id: 'worker', name: 'Worker' }] } }),
     useIntegrationSettings: () => ({ data: null, busy: false, error: 'Missing API', recoveryNeeded: true }),
-    Button: 'button', Failure: 'failure', SelectField: 'select', RemoteComputerIcon: 'icon', IconPlusOutlineRegular: 'plus', IconAgentPresetOutlineRegular: 'agent-icon',
+    Button: 'button', Failure: 'failure', SelectField: 'select', RemoteComputerIcon: 'icon', IconPlusOutlineRegular: 'plus', IconAgentPresetOutlineRegular: 'agent-icon', IconWarningOutlineRegular: 'warning', IconCheckOutlineRegular: 'check', IconLoadingOutlineRegular: 'loading',
     RemoteHostForm: 'form', ServiceRecovery: 'recovery',
   }
   scope.openKodeSettings = section => { scope.requestedSettingsSection = section; open(`kode-${section}`) }

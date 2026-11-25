@@ -415,8 +415,49 @@ impl Installation {
         };
         run(root, command, args, &path, timeout)
             .await
-            .map_err(|_| anyhow::anyhow!("更新失败，请检查安装权限和发布源后重试。"))?;
+            .map_err(|error| anyhow::anyhow!(upgrade_failure(&format!("{error:#}"))))?;
         Ok(())
+    }
+}
+
+// Report actionable categories without forwarding installer output (which may contain credentials).
+fn upgrade_failure(error: &str) -> &'static str {
+    let reason = error.to_ascii_lowercase();
+    if ["timed out", "etimedout", "timeout"]
+        .iter()
+        .any(|s| reason.contains(s))
+    {
+        "更新超时，请检查下载连接后重试。"
+    } else if [
+        "permission denied",
+        "eacces",
+        "eperm",
+        "read-only file system",
+    ]
+    .iter()
+    .any(|s| reason.contains(s))
+    {
+        "更新失败，安装目录缺少写入权限。"
+    } else if ["checksum", "integrity", "signature verification"]
+        .iter()
+        .any(|s| reason.contains(s))
+    {
+        "更新失败，安装包校验未通过。"
+    } else if [
+        "curl:",
+        "could not resolve",
+        "connection refused",
+        "econnreset",
+        "enotfound",
+    ]
+    .iter()
+    .any(|s| reason.contains(s))
+    {
+        "更新失败，无法从发布源下载，请检查网络连接。"
+    } else if reason.contains("no space left") || reason.contains("enospc") {
+        "更新失败，磁盘空间不足。"
+    } else {
+        "更新失败，请检查安装权限和发布源后重试。"
     }
 }
 
@@ -580,6 +621,16 @@ impl AgentUpdates {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_failure_classifies_installer_errors_without_exposing_output() {
+        assert!(upgrade_failure("npm EACCES (private registry URL)").contains("权限"));
+        assert!(upgrade_failure("curl: (28) connection timed out").contains("超时"));
+        assert!(upgrade_failure("curl: (6) Could not resolve host").contains("下载"));
+        assert!(upgrade_failure("checksum mismatch").contains("校验"));
+        assert!(upgrade_failure("ENOSPC").contains("空间"));
+        assert!(!upgrade_failure("private registry URL").contains("private"));
+    }
 
     #[test]
     fn versions_respect_semver_and_cursor_build_dates() {
