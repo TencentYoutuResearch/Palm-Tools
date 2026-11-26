@@ -13,12 +13,17 @@ paths:
   - apps/gui/src/lib/BackendChooser.svelte
   - apps/gui/src/lib/ModeSwitcher.svelte
   - apps/gui/src/lib/Terminal.svelte
+  - apps/gui/src/lib/terminal_links.ts
+  - apps/gui/src/lib/terminal_path_links.ts
   - apps/gui/src/lib/codex_mouse_selection.ts
   - apps/gui/src/lib/session_history_path.ts
   - apps/gui/src/lib/terminal_ime.ts
   - apps/gui/tests/backend_chooser_history.test.ts
   - apps/gui/tests/codex_mouse_selection.test.ts
+  - apps/gui/tests/terminal_links.test.ts
+  - apps/gui/tests/terminal_path_links.test.ts
   - apps/gui/tests/terminal_ime.test.ts
+  - apps/gui/src-tauri/src/workspace.rs
   - crates/kode-bridge/src/model_discovery.rs
   - crates/kode-core/src/session/jsonl_tail.rs
   - crates/kode-core/src/session/mod.rs
@@ -45,6 +50,15 @@ paths:
 - Pointer interaction with expandable Codex/Tcodex terminal content must not
   terminate or interrupt the session. Codex-family terminals use the compatible
   click-versus-drag selection behavior.
+- On Windows, macOS, and Linux, a direct click on a terminal URL opens it in
+  the default browser. Only a link hit consumes the click.
+- Consecutive physical lines marked `isWrapped` are reconstructed as one
+  logical line before URL/path detection. Link ranges and click hit-testing map
+  back to their physical rows so any wrapped fragment activates the full target.
+- Terminal path output exposes non-overlapping path-component links. Clicking a
+  parent component opens its directory and selects the next child; clicking the
+  final component opens the file or directory. Relative and `~/` paths resolve
+  before reveal/open, and line/column suffixes are excluded.
 - New-session history is queried for the current absolute working directory on
   both POSIX-style and Windows-style paths.
 
@@ -64,4 +78,6 @@ paths:
 - `cargo test -p kode-core -- --test-threads=1`
 - `pnpm --dir apps/gui test:session-input`
 - `pnpm --dir apps/gui test:chooser-history`
+- `pnpm --dir apps/gui test:terminal-links`
+- `pnpm --dir apps/gui test:terminal-mouse`
 - `pnpm --dir apps/gui check`

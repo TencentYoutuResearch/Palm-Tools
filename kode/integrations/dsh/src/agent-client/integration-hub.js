@@ -61,7 +61,17 @@
     'login-required': '需要登录', authorized: '已授权', connected: '已连接',
     'not-required': '无需授权', manual: '需手动配置', unknown: '状态未知',
   }
+  // Guards live outside the component so re-renders and repeated clicks cannot start a second login for the same pair.
+  const mcpLoginsInFlight = new Set(), mcpAuthorizeRuns = new Set(), MCP_STATUS_TIMEOUT = 60000
   const mcpStatusKey = (sourceId, profileId) => `${sourceId}\0${profileId}`
+  // Newer services re-read only the MCP just logged in ({partial:true}); older ones still answer with every row.
+  function mergeMcpLoginRows(rows = [], result) {
+    if (!result?.partial) return result?.rows ?? rows
+    const same = (a, b) => a.packageKey === b.packageKey && a.name === b.name
+    const fresh = result.rows ?? []
+    return [...rows.map(row => fresh.find(item => same(item, row)) ?? row), ...fresh.filter(item => !rows.some(row => same(item, row)))]
+  }
+  const mcpBulkKey = (sourceId, packageKey) => `${sourceId}\0${packageKey ?? ''}`
   const mcpRowKey = (sourceId, profileId, row) => `${sourceId}\0${profileId}\0${row.packageKey}\0${row.name}`
   // Services advertising packageToggle key path-only records by their relative path inside the source.
   const sourcePackageKey = (pkg, packageToggle) => pkg?.key ?? (packageToggle ? pkg?.path : undefined)
@@ -76,7 +86,7 @@
   }
   function HubSettings({ host, hosts = [], sessions, slots }) {
     const [data, setData] = useState(null), [error, setError] = useState(''), [busy, setBusy] = useState(false)
-    const [mcpStatuses, setMcpStatuses] = useState({}), [mcpErrors, setMcpErrors] = useState({}), [mcpPending, setMcpPending] = useState({})
+    const [mcpStatuses, setMcpStatuses] = useState({}), [mcpErrors, setMcpErrors] = useState({}), [mcpPending, setMcpPending] = useState({}), [mcpBulk, setMcpBulk] = useState({})
     const [draft, setDraft] = useState(null)
     const [previewId, setPreviewId] = useState(null), [previewPackagePath, setPreviewPackagePath] = useState(null)
     const store = directory(undefined, host, true)
@@ -104,42 +114,79 @@
     const preferred = [activeId, agents?.configuredDefaultProfileId, agents?.selectedProfileId]
       .map(id => sourceProfileTarget(choices.find(profile => profile.id === id), data)).find(Boolean)
     const sources = data?.sources ?? []
+    // Only the newest read of a source × Agent may publish, and every read settles: an aborted or
+    // superseded request can neither overwrite fresher rows nor leave the tag spinning.
+    const mcpReads = useRef(new Map())
     const readMcpStatus = async (source, profileId, signal) => {
-      const key = mcpStatusKey(source.id, profileId)
+      const key = mcpStatusKey(source.id, profileId), ticket = {}
+      const stop = new AbortController(), abort = () => stop.abort()
+      let timedOut = false
+      signal?.addEventListener('abort', abort, { once: true })
+      const timer = setTimeout(() => { timedOut = true; stop.abort() }, MCP_STATUS_TIMEOUT)
+      mcpReads.current.get(key)?.stop.abort()
+      mcpReads.current.set(key, { ticket, stop })
+      const latest = () => mcpReads.current.get(key)?.ticket === ticket
+      const settle = patch => { if (latest()) setMcpStatuses(current => ({ ...current, [key]: { ...current[key], busy: false, ...patch } })) }
       setMcpStatuses(current => ({ ...current, [key]: { ...current[key], busy: true, error: '' } }))
       try {
-        const result = await hubCall({ action: 'mcp-status', id: source.id, profileId }, host, undefined, signal)
-        if (!signal?.aborted) setMcpStatuses(current => ({ ...current, [key]: { ...current[key], rows: result.rows ?? [], busy: false, error: '' } }))
-        return result
+        // Some transports ignore the signal; the race still settles the tag when the read is abandoned.
+        const abandoned = new Promise((_, reject) => stop.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }))
+        abandoned.catch(() => {})
+        const result = await Promise.race([hubCall({ action: 'mcp-status', id: source.id, profileId }, host, undefined, stop.signal), abandoned])
+        if (stop.signal.aborted) throw new Error('aborted')
+        settle({ rows: result.rows ?? [], error: '' })
+        return latest() ? result : undefined
       } catch (error) {
-        if (!signal?.aborted) setMcpStatuses(current => ({ ...current, [key]: { ...current[key], busy: false, error: error.message } }))
+        settle(timedOut ? { error: `读取超时：CLI 未在 ${MCP_STATUS_TIMEOUT / 1000} 秒内返回 MCP 状态` } : stop.signal.aborted ? {} : { error: error.message })
         return undefined
+      } finally {
+        clearTimeout(timer); signal?.removeEventListener('abort', abort)
+        if (latest()) mcpReads.current.delete(key)
       }
     }
     const loginMcp = async (source, profileId, row) => {
-      const statusKey = mcpStatusKey(source.id, profileId), rowKey = mcpRowKey(source.id, profileId, row)
+      const statusKey = mcpStatusKey(source.id, profileId), rowKey = mcpRowKey(source.id, profileId, row), flight = host + '\0' + rowKey
+      if (mcpLoginsInFlight.has(flight)) return null
+      mcpLoginsInFlight.add(flight)
       setMcpPending(current => ({ ...current, [rowKey]: true }))
       setMcpErrors(current => { const next = { ...current }; delete next[rowKey]; return next })
       try {
-        const result = await hubCall({ action: 'mcp-login', id: source.id, profileId, packageKey: row.packageKey, name: row.name }, host)
-        setMcpStatuses(current => ({ ...current, [statusKey]: { ...current[statusKey], rows: result.rows ?? [], busy: false, error: '' } }))
+        const result = await hubCall({ action: 'mcp-login', id: source.id, profileId, packageKey: row.packageKey, name: row.name, partial: true }, host)
+        setMcpStatuses(current => ({ ...current, [statusKey]: { ...current[statusKey], rows: mergeMcpLoginRows(current[statusKey]?.rows, result), error: '' } }))
         return true
       } catch (error) {
         setMcpErrors(current => ({ ...current, [rowKey]: error.message }))
         return false
       } finally {
+        mcpLoginsInFlight.delete(flight)
         setMcpPending(current => { const next = { ...current }; delete next[rowKey]; return next })
       }
     }
+    // Logs in every MCP × CLI pair that freshly reports login-required, one at a time; a failure never stops the rest.
+    const authorizeMcp = async (source, profiles, packageKey) => {
+      const bulkKey = mcpBulkKey(source.id, packageKey), run = host + '\0' + bulkKey
+      if (host !== 'local' || mcpAuthorizeRuns.has(run)) return undefined
+      mcpAuthorizeRuns.add(run)
+      const report = value => setMcpBulk(current => ({ ...current, [bulkKey]: value }))
+      const seen = new Set(), results = []
+      report({ running: true })
+      try {
+        for (const { profile } of profiles) {
+          const status = await readMcpStatus(source, profile.id)
+          if (!status) { results.push({ profile: profile.name, ok: false, readFailed: true }); continue }
+          for (const row of status.rows ?? []) {
+            const key = mcpRowKey(source.id, profile.id, row)
+            if (row.status !== 'login-required' || (packageKey && row.packageKey !== packageKey) || seen.has(key)) continue
+            seen.add(key); report({ running: true, current: `${profile.name} · ${row.name}` })
+            results.push({ profile: profile.name, name: row.name, ok: await loginMcp(source, profile.id, row) })
+          }
+        }
+      } finally { mcpAuthorizeRuns.delete(run); report({ results }) }
+      return results
+    }
     const completeMcpLogins = async (next, body) => {
-      if (host !== 'local') return
       const source = next.sources?.find(row => row.id === body.id)
-      if (!source) return
-      for (const { profile } of sourceMcpProfiles(source, next, choices)) {
-        const result = await readMcpStatus(source, profile.id)
-        const pending = (result?.rows ?? []).filter(row => row.status === 'login-required' && (!body.packageKey || row.packageKey === body.packageKey))
-        for (const row of pending) await loginMcp(source, profile.id, row)
-      }
+      if (source) await authorizeMcp(source, sourceMcpProfiles(source, next, choices), body.packageKey)
     }
     const operate = async body => {
       setBusy(true); setError('')
@@ -150,12 +197,17 @@
       } catch (error) { setError(error.message); return false }
       finally { setBusy(false) }
     }
+    // The hub list is polled every 5 seconds; re-read MCP status only when what it depends on changes,
+    // so a slow CLI (TClaude starts every server) is not cancelled and restarted on each poll.
+    const mcpPlan = data && agents ? sources.flatMap(source => sourceMcpProfiles(source, data, choices).map(({ profile }) => [source.id, profile.id,
+      source.updatedAt, (source.packages ?? []).map(pkg => [pkg.key ?? pkg.path, pkg.enabled, (pkg.mcp ?? []).map(item => item.name)])])) : null
+    const mcpPlanKey = mcpPlan && JSON.stringify(mcpPlan)
     useEffect(() => {
-      if (!data || !agents) return
+      if (!mcpPlanKey) return
       const stop = new AbortController()
-      for (const source of sources) for (const { profile } of sourceMcpProfiles(source, data, choices)) void readMcpStatus(source, profile.id, stop.signal)
+      for (const [sourceId, profileId] of JSON.parse(mcpPlanKey)) void readMcpStatus({ id: sourceId }, profileId, stop.signal)
       return () => stop.abort()
-    }, [host, data, agents])
+    }, [host, mcpPlanKey])
     const field = (label, key, placeholder) => h('label', { className: `kode-field kode-source-field-${key}` }, label,
       h('input', { required: key !== 'subdir', readOnly: key === 'id' && draft.editing, value: draft[key], placeholder,
         onChange: event => setDraft({ ...draft, [key]: event.target.value }) }))
@@ -255,7 +307,8 @@
         previewSource && h(SourcePreview, {
           source: previewSource, packagePath: previewPackagePath, onPackageChange: setPreviewPackagePath, host, targetOptions: options,
           busy, packageToggle, onTogglePackage: togglePackage, onUpdateService: updateService,
-          mcpProfiles: previewProfiles, mcpStatuses, mcpErrors, mcpPending,
+          mcpProfiles: previewProfiles, mcpStatuses, mcpErrors, mcpPending, mcpBulk,
+          onAuthorizePackage: (source, packageKey) => authorizeMcp(source, previewProfiles, packageKey),
           mcpHostName: hosts.find(row => row.id === host)?.name ?? host,
           onRefreshMcp: readMcpStatus, onRetryMcp: loginMcp,
         })))
@@ -285,41 +338,81 @@
         (item.description || item.type) && h('p', null, item.description || item.type))))
         : h('p', { className: 'kode-config-note' }, empty))
   }
-  function McpList({ source, current, packageKey, host, mcpHostName, mcpProfiles = [], mcpStatuses = {}, mcpErrors = {}, mcpPending = {}, onRefreshMcp, onRetryMcp, empty }) {
+  // One status per MCP × CLI pair, shown as the same Agent pill the sync picker uses.
+  function mcpTagState(row, state, host) {
+    if (!row) return state?.busy ? 'reading' : state?.error ? 'read-failed' : 'unreported'
+    if (row.status === 'authorized' || row.status === 'connected') return 'ok'
+    if (row.status === 'login-required') return host === 'local' ? 'login' : 'manual'
+    return row.status === 'not-required' || row.status === 'manual' ? row.status : 'unknown'
+  }
+  const MCP_TAG_ACTIONS = { reading: '读取中…', unreported: '未报告', 'not-required': '无需授权', manual: '需手动配置', unknown: '状态未知' }
+  function McpAgentTag({ source, profile, row, tag, state, failure, pending, host, hostName, onRefreshMcp, onRetryMcp }) {
+    const name = profile.name, base = { className: 'kode-source-target-option kode-mcp-agent', 'data-status': tag }
+    if (tag === 'ok') return h('span', { ...base, title: `${name}：${MCP_STATUS_LABELS[row.status]}` },
+      h(IconCheckOutlineRegular, { size: 14, 'aria-hidden': true }), name, h('span', { className: 'kode-sr-only' }, `：${MCP_STATUS_LABELS[row.status]}`))
+    if (tag === 'login') {
+      const action = pending ? '登录中…' : failure ? '重试登录' : '登录'
+      return h('button', { ...base, type: 'button', 'data-failed': Boolean(failure), disabled: pending, 'aria-busy': pending || undefined,
+        title: `在 ${name} 中登录 ${row.name}`, 'aria-label': `${name}：${row.name} ${pending ? '登录中' : failure ? '登录失败，重试登录' : '需要登录，点击登录'}`,
+        onClick: () => void onRetryMcp(source, profile.id, row) },
+      h(pending ? IconLoadingOutlineRegular : failure ? IconWarningOutlineRegular : IconGlobeOutlineRegular, { size: 14, className: pending ? 'kode-spin' : undefined, 'aria-hidden': true }),
+      name, h('span', { className: 'kode-mcp-agent-action' }, action))
+    }
+    if (tag === 'read-failed') return h('button', { ...base, type: 'button', title: state.error, 'aria-label': `${name}：状态读取失败，重试读取`, onClick: () => void onRefreshMcp(source, profile.id) },
+      h(IconWarningOutlineRegular, { size: 14, 'aria-hidden': true }), name, h('span', { className: 'kode-mcp-agent-action' }, '重试读取'))
+    // Manual and unrecognised states are fixed outside Kode, so the tag itself re-reads the CLI afterwards.
+    if (tag === 'manual' || tag === 'unknown') {
+      const reading = Boolean(state?.busy), where = `${hostName ?? host ?? '本机'} 的 ${name}`
+      const hint = tag === 'manual' ? `请在 ${where} 配置中完成 ${row.name} 授权${host && host !== 'local' ? '（浏览器不会跨主机自动登录）' : ''}，完成后点击刷新状态` : `${where} 报告了未识别的 ${row.name} 状态，点击刷新状态`
+      return h('button', { ...base, type: 'button', disabled: reading, 'aria-busy': reading || undefined, title: hint,
+        'aria-label': `${name}：${row.name} ${MCP_TAG_ACTIONS[tag]}，${reading ? '正在刷新状态' : hint}`, onClick: () => void onRefreshMcp(source, profile.id) },
+      reading ? h(IconLoadingOutlineRegular, { size: 14, className: 'kode-spin', 'aria-hidden': true }) : tag === 'manual' ? h(IconWarningOutlineRegular, { size: 14, 'aria-hidden': true }) : null,
+      name, h('span', { className: 'kode-mcp-agent-action' }, reading ? '刷新中…' : MCP_TAG_ACTIONS[tag]))
+    }
+    const icon = tag === 'reading' ? h(IconLoadingOutlineRegular, { size: 14, className: 'kode-spin', 'aria-hidden': true }) : null
+    return h('span', base, icon, name, h('span', { className: 'kode-mcp-agent-action' }, MCP_TAG_ACTIONS[tag]))
+  }
+  function mcpBulkSummary(results) {
+    if (!results.length) return '当前插件没有需要登录的 MCP。'
+    const label = row => row.readFailed ? `${row.profile} 状态读取` : `${row.profile} · ${row.name}`
+    const ok = results.filter(row => row.ok), failed = results.filter(row => row.ok === false), skipped = results.filter(row => row.ok === null)
+    return [`一键授权完成：成功 ${ok.length} 项`, failed.length && `失败 ${failed.length} 项（${failed.map(label).join('、')}），可单独点击重试`,
+      skipped.length && `跳过 ${skipped.length} 项（正在登录）`].filter(Boolean).join('，') + '。'
+  }
+  function McpList({ source, current, packageKey, host, mcpHostName, mcpProfiles = [], mcpStatuses = {}, mcpErrors = {}, mcpPending = {}, mcpBulk = {}, onRefreshMcp, onRetryMcp, onAuthorizePackage, empty }) {
     const declared = current.mcp ?? []
     const rowsFor = profile => packageKey ? (mcpStatuses[mcpStatusKey(source.id, profile.id)]?.rows ?? []).filter(row => row.packageKey === packageKey) : []
     const names = [...new Set([...declared.map(item => item.name), ...mcpProfiles.flatMap(({ profile }) => rowsFor(profile).map(row => row.name))])]
     const note = !names.length ? empty
       : !packageKey ? '更新 Kode 服务后可读取各 CLI 的实际授权状态。'
         : !mcpProfiles.length ? '将来源同步到可用 Agent 后读取各 CLI 的实际授权状态。' : null
+    const pairs = packageKey ? names.flatMap(name => mcpProfiles.map(({ profile }) => {
+      const state = mcpStatuses[mcpStatusKey(source.id, profile.id)], row = rowsFor(profile).find(item => item.name === name)
+      const rowKey = row && mcpRowKey(source.id, profile.id, row)
+      return { name, profile, row, state, tag: mcpTagState(row, state, host), failure: rowKey && mcpErrors[rowKey], pending: Boolean(rowKey && mcpPending[rowKey]) }
+    })) : []
+    const loginable = pairs.filter(pair => pair.tag === 'login' && !pair.pending)
+    const bulk = mcpBulk[mcpBulkKey(source.id, packageKey)]
+    const tagProps = { source, host, hostName: mcpHostName, onRefreshMcp, onRetryMcp }
     return h('section', { className: 'kode-source-preview-section kode-mcp-authorization' },
-      h('h3', null, 'MCP', h('span', null, names.length)),
+      h('div', { className: 'kode-mcp-head' },
+        h('h3', null, 'MCP', h('span', null, names.length)),
+        host === 'local' && (loginable.length > 0 || bulk?.running) && h(Button, { size: 'sm', variant: 'outline', className: 'kode-mcp-authorize-all',
+          disabled: Boolean(bulk?.running), 'aria-busy': bulk?.running || undefined, onClick: () => void onAuthorizePackage(source, packageKey) },
+        bulk?.running ? '授权中…' : `一键授权 ${loginable.length} 项`)),
       note && h('p', { className: 'kode-config-note' }, note),
+      bulk && h('p', { className: 'kode-mcp-bulk-result', role: 'status', 'data-failed': Boolean(bulk.results?.some(row => row.ok === false)) },
+        bulk.running ? `正在登录 ${bulk.current ?? '…'}` : mcpBulkSummary(bulk.results ?? [])),
       names.length > 0 && h('ul', { className: 'kode-source-preview-list kode-mcp-list' }, ...names.map(name => {
-        const spec = declared.find(item => item.name === name)
+        const spec = declared.find(item => item.name === name), own = pairs.filter(pair => pair.name === name)
+        const failures = own.filter(pair => pair.tag === 'login' && pair.failure)
+        const readErrors = own.filter(pair => pair.tag === 'read-failed')
         return h('li', { key: name, className: 'kode-mcp-item' },
           h('div', { className: 'kode-mcp-item-head' }, h('strong', null, name), (spec?.description || spec?.type) && h('span', null, spec.description || spec.type)),
-          packageKey && mcpProfiles.length > 0 && h('ul', { className: 'kode-mcp-cli-list' }, ...mcpProfiles.map(({ profile }) => {
-            const statusKey = mcpStatusKey(source.id, profile.id), state = mcpStatuses[statusKey]
-            const row = rowsFor(profile).find(item => item.name === name)
-            if (!row) return h('li', { key: profile.id, className: 'kode-mcp-status-row', 'data-status': state?.error ? 'error' : 'unknown' },
-              h('span', { className: 'kode-mcp-cli-name' }, profile.name),
-              h('span', { className: 'kode-mcp-status-label', 'data-status': state?.error ? 'error' : 'unknown' }, state?.busy ? '读取中…' : state?.error ? '读取失败' : '未报告'),
-              state?.error && h('span', { className: 'kode-mcp-status-detail' }, h(Failure, { text: state.error })),
-              state?.error && h(Button, { size: 'sm', variant: 'outline', onClick: () => void onRefreshMcp(source, profile.id) }, '重试读取'))
-            const rowKey = mcpRowKey(source.id, profile.id, row), failure = mcpErrors[rowKey], pending = mcpPending[rowKey]
-            const manual = row.status === 'manual' || (host !== 'local' && row.status === 'login-required')
-            const detail = failure || (row.status === 'login-required' && host === 'local' ? '下次同步或开启此插件时发起登录' : '')
-            return h('li', { key: profile.id, className: 'kode-mcp-status-row', 'data-status': row.status ?? 'unknown' },
-              h('span', { className: 'kode-mcp-cli-name' }, profile.name),
-              h('span', { className: 'kode-mcp-status-label', 'data-status': row.status ?? 'unknown' }, MCP_STATUS_LABELS[row.status] ?? row.status ?? MCP_STATUS_LABELS.unknown),
-              detail && h('span', { className: 'kode-mcp-status-detail', 'data-failed': Boolean(failure) }, detail),
-              failure && host === 'local' && h(Button, { size: 'sm', variant: 'outline', disabled: pending, onClick: () => void onRetryMcp(source, profile.id, row) }, pending ? '登录中…' : '重试登录'),
-              manual && h('details', { className: 'kode-mcp-manual' },
-                h('summary', null, '手动配置'),
-                h('p', null, `请在 ${mcpHostName ?? host} 的 ${profile.name} 配置中完成 ${row.name} 授权。${host !== 'local' ? '浏览器不会跨主机自动登录。' : ''}`),
-                h(Button, { size: 'sm', variant: 'outline', onClick: () => void onRefreshMcp(source, profile.id) }, '刷新状态')))
-          })))
+          own.length > 0 && h('div', { className: 'kode-mcp-agents', role: 'group', 'aria-label': `${name} 在各 Agent 的授权状态` },
+            ...own.map(pair => h(McpAgentTag, { key: pair.profile.id, ...tagProps, ...pair }))),
+          ...failures.map(pair => h('p', { key: 'login-' + pair.profile.id, className: 'kode-mcp-status-detail', 'data-failed': true }, `${pair.profile.name} 登录失败：${pair.failure}`)),
+          ...readErrors.map(pair => h('p', { key: 'read-' + pair.profile.id, className: 'kode-mcp-status-detail', 'data-failed': true }, `${pair.profile.name} 状态读取失败：${pair.state.error}`)))
       })))
   }
   function SourcePreview({ source, packagePath, onPackageChange, host, targetOptions, busy = false, packageToggle = false, onTogglePackage = () => {}, onUpdateService = () => {}, ...mcp }) {
@@ -362,7 +455,7 @@
               h('strong', null, name),
               (pkg.description || pkg.path) && h('span', null, pkg.description || pkg.path)),
             h('label', { className: 'kode-package-toggle' },
-              h('span', null, key ? (enabled ? '已启用' : '已停用') : '需更新服务'),
+              !key && h('span', null, '需更新服务'),
               h('input', { type: 'checkbox', role: 'switch', checked: enabled, disabled: busy || !key,
                 'aria-label': `${enabled ? '停用' : '启用'} ${name}`, title: key ? undefined : '更新此主机的 Kode 服务后可启停',
                 onChange: event => onTogglePackage(source, pkg, event.target.checked) })))

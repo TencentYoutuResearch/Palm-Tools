@@ -195,6 +195,13 @@ export class RuntimeBridge {
       const profile = runtime.profiles.list().find(profile => `dsh:${profile.id}` === payload.backend_key && runtime.hasRuntime(profile.type))
       if (!profile) throw new Error('Agent configuration unavailable')
       if (!isAbsolute(payload.cwd ?? '') || !(await stat(payload.cwd)).isDirectory()) throw new Error('Choose an existing absolute directory on the execution Host')
+      const provider = profileRoute(profile.id)
+      const preference = payload.model
+        ? { model: payload.model, reasoningEffort: payload.reasoning_effort }
+        : runtime.profiles.defaultModelFor?.(profile.id)
+      const models = await runtime.adapter.listModels(provider, profile, preference?.model ?? profile.defaultModel)
+      const selection = resolveDefaultSelection(models, preference, profile.defaultModel), model = selection.model
+      const selectedModel = models.find(row => row.id === model), route = { provider, model, ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}) }
       const registry = this.service('workspaceRegistry')
       const workspace = await registry.resolveByPath(payload.cwd) ?? await registry.create(payload.cwd)
       // The backend request id also names the session. An uncertain creation is
@@ -206,10 +213,6 @@ export class RuntimeBridge {
       const { agent: resolved, error } = await controller.resolveAgent(sessionId)
       if (error) throw new Error(error.message)
       if (resolved.status === 'running' || resolved.session.snapshotEvents?.().some(event => ['turn/start', 'user/message', 'request/header'].includes(event.type))) throw new Error('Partial session already has activity; inspect it before retrying creation')
-      const provider = profileRoute(profile.id), preference = payload.model ? { model: payload.model } : runtime.profiles.defaultModelFor?.(profile.id)
-      const models = await runtime.adapter.listModels(provider, profile, preference?.model ?? profile.defaultModel)
-      const selection = resolveDefaultSelection(models, preference, profile.defaultModel), model = selection.model
-      const selectedModel = models.find(row => row.id === model), route = { provider, model, ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}) }
       let agent = resolved
       if (typeof agent.selectModel !== 'function') {
         const factory = this.service('kodeNativeFactory')
@@ -265,7 +268,9 @@ export class RuntimeBridge {
     if (!sessionId) throw new Error('Session identity required')
     if (kind === 'input') {
       if (typeof payload.text !== 'string' || !payload.text.trim()) throw new Error('Message must contain text')
-      return controller.prompt({ sessionId, requestId: id, mode: 'queue', content: [{ type: 'text', text: payload.text }] }, this.stop.signal)
+      const accepted = await controller.prompt({ sessionId, requestId: id, mode: 'queue', content: [{ type: 'text', text: payload.text }] }, this.stop.signal)
+      this.coldStamps.delete(sessionId)
+      return accepted
     }
     if (kind === 'interrupt') return controller.cancel({ sessionId })
     if (kind === 'delete') {

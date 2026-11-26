@@ -362,6 +362,7 @@ html:not([data-windows-titlebar]) [class*="root"][class*="collapsed"]:has([data-
 html:not([data-windows-titlebar]) [class*="root"][class*="collapsed"]:has([data-sidebar-toggle]) [data-sidebar-workspace-header]{margin-bottom:4px}
 html:not([data-windows-titlebar]) [class*="root"][class*="collapsed"]:has([data-sidebar-toggle]) [data-sidebar-workspace-header]+[class*="search"]{margin-bottom:8px}
 html:not([data-windows-titlebar]) [class*="root"][class*="collapsed"]:has([data-sidebar-toggle]) [class*="footArea"]{gap:4px;padding-top:6px}
+.kode-brand-name-badge{transform:none;color:var(--dsw-alias-label-primary,#EDEFEB)}.kode-harness-badge{display:block;flex:none;margin-inline:3px;overflow:hidden}
 /* Kode hosts the web layout. Reserve the traffic lights inside the existing chrome. */
 html[data-kode-platform=macos] :has(> [data-shell-overlay]):not([data-sidebar-collapsed]) [data-slot=sidebar] [data-window-drag] {
   box-sizing:border-box;
@@ -503,8 +504,8 @@ html[data-kode-embed] .kode-token-notch{display:none}
 .kode-source-preview-header>div{min-width:0}
 .kode-source-preview-header strong{font-size:15px;font-weight:600}
 .kode-source-preview-header p{margin:4px 0 0;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;white-space:pre-wrap;overflow-wrap:anywhere}
-.kode-source-preview-section>h3{display:flex;align-items:center;gap:8px;margin:0 0 8px;font-size:14px;font-weight:600;line-height:20px}
-.kode-source-preview-section>h3>span{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 6px;border-radius:10px;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);font-size:11px;font-weight:500}
+.kode-source-preview-section>h3,.kode-mcp-head>h3{display:flex;align-items:center;gap:8px;margin:0 0 8px;font-size:14px;font-weight:600;line-height:20px}
+.kode-source-preview-section>h3>span,.kode-mcp-head>h3>span{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 6px;border-radius:10px;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);font-size:11px;font-weight:500}
 .kode-source-preview-list{margin:0;padding:0 12px;list-style:none;border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-settings-card-fill)}
 .kode-source-preview-list>li{padding:12px 0;border-bottom:.5px solid var(--dsw-alias-border-l2)}
 .kode-source-preview-list>li:last-child{border-bottom:0}
@@ -520,32 +521,36 @@ html[data-kode-embed] .kode-token-notch{display:none}
 .kode-package-select{display:flex;flex:1;flex-direction:column;gap:3px;min-width:0;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
 .kode-package-select>strong{font-size:13px;font-weight:600;line-height:20px;overflow-wrap:anywhere}
 .kode-package-select>span{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;overflow-wrap:anywhere}
-.kode-package-select:focus-visible,.kode-mcp-manual summary:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:3px}
+.kode-package-select:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:3px}
 .kode-package-toggle{display:flex;align-items:center;gap:8px;flex:none;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
 .kode-package-sync-note{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px 12px;margin-bottom:10px}.kode-package-sync-note>.kode-config-note{flex:1 1 280px;margin:0}
+.kode-mcp-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 8px}.kode-mcp-head>h3{margin:0}
+.kode-mcp-bulk-result{margin:0 0 8px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}.kode-mcp-bulk-result[data-failed=true]{color:var(--dsw-alias-state-warn-primary,#f59e0b)}
+.kode-mcp-agents{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.kode-source-target-option.kode-mcp-agent{min-height:28px;padding:3px 10px;font-size:12px;line-height:18px;cursor:default}
+.kode-mcp-agent-action{color:var(--dsw-alias-label-secondary)}
+span.kode-mcp-agent:hover{background:transparent}span.kode-mcp-agent:active{transform:none}
+.kode-mcp-agent[data-status=ok]{border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary) 45%,transparent)}.kode-mcp-agent[data-status=ok]>svg{color:var(--dsw-alias-state-success-primary)}
+button.kode-mcp-agent{cursor:pointer}button.kode-mcp-agent[data-status=login]{border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#f59e0b) 55%,transparent)}button.kode-mcp-agent[data-status=login]>svg{color:var(--dsw-alias-state-warn-primary,#f59e0b)}
+button.kode-mcp-agent[data-status=login] .kode-mcp-agent-action{color:var(--dsw-alias-state-warn-primary,#f59e0b);font-weight:500}
+button.kode-mcp-agent[data-status=login][data-failed=true],.kode-mcp-agent[data-status=read-failed]{border-color:var(--dsw-alias-state-error-primary)}button.kode-mcp-agent[data-status=login][data-failed=true]>svg,button.kode-mcp-agent[data-status=login][data-failed=true] .kode-mcp-agent-action,.kode-mcp-agent[data-status=read-failed]>svg,.kode-mcp-agent[data-status=read-failed] .kode-mcp-agent-action{color:var(--dsw-alias-state-error-primary)}
+.kode-mcp-agent[data-status=not-required]{color:var(--dsw-alias-label-secondary)}
+.kode-mcp-agent[data-status=manual]>svg,.kode-mcp-agent[data-status=manual] .kode-mcp-agent-action{color:var(--dsw-alias-state-warn-primary,#f59e0b)}
+.kode-mcp-agent:is([data-status=unknown],[data-status=unreported],[data-status=reading]){border-style:dashed;color:var(--dsw-alias-label-secondary)}
+.kode-mcp-status-detail{display:block;margin:6px 0 0}
 .kode-mcp-item-head{display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 10px;min-width:0}
 .kode-mcp-item-head>span{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}
-.kode-mcp-cli-list{display:flex;flex-direction:column;gap:6px;margin:8px 0 0;padding:0;list-style:none}
-.kode-mcp-status-row{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;min-height:28px}
-.kode-mcp-cli-name{flex:0 1 160px;min-width:0;font-size:12px;line-height:18px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .kode-mcp-status-detail{flex:1 1 160px;min-width:0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
 .kode-mcp-status-detail[data-failed=true]{color:var(--dsw-alias-state-error-primary)}
-.kode-mcp-status-row>button{margin-inline-start:auto}
-.kode-mcp-status-label{flex:none;padding:2px 7px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px}
-.kode-mcp-status-label[data-status=authorized],.kode-mcp-status-label[data-status=connected]{color:var(--dsw-alias-state-success-primary)}
-.kode-mcp-status-label[data-status=login-required],.kode-mcp-status-label[data-status=manual]{color:var(--dsw-alias-state-warning-primary)}
-.kode-mcp-status-label[data-status=error]{color:var(--dsw-alias-state-error-primary)}
-.kode-mcp-manual{flex:1 1 100%;padding-top:4px}
-.kode-mcp-manual>summary{width:fit-content;color:var(--dsw-alias-label-primary);font-size:12px;cursor:pointer}
-.kode-mcp-manual>p{margin:8px 0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}
 .kode-source-about dl{margin:0}
 .kode-source-about dl>div{display:grid;grid-template-columns:110px minmax(0,1fr);gap:12px;padding:9px 0;border-bottom:.5px solid var(--dsw-alias-border-l2)}
 .kode-source-about dl>div:last-child{border-bottom:0}
 .kode-source-about dt{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}
 .kode-source-about dd{margin:0;font-size:13px;line-height:20px;white-space:pre-wrap;overflow-wrap:anywhere}
 .kode-source-actions>button{width:auto;min-width:0}
-.kode-source-remove{color:var(--dsw-alias-state-error-primary)}
-.kode-source-remove:hover:not(:disabled),.kode-delete:hover:not(:disabled){background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 10%,transparent)}
+/* Same tokens as dsh's plugin manager uninstall button (outline + .danger): red label, red outline, red-tinted hover. */
+.kode-source-remove{color:var(--dsw-alias-state-error-primary);--dsh-button-outline-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 30%,transparent);--dsw-alias-interactive-bg-hover:color-mix(in srgb,var(--dsw-alias-state-error-primary) 8%,transparent)}
+.kode-delete:hover:not(:disabled){background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 10%,transparent)}
 .kode-avatar-editor{display:flex;flex-direction:column;gap:12px;padding:8px 0}
 .kode-avatar-content{display:flex;flex-direction:column;gap:12px}
 .kode-avatar-content>*{flex-shrink:0}
@@ -633,6 +638,8 @@ html[data-kode-embed] .kode-token-notch{display:none}
 .kode-settings-card:is(.kode-agent-list-card,.kode-hub-sources-card,.kode-ssh-hosts-card)>.kode-agent-rows>.kode-agent-row+.kode-agent-row{border-top:.5px solid var(--dsw-alias-border-l2)}
 .kode-settings-card>.kode-personalization{height:auto;overflow:visible}
 .kode-handoff-body .kode-field{margin-bottom:12px}
+.kode-handoff-model{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0 12px}.kode-handoff-model>.kode-field:only-child{grid-column:1/-1}
+@media(max-width:480px){.kode-handoff-model{grid-template-columns:minmax(0,1fr)}}
 .kode-handoff-body>.kode-config-note{margin:0}
 .kode-settings-main{height:100%;min-height:0;overflow:auto;box-sizing:border-box;padding:24px clamp(16px,4vw,48px) 32px;width:100%;min-width:0}
 .kode-settings-page .kode-settings-section .kode-agent-settings{width:100%;max-width:none;min-width:0;box-sizing:border-box}

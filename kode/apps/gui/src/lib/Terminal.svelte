@@ -42,6 +42,21 @@
   } from './codex_mouse_selection'
   import { isTcodexBackendKey } from './session_exit_guard'
   import { isWindowsUserAgent } from './platform'
+  import {
+    terminalLinkActivationEnabled,
+  } from './terminal_links'
+  import {
+    joinWrappedTerminalRows,
+    isTerminalUrl,
+    resolveTerminalPath,
+    terminalCharIndexAtPosition,
+    terminalLogicalRowBounds,
+    terminalLinkTargets,
+    terminalRangeForOffsets,
+    type LogicalTerminalLine,
+    type TerminalLinkTarget,
+    type WrappedTerminalRow,
+  } from './terminal_path_links'
   import { shouldConfirmTcodexCtrlC } from './terminal_ctrl_c_policy'
   import { stripTerminalMouseReports } from './terminal_mouse_reports'
   import { TerminalMouseTrackingGate } from './terminal_mouse_tracking'
@@ -260,11 +275,11 @@
       // window.confirm("Do you want to navigate to …") —— Tauri WKWebView
       // 不允许 confirm,会抛 "dialog.confirm not allowed. Command not found"。
       // 我们自己的 registerLinkProvider 已经处理了所有链接,这里设一个空
-      // handler 阻断 xterm 默认路径即可。Cmd+Click 由 activate 回调处理。
+      // handler 阻断 xterm 默认路径即可。所有桌面平台均由 activate 回调
+      // 处理普通单击。
       linkHandler: {
         activate(_event: MouseEvent, uri: string) {
-          // Cmd+Click 才打开;普通 click 不做任何事
-          if (!_event?.metaKey) return
+          if (!terminalLinkActivationEnabled(_event)) return
           ipc.openPath(uri).catch((err) => {
             console.warn('[term] linkHandler open failed:', err)
           })
@@ -311,6 +326,7 @@
       getBackendKey: currentBackendKey,
       safeMouseMode: windowsPlatform,
       deferSingleClickMs: windowsPlatform ? CODEX_MULTI_CLICK_MS : 0,
+      shouldIgnoreMouseDown: event => terminalLinkTargetAtEvent(event) !== null,
     })
     syncCursorBlink()
     if (shouldInstallConptyCursorGuard(navigator.userAgent, endpointId?.kind === 'remote')) {
@@ -762,7 +778,7 @@
     // 8) HiDPI 切显示器:监听 devicePixelRatio 变化
     setupDprWatcher()
 
-    // 9) Cmd+Click 路径 / URL 识别 —— registerLinkProvider
+    // 9) 路径 / URL 识别 —— registerLinkProvider
     //
     // ── 坐标约定(xterm 5.x 源码确认) ──────────────────────────────────
     // • provideLinks(bufferedRowIndex, cb): bufferedRowIndex 是 1-based buffer
@@ -774,24 +790,72 @@
     //   是无效的(永远空),导致中文 / CJK 行里字符索引被当成 cell col
     //   使用,链接下划线整体偏移 N(N = 行内全宽字符数)。修复方案:用
     //   getCell(x).getWidth() 自己遍历 cell 构建 charIdx ↔ cellCol 映射。
-    // • activate(event, text): event 是真实 MouseEvent,可以读 metaKey。
-    //   直接在这里判断 Cmd 再 openPath,不需要额外 click capture handler。
+    // • activate(event, text): event 是真实 MouseEvent。所有桌面平台单击直达。
+    // • 连续 isWrapped 的物理行先重建为逻辑行,再识别 URL/路径;range 可跨行。
     //
     // 识别范围:
     //   a) http:// / https:// / file:// URL
-    //   b) 绝对路径 /… 或 ~/… (含可选 :row:col 后缀)
-    //   c) 相对路径 word/word… (含可选 :row:col 后缀)
+    //   b) POSIX 绝对路径 /、~/ 和 Windows 盘符/UNC 路径
+    //   c) 使用 / 或 \ 的相对路径(含可选 :row:col 后缀)
     //      — 前一字符不能是 / 或 \w,避免把绝对路径里的中间片段单独匹配
     //      — 路径主体字符类排除 : ,行列号通过独立的 :\d+ 后缀捕获,
     //        防止 "foo/bar: something" 把 ": something" 贪吃进来
     // 高亮范围包含行列号后缀,activate 时通过 cleanPath 去掉
-    const LINK_PATTERN = /(?:https?:\/\/|file:\/\/)[^\s"'<>()[\]{}，。、；：（）【】「」『』]+|(?:~\/|\/)[^\s"'<>()[\]{}:*?，。、；：（）【】「」『』]+(?::\d+(?::\d+)?)?|(?<![/\w])[A-Za-z0-9_.][A-Za-z0-9_./-]*\/[^\s"'<>()[\]{}:*?，。、；：（）【】「」『』]+(?::\d+(?::\d+)?)?/g
+    const LINK_PATTERN = /(?:https?:\/\/|file:\/\/)[^\s"'<>()[\]{}，。、；：（）【】「」『』]+|(?:[A-Za-z]:[\\/]|\\\\|~[\\/]|\/)[^\s"'<>()[\]{}:*?，。、；：（）【】「」『』]+(?::\d+(?::\d+)?)?|(?<![/\\\w])[A-Za-z0-9_.][A-Za-z0-9_.\\/-]*[\\/][^\s"'<>()[\]{}:*?，。、；：（）【】「」『』]+(?::\d+(?::\d+)?)?/g
 
-    /** 把 match 文本清理成可传给 open 的路径 */
-    function cleanPath(raw: string): string {
-      return raw
-        .replace(/[.,;:!?，。、；：（）【】「」『』）】」』\]）>]+$/, '') // 去末尾标点
-        .replace(/:\d+(?::\d+)?$/, '')          // 去行列号后缀
+    function sessionCwd(): string | null {
+      return get(tabs).find(tab => tab.id === sessionId)?.cwd ?? null
+    }
+
+    function resolvedTarget(path: string): string {
+      return isTerminalUrl(path) ? path : resolveTerminalPath(path, sessionCwd())
+    }
+
+    function activateTerminalLink(target: TerminalLinkTarget) {
+      if (target.activation === 'reveal' && target.revealChild) {
+        const child = resolvedTarget(target.revealChild)
+        console.debug('[term] link reveal:', child)
+        ipc.revealPath(child).catch(err => {
+          console.warn('[term] reveal_path failed:', err)
+        })
+        return
+      }
+      const path = resolvedTarget(target.target)
+      console.debug('[term] link open:', path)
+      ipc.openPath(path).catch(err => {
+        console.warn('[term] open_path failed:', err)
+      })
+    }
+
+    function logicalTerminalLineAt(rowIndex: number): LogicalTerminalLine | null {
+      const buf = term.buffer.active
+      const bounds = terminalLogicalRowBounds(
+        index => buf.getLine(index)?.isWrapped,
+        rowIndex,
+      )
+      if (!bounds) return null
+
+      const rows: WrappedTerminalRow[] = []
+      const tmpCell = buf.getNullCell()
+      for (let index = bounds.start; index <= bounds.end; index += 1) {
+        const line = buf.getLine(index)
+        if (!line) continue
+        const cells: WrappedTerminalRow['cells'] = []
+        const maxCols = Math.min(line.length, term.cols)
+        for (let col = 0; col < maxCols; col += 1) {
+          const cell = line.getCell(col, tmpCell)
+          if (!cell) continue
+          const width = cell.getWidth()
+          if (width === 0) continue
+          cells.push({
+            char: cell.getChars() || ' ',
+            x: col + 1,
+            endX: col + 1 + width,
+          })
+        }
+        rows.push({ y: index + 1, isWrapped: line.isWrapped, cells })
+      }
+      return joinWrappedTerminalRows(rows)
     }
 
     term.registerLinkProvider({
@@ -799,95 +863,57 @@
         bufferedRowIndex: number,   // 1-based, buffer-absolute row
         callback: (links: any[] | undefined) => void,
       ) {
-        const buf = term.buffer.active
-        // getLine 接受 0-based index → bufferedRowIndex - 1
-        const line = buf.getLine(bufferedRowIndex - 1)
-        if (!line) { callback(undefined); return }
-
-        // 自己构建 charIdx → 0-based cellCol 的映射。
-        // 遍历 cells:width=2(全宽 CJK)算 1 个字符占 2 cells;
-        //          width=0(紧跟全宽字符的占位 cell)跳过,不产生字符;
-        //          width=1 普通字符。
-        // 同时拼出 text 字符串(用 cell.getChars(),空 cell 当空格)。
-        const charToCol: number[] = []
-        let textBuf = ''
-        const tmpCell = buf.getNullCell()
-        for (let col = 0; col < line.length; col++) {
-          const cell = line.getCell(col, tmpCell)
-          if (!cell) continue
-          const w = cell.getWidth()
-          if (w === 0) continue   // 全宽字符的右半,无字符
-          const chars = cell.getChars() || ' '
-          charToCol.push(col)
-          textBuf += chars
-        }
-        const text = textBuf
-        if (!text.trim()) { callback(undefined); return }
+        const logical = logicalTerminalLineAt(bufferedRowIndex - 1)
+        if (!logical || !logical.text.trim()) { callback(undefined); return }
 
         const links: any[] = []
         LINK_PATTERN.lastIndex = 0
         let m: RegExpExecArray | null
-        while ((m = LINK_PATTERN.exec(text)) !== null) {
-          const rawMatch = m[0]
-          const charStart = m.index
-          const charEnd   = charStart + rawMatch.length - 1
+        while ((m = LINK_PATTERN.exec(logical.text)) !== null) {
+          for (const target of terminalLinkTargets(m[0])) {
+            const charStart = m.index + target.start
+            const charEnd = m.index + target.end
+            const range = terminalRangeForOffsets(logical, charStart, charEnd)
+            if (
+              !range
+              || range.start.y > bufferedRowIndex
+              || range.end.y < bufferedRowIndex
+            ) {
+              continue
+            }
 
-          // 字符索引 → cell col(1-based,xterm range 是 1-based)
-          const cellStart = (charToCol[charStart] ?? charStart) + 1
-          const cellEnd   = (charToCol[charEnd]   ?? charEnd)   + 1
-
-          const raw = rawMatch.replace(/[.,;:!?，。、；：（）【】「」『』）】」』\]）>]+$/, '')
-
-          links.push({
-            range: {
-              start: { x: cellStart,     y: bufferedRowIndex },
-              end:   { x: cellEnd + 1,   y: bufferedRowIndex },
-            },
-            text: raw,
-            decorations: {
-              underline: true,
-              pointerCursor: true,
-            },
-            activate(event: MouseEvent, _text: string) {
-              // xterm 在鼠标抬起时调 activate(mouseEvent, linkText)
-              // 只有 Cmd 按住时才真正打开
-              if (!event?.metaKey) return
-              let path = cleanPath(raw)
-              // 相对路径:拼接 session cwd 变绝对路径
-              if (!path.startsWith('/') && !path.startsWith('~') && !path.match(/^https?:\/\//)) {
-                const tab = get(tabs).find(t => t.id === sessionId)
-                if (tab?.cwd) {
-                  path = tab.cwd.replace(/\/$/, '') + '/' + path
-                }
-              }
-              console.debug('[term] cmd+click open:', path)
-              ipc.openPath(path).catch((err) => {
-                console.warn('[term] open_path failed:', err)
-              })
-            },
-          })
+            links.push({
+              range,
+              text: target.text,
+              decorations: {
+                underline: true,
+                pointerCursor: true,
+              },
+              activate(event: MouseEvent, _text: string) {
+                if (!terminalLinkActivationEnabled(event)) return
+                activateTerminalLink(target)
+              },
+            })
+          }
         }
         callback(links.length ? links : undefined)
       },
     })
 
-    // 11) click capture handler — Cmd 按住时落在 LINK_PATTERN 上,preventDefault 阻止文本选中。
-    //   xterm activate 回调里已处理打开逻辑,这里只做防选区。
-    const onClickCapture = (e: MouseEvent) => {
-      if (!e.metaKey || !term) return
-
+    function terminalLinkTargetAtEvent(e: MouseEvent): TerminalLinkTarget | null {
+      if (!term) return null
       const termCols = term.cols
       const termRows = term.rows
-      if (!termCols || !termRows) return
+      if (!termCols || !termRows) return null
 
       const rect = containerEl.getBoundingClientRect()
       const termW = containerEl.offsetWidth
       const termH = containerEl.offsetHeight
-      if (!termW || !termH) return
+      if (!termW || !termH) return null
 
       const relX = e.clientX - rect.left
       const relY = e.clientY - rect.top
-      if (relX < 0 || relY < 0 || relX > termW || relY > termH) return
+      if (relX < 0 || relY < 0 || relX > termW || relY > termH) return null
 
       const cellW = termW / termCols
       const cellH = termH / termRows
@@ -897,36 +923,32 @@
       const buf = term.buffer.active
       // bufRow: 0-based absolute
       const bufRow = buf.viewportY + row
-      const line = buf.getLine(bufRow)
-      if (!line) return
-
-      // 同 provideLinks:用 getCell + getWidth 自己构建 charIdx → cellCol 映射
-      const charToCol: number[] = []
-      let textBuf = ''
-      const tmpCell = buf.getNullCell()
-      for (let c = 0; c < line.length; c++) {
-        const cell = line.getCell(c, tmpCell)
-        if (!cell) continue
-        const w = cell.getWidth()
-        if (w === 0) continue
-        charToCol.push(c)
-        textBuf += cell.getChars() || ' '
-      }
-      const text = textBuf
-
-      // 把 col(0-based) 反查到字符索引:找 charToCol 中第一个 >= col 的位置
-      let charIdx = charToCol.findIndex(c => c >= col)
-      if (charIdx < 0) charIdx = text.length - 1
+      const logical = logicalTerminalLineAt(bufRow)
+      if (!logical) return null
+      const charIdx = terminalCharIndexAtPosition(logical, bufRow + 1, col + 1)
+      if (charIdx < 0) return null
 
       LINK_PATTERN.lastIndex = 0
       let m: RegExpExecArray | null
-      while ((m = LINK_PATTERN.exec(text)) !== null) {
-        if (charIdx >= m.index && charIdx < m.index + m[0].length) {
-          e.preventDefault()
-          e.stopPropagation()
-          return
+      while ((m = LINK_PATTERN.exec(logical.text)) !== null) {
+        for (const target of terminalLinkTargets(m[0])) {
+          const start = m.index + target.start
+          const end = m.index + target.end
+          if (charIdx >= start && charIdx < end) return target
         }
       }
+      return null
+    }
+
+    // 11) click capture handler — 链接命中时阻止文本选中。真正的 reveal/open
+    //   由 xterm link activate 执行一次;三平台 mousedown 都由上面的
+    //   shouldIgnoreMouseDown 放行,不会被本地 click ownership 延迟或吞掉。
+    const onClickCapture = (e: MouseEvent) => {
+      if (!terminalLinkActivationEnabled(e)) return
+      const target = terminalLinkTargetAtEvent(e)
+      if (!target) return
+      e.preventDefault()
+      e.stopPropagation()
     }
     containerEl.addEventListener('click', onClickCapture, { capture: true })
 

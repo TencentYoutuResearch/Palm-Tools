@@ -189,6 +189,11 @@ pub fn open_path(path: String) -> Result<(), String> {
     open_path_sync(&path)
 }
 
+#[tauri::command]
+pub fn reveal_path(path: String) -> Result<(), String> {
+    reveal_path_sync(&path)
+}
+
 fn workspace_snapshot_sync(
     cwd: &str,
     show_hidden: bool,
@@ -1154,6 +1159,68 @@ fn open_path_sync(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn reveal_path_sync(path: &str) -> Result<(), String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("empty path".into());
+    }
+
+    let expanded: std::borrow::Cow<str> = if let Some(rest) = trimmed.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            std::borrow::Cow::Owned(home.join(rest).to_string_lossy().into_owned())
+        } else {
+            std::borrow::Cow::Borrowed(trimmed)
+        }
+    } else {
+        std::borrow::Cow::Borrowed(trimmed)
+    };
+
+    let s = expanded.as_ref();
+    if is_open_url(s) || !is_absolute_open_path(s) {
+        return Err(format!("reveal rejected: not an absolute path: {s}"));
+    }
+
+    let target = Path::new(s);
+    if !target.exists() {
+        if let Some(parent) = target.parent() {
+            return open_path_sync(&parent.to_string_lossy());
+        }
+        return Err(format!("reveal target does not exist: {s}"));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg("-R")
+            .arg(s)
+            .spawn()
+            .map_err(|e| format!("reveal failed: {e}"))?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer.exe")
+            .arg(format!("/select,{s}"))
+            .spawn()
+            .map_err(|e| format!("Windows reveal failed: {e}"))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let parent = target
+            .parent()
+            .ok_or_else(|| format!("cannot reveal root path: {s}"))?;
+        Command::new("xdg-open")
+            .arg(parent)
+            .spawn()
+            .map_err(|e| format!("xdg-open failed: {e}"))?;
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        return Err("reveal_path not supported on this platform".into());
+    }
+
+    Ok(())
+}
+
 fn is_open_url(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("file://")
@@ -1216,6 +1283,15 @@ mod tests {
         assert!(is_absolute_open_path("/Users/name/file.txt"));
         assert!(!is_open_url("javascript:alert(1)"));
         assert!(!is_absolute_open_path("relative/file.txt"));
+    }
+
+    #[test]
+    fn reveal_target_rejects_urls_and_relative_paths() {
+        assert!(is_open_url("https://example.com/a"));
+        assert!(!is_absolute_open_path("https://example.com/a"));
+        assert!(!is_absolute_open_path("relative/file.txt"));
+        assert!(is_absolute_open_path("/tmp/file.txt"));
+        assert!(is_absolute_open_path("C:\\tmp\\file.txt"));
     }
 
     #[test]

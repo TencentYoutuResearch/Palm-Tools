@@ -17,8 +17,31 @@
   // The sidebar slot offers a 24px seat sized for dsh's own wordmark; Kode's mark and name
   // scale up to fill the row up to the collapse toggle (see .kode-brand-name).
   function SidebarBrandMark() { return h(KodeBrandMark, { height: 26, className: 'kode-sidebar-brand-mark' }) }
+  // dsh draws its inverted Harness badge only inside BrandWordmark. Keep exactly that plate and
+  // its glyphs (with their theme fills), drop the deepseek letters and whale outright, and frame
+  // the viewBox on the plate; the text fallback covers primitives without the badge.
+  const HARNESS_BADGE_HEIGHT = 20
+  function nativeHarnessBadge() {
+    if (typeof BrandWordmark !== 'function') return null
+    try {
+      const svg = BrandWordmark({ includeMark: false })
+      const parts = React.Children.toArray(svg?.props?.children)
+      const plate = parts.find(part => part?.type === 'rect')
+      const glyphs = parts.find(part => part?.type === 'g' && /badge/.test(part.props?.clipPath ?? ''))
+      const defs = parts.find(part => part?.type === 'defs')
+      const [x, y, width, height] = ['x', 'y', 'width', 'height'].map(key => Number(plate?.props?.[key]))
+      if (!glyphs || ![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return null
+      return React.cloneElement(svg, {
+        className: 'kode-harness-badge', viewBox: `${x} ${y} ${width} ${height}`,
+        width: Math.round(HARNESS_BADGE_HEIGHT * width / height * 10) / 10, height: HARNESS_BADGE_HEIGHT,
+      }, plate, glyphs, defs)
+    } catch { return null }
+  }
   function KodeBrandName() {
-    return h('span', { className: 'kode-brand-name' }, 'Harness')
+    const badge = nativeHarnessBadge()
+    return badge
+      ? h('span', { className: 'kode-brand-name kode-brand-name-badge', role: 'img', 'aria-label': 'Harness' }, badge)
+      : h('span', { className: 'kode-brand-name' }, 'Harness')
   }
   // The view is only hidden after leaving, so the panel would still be open on
   // the next entry and send Kode straight back; return to the conversation once

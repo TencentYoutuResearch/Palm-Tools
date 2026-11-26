@@ -32,6 +32,17 @@ async fn cli(profile: &Value, args: &[String], seconds: u64, capture: bool) -> R
     } else {
         Stdio::null()
     });
+    // Claude's browser OAuth callback works unattended, but its optional paste prompt
+    // rejects non-terminal stdin even when the browser is available.
+    #[cfg(unix)]
+    let _login_terminal = if !capture && profile["type"] == "claude" {
+        let terminal = nix::pty::openpty(None, None).context("无法为 Claude MCP 授权创建终端")?;
+        // OwnedFd::try_clone sets CLOEXEC. Keep only the child's stdin inheritable.
+        command.stdin(Stdio::from(terminal.slave.try_clone()?));
+        Some(terminal.master.try_clone()?)
+    } else {
+        None
+    };
     let child = command.spawn().context("无法启动 Agent CLI")?;
     let output = timeout(Duration::from_secs(seconds), child.wait_with_output())
         .await
@@ -58,10 +69,10 @@ fn claude_status(text: &str) -> &'static str {
     let Some(line) = text.lines().find_map(|s| s.trim().strip_prefix("Status:")) else {
         return "unknown";
     };
-    let status = line.to_lowercase();
+    let status = line.trim().to_lowercase();
     if status.contains("needs authentication") {
         "login-required"
-    } else if status.contains("✓ connected") {
+    } else if matches!(status.as_str(), "✓ connected" | "✔ connected" | "connected") {
         "connected"
     } else {
         "unknown"
@@ -92,7 +103,24 @@ pub(super) async fn execute(hub: &Hub, input: &Value) -> Result<Value> {
     let rows = query(hub, input, login).await?;
     if login {
         // Login completion alone does not prove credentials were stored in this CLI profile.
-        query(hub, input, false).await
+        let mut result = query(hub, input, false).await?;
+        if input["partial"] == true {
+            result["partial"] = json!(true);
+        }
+        let confirmed = result["rows"].as_array().is_some_and(|rows| {
+            rows.iter().any(|row| {
+                row["packageKey"] == input["packageKey"]
+                    && row["name"] == input["name"]
+                    && matches!(
+                        row["status"].as_str(),
+                        Some("connected" | "authorized" | "not-required")
+                    )
+            })
+        });
+        if !confirmed {
+            bail!("CLI 尚未确认此 MCP 的授权，请刷新状态或重试");
+        }
+        Ok(result)
     } else {
         Ok(rows)
     }
@@ -105,9 +133,12 @@ async fn query(hub: &Hub, input: &Value, login: bool) -> Result<Value> {
         .and_then(|s| s.iter().find(|s| s["id"] == input["id"]))
         .context("来源不存在")?;
     let agents = hub.store.document("agents")?;
+    // The desktop exposes its native DSH profile even before any profiles are saved.
+    let native_dsh = json!({"id":"builtin-dsh","type":"dsh"});
     let profile = agents["value"]["profiles"]
         .as_array()
         .and_then(|s| s.iter().find(|p| p["id"] == input["profileId"]))
+        .or_else(|| (input["profileId"] == "builtin-dsh").then_some(&native_dsh))
         .context("Agent 不存在")?;
     let (target, _) = extension_targets::for_profile(profile).context("Agent 未配置同步目标")?;
     let synced = source.get("syncedTargets").unwrap_or(&source["targets"]);
@@ -130,10 +161,11 @@ async fn query(hub: &Hub, input: &Value, login: bool) -> Result<Value> {
     let mut catalog: Option<Vec<Value>> = None;
     let mut cursor_list: Option<String> = None;
     let mut rows = vec![];
+    let single = login || (input["action"] == "mcp-login" && input["partial"] == true);
     let mut matched = false;
     for pkg in source["packages"].as_array().into_iter().flatten() {
         let key = &pkg["path"];
-        if pkg["enabled"] == false || login && input["packageKey"] != *key {
+        if pkg["enabled"] == false || single && input["packageKey"] != *key {
             continue;
         }
         let plugin = source["plugins"][kind]
@@ -147,7 +179,7 @@ async fn query(hub: &Hub, input: &Value, login: bool) -> Result<Value> {
             });
         for server in pkg["mcp"].as_array().into_iter().flatten() {
             let name = server["name"].as_str().context("MCP 名称缺失")?;
-            if login && input["name"].as_str() != Some(name) {
+            if single && input["name"].as_str() != Some(name) {
                 continue;
             }
             let mut args = vec![];
@@ -209,7 +241,15 @@ async fn query(hub: &Hub, input: &Value, login: bool) -> Result<Value> {
                         status = cursor_status(list, name);
                     }
                 } else if kind == "claude" {
-                    args = vec!["--plugin-dir".into(), path.to_owned()];
+                    // TClaude only dispatches its MCP command if "mcp" is argv[1].
+                    // For that registry, check the reported URL before authenticating.
+                    let wrapper = profile["executable"]
+                        .as_str()
+                        .and_then(|exe| Path::new(exe).file_stem())
+                        .is_some_and(|name| name == "tclaude");
+                    if !wrapper {
+                        args = vec!["--plugin-dir".into(), path.to_owned()];
+                    }
                     identifier =
                         format!("plugin:{}:{}", plugin["name"].as_str().unwrap_or(""), name);
                     let mut get = args.clone();
@@ -217,7 +257,20 @@ async fn query(hub: &Hub, input: &Value, login: bool) -> Result<Value> {
                     status = cli(profile, &get, 15, true)
                         .await
                         .ok()
-                        .map(|s| claude_status(&s))
+                        .map(|s| {
+                            if wrapper {
+                                let endpoint =
+                                    extension_files::mcp_endpoint(Path::new(path), kind, name);
+                                let url = s
+                                    .lines()
+                                    .find_map(|line| line.trim().strip_prefix("URL:"))
+                                    .map(str::trim);
+                                if endpoint.is_none() || url != endpoint.as_deref() {
+                                    return "manual";
+                                }
+                            }
+                            claude_status(&s)
+                        })
                         .unwrap_or("unknown");
                 }
             }
