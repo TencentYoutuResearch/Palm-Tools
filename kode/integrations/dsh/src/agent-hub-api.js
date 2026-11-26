@@ -82,6 +82,8 @@ export function registerAgentHubApi(ctx, { hub, backend, service }) {
         const request = {
           source_session_id: sessionId, source_runtime: 'dsh', profile_id: input.profileId,
           target_runtime: 'dsh', request_id: input.requestId,
+          ...(input.model !== undefined ? { model: input.model } : {}),
+          ...(input.reasoningEffort !== undefined ? { reasoning_effort: input.reasoningEffort } : {}),
         }
         let endpoint = '/api/v1/messaging/workbench/handoff'
         if (input.action === 'handoff-skill') {
@@ -93,9 +95,13 @@ export function registerAgentHubApi(ctx, { hub, backend, service }) {
           if (found.error) throw new Error(found.error.message)
           if (!found.agent) throw new Error('源会话不可用。')
           request.brief = await prepareHandoffBrief(found.agent, input.requestId, input.profileId)
+          // The skill already read its source on this Host. The backend can dispatch
+          // the brief to the runtime owner even when another Host holds the lease.
+          request.source_cwd = found.agent.session.header?.cwd ?? session.cwd
           endpoint += '/skill'
+        } else {
+          await bridge.publish()
         }
-        await bridge.publish()
         return send(res, 200, await backend.call(endpoint, request))
       }
       const binding = service.profiles.binding(sessionId)
