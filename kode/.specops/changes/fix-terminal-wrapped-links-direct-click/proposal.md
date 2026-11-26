@@ -4,7 +4,7 @@ id: fix-terminal-wrapped-links-direct-click
 kind: bug
 work_type: bugfix
 title: 修复终端换行链接并统一直接点击
-status: proposed
+status: in_progress
 verifies:
   - typescript
 paths:
@@ -41,17 +41,18 @@ paths:
 
 ## Acceptance criteria
 
-- [ ] URL 被软换行成两行或多行后，悬停任意片段都识别为同一个完整 URL。
-- [ ] 普通单击换行 URL 的任意片段，只打开一次完整 URL。
-- [ ] 路径被软换行后，各父目录分段和最终文件名仍正确映射到物理行列。
-- [ ] 点击跨行父目录会执行 reveal；点击跨行文件名会打开完整路径。
-- [ ] 普通文本硬换行不会被错误拼接成链接。
-- [ ] Windows、macOS 和 Linux 都支持普通单击链接，不再要求 `Cmd+Click` 或
+- [x] URL 被软换行成两行或多行后，悬停任意片段都识别为同一个完整 URL。
+- [x] 普通单击换行 URL 的任意片段，只打开一次完整 URL。
+- [x] 路径被软换行后，各父目录分段和最终文件名仍正确映射到物理行列。
+- [x] 点击跨行父目录会执行 reveal；点击跨行文件名会打开完整路径。
+- [x] 普通文本硬换行不会被错误拼接成链接。
+- [x] Windows、macOS 和 Linux 都支持普通单击链接，不再要求 `Cmd+Click` 或
       `Ctrl+Click`。
-- [ ] 从链接文本开始的拖拽仍选择文本，不触发打开。
-- [ ] 非链接区域单击、终端滚动、TCodex 鼠标报告过滤和会话交互保持现状。
-- [ ] 单元测试覆盖 `isWrapped` 逻辑行拼接、字符到物理 cell 映射、跨行 range 和点击 hit-test。
-- [ ] 远端 Windows 与本地 macOS 在真实终端中验证换行 URL、路径 reveal/open 和直接点击。
+- [x] 从链接文本开始的拖拽仍选择文本，不触发打开。
+- [x] 非链接区域单击、终端滚动、TCodex 鼠标报告过滤和会话交互保持现状。
+- [x] 单元测试覆盖 `isWrapped` 逻辑行拼接、字符到物理 cell 映射、跨行 range 和点击 hit-test。
+- [x] 远端 Windows 在真实终端中验证换行 URL、路径 reveal/open 和直接点击。
+- [ ] 本地 macOS 在真实终端中验证换行 URL、路径 reveal/open 和直接点击。
 
 ## Out of scope
 

@@ -2,7 +2,7 @@
 schema_version: 2
 id: fix-terminal-wrapped-links-direct-click
 document_class: design
-status: proposed
+status: in_progress
 ---
 
 # Design
@@ -90,3 +90,20 @@ drag threshold.
 
 Restore physical-line parsing and the prior platform modifier predicate. No data
 or persistence migration is involved.
+
+## Verification evidence
+
+Remote Windows Server 2025 host `21.130.222.251`, HEAD `784bee2`:
+
+- `pnpm check` passed with 0 errors; only two pre-existing CSS warnings remain.
+- Terminal links tests passed `12/12`, including wrapped URL, wrapped path,
+  hard-newline isolation, CJK cell columns, and cross-row range mapping.
+- Terminal mouse tests passed `25/25`, including a link mousedown bypassing the
+  Codex/TCodex deferred-click owner.
+- Windows debug GUI build completed with the real Tauri/WebView2 stack.
+- A wrapped URL's second physical fragment opened exactly one Edge main process
+  with the complete URL in `--single-argument`.
+- A wrapped path's cross-row parent component opened exactly one Explorer window
+  and focused the next child directory.
+- macOS arm64 `cargo build -p kode-gui` completed; live macOS click automation
+  remains pending because the runner lacks Accessibility permission.
