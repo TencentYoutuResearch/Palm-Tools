@@ -932,7 +932,10 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     'login-required': '需要登录', authorized: '已授权', connected: '已连接',
     'not-required': '无需授权', manual: '需手动配置', unknown: '状态未知',
   }
+  // Guards live outside the component so re-renders and repeated clicks cannot start a second login for the same pair.
+  const mcpLoginsInFlight = new Set(), mcpAuthorizeRuns = new Set()
   const mcpStatusKey = (sourceId, profileId) => `${sourceId}\0${profileId}`
+  const mcpBulkKey = (sourceId, packageKey) => `${sourceId}\0${packageKey ?? ''}`
   const mcpRowKey = (sourceId, profileId, row) => `${sourceId}\0${profileId}\0${row.packageKey}\0${row.name}`
   // Services advertising packageToggle key path-only records by their relative path inside the source.
   const sourcePackageKey = (pkg, packageToggle) => pkg?.key ?? (packageToggle ? pkg?.path : undefined)
@@ -947,7 +950,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   }
   function HubSettings({ host, hosts = [], sessions, slots }) {
     const [data, setData] = useState(null), [error, setError] = useState(''), [busy, setBusy] = useState(false)
-    const [mcpStatuses, setMcpStatuses] = useState({}), [mcpErrors, setMcpErrors] = useState({}), [mcpPending, setMcpPending] = useState({})
+    const [mcpStatuses, setMcpStatuses] = useState({}), [mcpErrors, setMcpErrors] = useState({}), [mcpPending, setMcpPending] = useState({}), [mcpBulk, setMcpBulk] = useState({})
     const [draft, setDraft] = useState(null)
     const [previewId, setPreviewId] = useState(null), [previewPackagePath, setPreviewPackagePath] = useState(null)
     const store = directory(undefined, host, true)
@@ -988,7 +991,9 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       }
     }
     const loginMcp = async (source, profileId, row) => {
-      const statusKey = mcpStatusKey(source.id, profileId), rowKey = mcpRowKey(source.id, profileId, row)
+      const statusKey = mcpStatusKey(source.id, profileId), rowKey = mcpRowKey(source.id, profileId, row), flight = host + '\0' + rowKey
+      if (mcpLoginsInFlight.has(flight)) return null
+      mcpLoginsInFlight.add(flight)
       setMcpPending(current => ({ ...current, [rowKey]: true }))
       setMcpErrors(current => { const next = { ...current }; delete next[rowKey]; return next })
       try {
@@ -999,18 +1004,35 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
         setMcpErrors(current => ({ ...current, [rowKey]: error.message }))
         return false
       } finally {
+        mcpLoginsInFlight.delete(flight)
         setMcpPending(current => { const next = { ...current }; delete next[rowKey]; return next })
       }
     }
+    // Logs in every MCP × CLI pair that freshly reports login-required, one at a time; a failure never stops the rest.
+    const authorizeMcp = async (source, profiles, packageKey) => {
+      const bulkKey = mcpBulkKey(source.id, packageKey), run = host + '\0' + bulkKey
+      if (host !== 'local' || mcpAuthorizeRuns.has(run)) return undefined
+      mcpAuthorizeRuns.add(run)
+      const report = value => setMcpBulk(current => ({ ...current, [bulkKey]: value }))
+      const seen = new Set(), results = []
+      report({ running: true })
+      try {
+        for (const { profile } of profiles) {
+          const status = await readMcpStatus(source, profile.id)
+          if (!status) { results.push({ profile: profile.name, ok: false, readFailed: true }); continue }
+          for (const row of status.rows ?? []) {
+            const key = mcpRowKey(source.id, profile.id, row)
+            if (row.status !== 'login-required' || (packageKey && row.packageKey !== packageKey) || seen.has(key)) continue
+            seen.add(key); report({ running: true, current: `${profile.name} · ${row.name}` })
+            results.push({ profile: profile.name, name: row.name, ok: await loginMcp(source, profile.id, row) })
+          }
+        }
+      } finally { mcpAuthorizeRuns.delete(run); report({ results }) }
+      return results
+    }
     const completeMcpLogins = async (next, body) => {
-      if (host !== 'local') return
       const source = next.sources?.find(row => row.id === body.id)
-      if (!source) return
-      for (const { profile } of sourceMcpProfiles(source, next, choices)) {
-        const result = await readMcpStatus(source, profile.id)
-        const pending = (result?.rows ?? []).filter(row => row.status === 'login-required' && (!body.packageKey || row.packageKey === body.packageKey))
-        for (const row of pending) await loginMcp(source, profile.id, row)
-      }
+      if (source) await authorizeMcp(source, sourceMcpProfiles(source, next, choices), body.packageKey)
     }
     const operate = async body => {
       setBusy(true); setError('')
@@ -1126,7 +1148,8 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
         previewSource && h(SourcePreview, {
           source: previewSource, packagePath: previewPackagePath, onPackageChange: setPreviewPackagePath, host, targetOptions: options,
           busy, packageToggle, onTogglePackage: togglePackage, onUpdateService: updateService,
-          mcpProfiles: previewProfiles, mcpStatuses, mcpErrors, mcpPending,
+          mcpProfiles: previewProfiles, mcpStatuses, mcpErrors, mcpPending, mcpBulk,
+          onAuthorizePackage: (source, packageKey) => authorizeMcp(source, previewProfiles, packageKey),
           mcpHostName: hosts.find(row => row.id === host)?.name ?? host,
           onRefreshMcp: readMcpStatus, onRetryMcp: loginMcp,
         })))
@@ -1156,41 +1179,78 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
         (item.description || item.type) && h('p', null, item.description || item.type))))
         : h('p', { className: 'kode-config-note' }, empty))
   }
-  function McpList({ source, current, packageKey, host, mcpHostName, mcpProfiles = [], mcpStatuses = {}, mcpErrors = {}, mcpPending = {}, onRefreshMcp, onRetryMcp, empty }) {
+  // One status per MCP × CLI pair, shown as the same Agent pill the sync picker uses.
+  function mcpTagState(row, state, host) {
+    if (!row) return state?.busy ? 'reading' : state?.error ? 'read-failed' : 'unreported'
+    if (row.status === 'authorized' || row.status === 'connected') return 'ok'
+    if (row.status === 'login-required') return host === 'local' ? 'login' : 'manual'
+    return row.status === 'not-required' || row.status === 'manual' ? row.status : 'unknown'
+  }
+  const MCP_TAG_ACTIONS = { reading: '读取中…', unreported: '未报告', 'not-required': '无需授权', manual: '需手动配置', unknown: '状态未知' }
+  function McpAgentTag({ source, profile, row, tag, state, failure, pending, onRefreshMcp, onRetryMcp }) {
+    const name = profile.name, base = { className: 'kode-source-target-option kode-mcp-agent', 'data-status': tag }
+    if (tag === 'ok') return h('span', { ...base, title: `${name}：${MCP_STATUS_LABELS[row.status]}` },
+      h(IconCheckOutlineRegular, { size: 14, 'aria-hidden': true }), name, h('span', { className: 'kode-sr-only' }, `：${MCP_STATUS_LABELS[row.status]}`))
+    if (tag === 'login') {
+      const action = pending ? '登录中…' : failure ? '重试登录' : '登录'
+      return h('button', { ...base, type: 'button', 'data-failed': Boolean(failure), disabled: pending, 'aria-busy': pending || undefined,
+        title: `在 ${name} 中登录 ${row.name}`, 'aria-label': `${name}：${row.name} ${pending ? '登录中' : failure ? '登录失败，重试登录' : '需要登录，点击登录'}`,
+        onClick: () => void onRetryMcp(source, profile.id, row) },
+      h(pending ? IconLoadingOutlineRegular : failure ? IconWarningOutlineRegular : IconGlobeOutlineRegular, { size: 14, className: pending ? 'kode-spin' : undefined, 'aria-hidden': true }),
+      name, h('span', { className: 'kode-mcp-agent-action' }, action))
+    }
+    if (tag === 'read-failed') return h('button', { ...base, type: 'button', title: state.error, 'aria-label': `${name}：状态读取失败，重试读取`, onClick: () => void onRefreshMcp(source, profile.id) },
+      h(IconWarningOutlineRegular, { size: 14, 'aria-hidden': true }), name, h('span', { className: 'kode-mcp-agent-action' }, '重试读取'))
+    const icon = tag === 'reading' ? h(IconLoadingOutlineRegular, { size: 14, className: 'kode-spin', 'aria-hidden': true }) : tag === 'manual' ? h(IconWarningOutlineRegular, { size: 14, 'aria-hidden': true }) : null
+    return h('span', base, icon, name, h('span', { className: 'kode-mcp-agent-action' }, MCP_TAG_ACTIONS[tag]))
+  }
+  function mcpBulkSummary(results) {
+    if (!results.length) return '当前插件没有需要登录的 MCP。'
+    const label = row => row.readFailed ? `${row.profile} 状态读取` : `${row.profile} · ${row.name}`
+    const ok = results.filter(row => row.ok), failed = results.filter(row => row.ok === false), skipped = results.filter(row => row.ok === null)
+    return [`一键授权完成：成功 ${ok.length} 项`, failed.length && `失败 ${failed.length} 项（${failed.map(label).join('、')}），可单独点击重试`,
+      skipped.length && `跳过 ${skipped.length} 项（正在登录）`].filter(Boolean).join('，') + '。'
+  }
+  function McpList({ source, current, packageKey, host, mcpHostName, mcpProfiles = [], mcpStatuses = {}, mcpErrors = {}, mcpPending = {}, mcpBulk = {}, onRefreshMcp, onRetryMcp, onAuthorizePackage, empty }) {
     const declared = current.mcp ?? []
     const rowsFor = profile => packageKey ? (mcpStatuses[mcpStatusKey(source.id, profile.id)]?.rows ?? []).filter(row => row.packageKey === packageKey) : []
     const names = [...new Set([...declared.map(item => item.name), ...mcpProfiles.flatMap(({ profile }) => rowsFor(profile).map(row => row.name))])]
     const note = !names.length ? empty
       : !packageKey ? '更新 Kode 服务后可读取各 CLI 的实际授权状态。'
         : !mcpProfiles.length ? '将来源同步到可用 Agent 后读取各 CLI 的实际授权状态。' : null
+    const pairs = packageKey ? names.flatMap(name => mcpProfiles.map(({ profile }) => {
+      const state = mcpStatuses[mcpStatusKey(source.id, profile.id)], row = rowsFor(profile).find(item => item.name === name)
+      const rowKey = row && mcpRowKey(source.id, profile.id, row)
+      return { name, profile, row, state, tag: mcpTagState(row, state, host), failure: rowKey && mcpErrors[rowKey], pending: Boolean(rowKey && mcpPending[rowKey]) }
+    })) : []
+    const loginable = pairs.filter(pair => pair.tag === 'login' && !pair.pending)
+    const bulk = mcpBulk[mcpBulkKey(source.id, packageKey)]
+    const tagProps = { source, onRefreshMcp, onRetryMcp }
     return h('section', { className: 'kode-source-preview-section kode-mcp-authorization' },
-      h('h3', null, 'MCP', h('span', null, names.length)),
+      h('div', { className: 'kode-mcp-head' },
+        h('h3', null, 'MCP', h('span', null, names.length)),
+        host === 'local' && (loginable.length > 0 || bulk?.running) && h(Button, { size: 'sm', variant: 'outline', className: 'kode-mcp-authorize-all',
+          disabled: Boolean(bulk?.running), 'aria-busy': bulk?.running || undefined, onClick: () => void onAuthorizePackage(source, packageKey) },
+        bulk?.running ? '授权中…' : `一键授权 ${loginable.length} 项`)),
       note && h('p', { className: 'kode-config-note' }, note),
+      bulk && h('p', { className: 'kode-mcp-bulk-result', role: 'status', 'data-failed': Boolean(bulk.results?.some(row => row.ok === false)) },
+        bulk.running ? `正在登录 ${bulk.current ?? '…'}` : mcpBulkSummary(bulk.results ?? [])),
       names.length > 0 && h('ul', { className: 'kode-source-preview-list kode-mcp-list' }, ...names.map(name => {
-        const spec = declared.find(item => item.name === name)
+        const spec = declared.find(item => item.name === name), own = pairs.filter(pair => pair.name === name)
+        const failures = own.filter(pair => pair.tag === 'login' && pair.failure)
+        const readErrors = own.filter(pair => pair.tag === 'read-failed')
+        const manual = own.filter(pair => pair.tag === 'manual')
         return h('li', { key: name, className: 'kode-mcp-item' },
           h('div', { className: 'kode-mcp-item-head' }, h('strong', null, name), (spec?.description || spec?.type) && h('span', null, spec.description || spec.type)),
-          packageKey && mcpProfiles.length > 0 && h('ul', { className: 'kode-mcp-cli-list' }, ...mcpProfiles.map(({ profile }) => {
-            const statusKey = mcpStatusKey(source.id, profile.id), state = mcpStatuses[statusKey]
-            const row = rowsFor(profile).find(item => item.name === name)
-            if (!row) return h('li', { key: profile.id, className: 'kode-mcp-status-row', 'data-status': state?.error ? 'error' : 'unknown' },
-              h('span', { className: 'kode-mcp-cli-name' }, profile.name),
-              h('span', { className: 'kode-mcp-status-label', 'data-status': state?.error ? 'error' : 'unknown' }, state?.busy ? '读取中…' : state?.error ? '读取失败' : '未报告'),
-              state?.error && h('span', { className: 'kode-mcp-status-detail' }, h(Failure, { text: state.error })),
-              state?.error && h(Button, { size: 'sm', variant: 'outline', onClick: () => void onRefreshMcp(source, profile.id) }, '重试读取'))
-            const rowKey = mcpRowKey(source.id, profile.id, row), failure = mcpErrors[rowKey], pending = mcpPending[rowKey]
-            const manual = row.status === 'manual' || (host !== 'local' && row.status === 'login-required')
-            const detail = failure || (row.status === 'login-required' && host === 'local' ? '下次同步或开启此插件时发起登录' : '')
-            return h('li', { key: profile.id, className: 'kode-mcp-status-row', 'data-status': row.status ?? 'unknown' },
-              h('span', { className: 'kode-mcp-cli-name' }, profile.name),
-              h('span', { className: 'kode-mcp-status-label', 'data-status': row.status ?? 'unknown' }, MCP_STATUS_LABELS[row.status] ?? row.status ?? MCP_STATUS_LABELS.unknown),
-              detail && h('span', { className: 'kode-mcp-status-detail', 'data-failed': Boolean(failure) }, detail),
-              failure && host === 'local' && h(Button, { size: 'sm', variant: 'outline', disabled: pending, onClick: () => void onRetryMcp(source, profile.id, row) }, pending ? '登录中…' : '重试登录'),
-              manual && h('details', { className: 'kode-mcp-manual' },
-                h('summary', null, '手动配置'),
-                h('p', null, `请在 ${mcpHostName ?? host} 的 ${profile.name} 配置中完成 ${row.name} 授权。${host !== 'local' ? '浏览器不会跨主机自动登录。' : ''}`),
-                h(Button, { size: 'sm', variant: 'outline', onClick: () => void onRefreshMcp(source, profile.id) }, '刷新状态')))
-          })))
+          own.length > 0 && h('div', { className: 'kode-mcp-agents', role: 'group', 'aria-label': `${name} 在各 Agent 的授权状态` },
+            ...own.map(pair => h(McpAgentTag, { key: pair.profile.id, ...tagProps, ...pair }))),
+          ...failures.map(pair => h('p', { key: 'login-' + pair.profile.id, className: 'kode-mcp-status-detail', 'data-failed': true }, `${pair.profile.name} 登录失败：${pair.failure}`)),
+          ...readErrors.map(pair => h('p', { key: 'read-' + pair.profile.id, className: 'kode-mcp-status-detail', 'data-failed': true }, `${pair.profile.name} 状态读取失败：${pair.state.error}`)),
+          manual.length > 0 && h('details', { className: 'kode-mcp-manual' },
+            h('summary', null, '手动配置'),
+            ...manual.map(pair => h('div', { key: pair.profile.id, className: 'kode-mcp-manual-row' },
+              h('p', null, `请在 ${mcpHostName ?? host} 的 ${pair.profile.name} 配置中完成 ${name} 授权。${host !== 'local' ? '浏览器不会跨主机自动登录。' : ''}`),
+              h(Button, { size: 'sm', variant: 'outline', 'aria-label': `刷新 ${pair.profile.name} 状态`, onClick: () => void onRefreshMcp(source, pair.profile.id) }, '刷新状态')))))
       })))
   }
   function SourcePreview({ source, packagePath, onPackageChange, host, targetOptions, busy = false, packageToggle = false, onTogglePackage = () => {}, onUpdateService = () => {}, ...mcp }) {
@@ -5650,8 +5710,8 @@ html[data-kode-embed] .kode-token-notch{display:none}
 .kode-source-preview-header>div{min-width:0}
 .kode-source-preview-header strong{font-size:15px;font-weight:600}
 .kode-source-preview-header p{margin:4px 0 0;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;white-space:pre-wrap;overflow-wrap:anywhere}
-.kode-source-preview-section>h3{display:flex;align-items:center;gap:8px;margin:0 0 8px;font-size:14px;font-weight:600;line-height:20px}
-.kode-source-preview-section>h3>span{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 6px;border-radius:10px;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);font-size:11px;font-weight:500}
+.kode-source-preview-section>h3,.kode-mcp-head>h3{display:flex;align-items:center;gap:8px;margin:0 0 8px;font-size:14px;font-weight:600;line-height:20px}
+.kode-source-preview-section>h3>span,.kode-mcp-head>h3>span{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 6px;border-radius:10px;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);font-size:11px;font-weight:500}
 .kode-source-preview-list{margin:0;padding:0 12px;list-style:none;border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-settings-card-fill)}
 .kode-source-preview-list>li{padding:12px 0;border-bottom:.5px solid var(--dsw-alias-border-l2)}
 .kode-source-preview-list>li:last-child{border-bottom:0}
@@ -5670,18 +5730,25 @@ html[data-kode-embed] .kode-token-notch{display:none}
 .kode-package-select:focus-visible,.kode-mcp-manual summary:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:3px}
 .kode-package-toggle{display:flex;align-items:center;gap:8px;flex:none;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
 .kode-package-sync-note{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px 12px;margin-bottom:10px}.kode-package-sync-note>.kode-config-note{flex:1 1 280px;margin:0}
+.kode-mcp-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 8px}.kode-mcp-head>h3{margin:0}
+.kode-mcp-bulk-result{margin:0 0 8px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}.kode-mcp-bulk-result[data-failed=true]{color:var(--dsw-alias-state-warning-primary)}
+.kode-mcp-agents{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.kode-source-target-option.kode-mcp-agent{min-height:28px;padding:3px 10px;font-size:12px;line-height:18px;cursor:default}
+.kode-mcp-agent-action{color:var(--dsw-alias-label-secondary)}
+span.kode-mcp-agent:hover{background:transparent}span.kode-mcp-agent:active{transform:none}
+.kode-mcp-agent[data-status=ok]{border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary) 45%,transparent)}.kode-mcp-agent[data-status=ok]>svg{color:var(--dsw-alias-state-success-primary)}
+button.kode-mcp-agent{cursor:pointer}button.kode-mcp-agent[data-status=login]{border-color:color-mix(in srgb,var(--dsw-alias-state-warning-primary) 55%,transparent)}button.kode-mcp-agent[data-status=login]>svg{color:var(--dsw-alias-state-warning-primary)}
+button.kode-mcp-agent[data-status=login] .kode-mcp-agent-action{color:var(--dsw-alias-state-warning-primary);font-weight:500}
+.kode-mcp-agent[data-failed=true],.kode-mcp-agent[data-status=read-failed]{border-color:var(--dsw-alias-state-error-primary)}.kode-mcp-agent[data-failed=true]>svg,.kode-mcp-agent[data-status=read-failed]>svg,.kode-mcp-agent[data-status=read-failed] .kode-mcp-agent-action{color:var(--dsw-alias-state-error-primary)}
+.kode-mcp-agent[data-status=not-required]{color:var(--dsw-alias-label-secondary)}
+.kode-mcp-agent[data-status=manual]>svg,.kode-mcp-agent[data-status=manual] .kode-mcp-agent-action{color:var(--dsw-alias-state-warning-primary)}
+.kode-mcp-agent:is([data-status=unknown],[data-status=unreported],[data-status=reading]){border-style:dashed;color:var(--dsw-alias-label-secondary)}
+.kode-mcp-manual-row{display:flex;align-items:center;flex-wrap:wrap;gap:4px 10px}.kode-mcp-manual-row>p{flex:1 1 220px}
+.kode-mcp-status-detail{display:block;margin:6px 0 0}
 .kode-mcp-item-head{display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 10px;min-width:0}
 .kode-mcp-item-head>span{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}
-.kode-mcp-cli-list{display:flex;flex-direction:column;gap:6px;margin:8px 0 0;padding:0;list-style:none}
-.kode-mcp-status-row{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;min-height:28px}
-.kode-mcp-cli-name{flex:0 1 160px;min-width:0;font-size:12px;line-height:18px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .kode-mcp-status-detail{flex:1 1 160px;min-width:0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
 .kode-mcp-status-detail[data-failed=true]{color:var(--dsw-alias-state-error-primary)}
-.kode-mcp-status-row>button{margin-inline-start:auto}
-.kode-mcp-status-label{flex:none;padding:2px 7px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px}
-.kode-mcp-status-label[data-status=authorized],.kode-mcp-status-label[data-status=connected]{color:var(--dsw-alias-state-success-primary)}
-.kode-mcp-status-label[data-status=login-required],.kode-mcp-status-label[data-status=manual]{color:var(--dsw-alias-state-warning-primary)}
-.kode-mcp-status-label[data-status=error]{color:var(--dsw-alias-state-error-primary)}
 .kode-mcp-manual{flex:1 1 100%;padding-top:4px}
 .kode-mcp-manual>summary{width:fit-content;color:var(--dsw-alias-label-primary);font-size:12px;cursor:pointer}
 .kode-mcp-manual>p{margin:8px 0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}

@@ -47,6 +47,14 @@ function findNode(node, predicate) {
   for (const child of node.children ?? []) { const found = findNode(child, predicate); if (found) return found }
   return undefined
 }
+const MCP_ICONS = { IconPlusOutlineRegular: 'plus', IconChevronDownOutlineRegular: 'chevron', IconCheckOutlineRegular: 'check', IconClockOutlineRegular: 'clock', IconLoadingOutlineRegular: 'loading', IconWarningOutlineRegular: 'warning', IconGlobeOutlineRegular: 'globe' }
+/** Renders nested function components so tests can inspect the final host elements. */
+function expand(node) {
+  if (node == null || typeof node !== 'object') return node
+  if (Array.isArray(node)) return node.map(expand)
+  if (typeof node.type === 'function') return expand(node.type(node.props))
+  return { ...node, children: (node.children ?? []).map(expand) }
+}
 function visibleText(node) {
   if(node==null || typeof node==='boolean')return ''
   if(typeof node==='string' || typeof node==='number')return String(node)
@@ -613,7 +621,7 @@ test('plugin toggles preserve source boundaries and sequence MCP login with retr
       throw new Error(`Unexpected action: ${body.action}`)
     },
     React: { Fragment: 'fragment' }, Button: 'button', Modal: 'modal', Failure: 'failure', SelectField: 'select',
-    IconPlusOutlineRegular: 'plus', IconChevronDownOutlineRegular: 'chevron', IconCheckOutlineRegular: 'check', IconClockOutlineRegular: 'clock',
+    ...MCP_ICONS,
     transport: null, h: (type, props, ...children) => ({ type, props, children }), useEffect() {},
     useState(initial) { const at = index++; if (slots[at] === undefined) slots[at] = initial; return [slots[at], value => { slots[at] = typeof value === 'function' ? value(slots[at]) : value }] },
   }
@@ -632,7 +640,7 @@ test('plugin toggles preserve source boundaries and sequence MCP login with retr
   findNode(tree, node => node.props?.className === 'kode-source-summary').props.onClick()
   tree = render()
   const previewTree = root => { const node = findNode(root, item => item.type === scope.SourcePreview); return node.type(node.props) }
-  const authorizationTree = root => { const node = findNode(previewTree(root), item => item.type === scope.McpList); return node.type(node.props) }
+  const authorizationTree = root => { const node = findNode(previewTree(root), item => item.type === scope.McpList); return expand(node) }
   const toggle = (root, label) => findNode(previewTree(root), node => node.type === 'input' && node.props['aria-label'] === label)
   assert.equal(toggle(tree, '停用 Legacy').props.disabled, true)
 
@@ -658,15 +666,21 @@ test('plugin toggles preserve source boundaries and sequence MCP login with retr
   assert.match(visibleText(tree), /重试登录/)
   assert.match(visibleText(tree), /已连接/)
 
-  findNode(authorizationTree(tree), node => node.type === 'button' && node.children.includes('重试登录')).props.onClick()
+  // The failed pair is the Agent tag itself: one click retries the CLI login.
+  const agentTag = (root, name) => findNode(findNode(authorizationTree(root), node => node.props?.className === 'kode-mcp-item' && node.props.key === name), node => node.props?.className?.split(' ').includes('kode-mcp-agent'))
+  assert.equal(agentTag(tree, 'two-mcp').type, 'button'); assert.equal(agentTag(tree, 'two-mcp').props['data-failed'], true)
+  agentTag(tree, 'two-mcp').props.onClick()
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(requests.at(-1).action, 'mcp-login')
   assert.equal(requests.at(-1).name, 'two-mcp')
   tree = render()
   assert.doesNotMatch(visibleText(tree), /OAuth expired|重试登录/)
-  const cliRow = name => findNode(findNode(authorizationTree(tree), node => node.props?.className === 'kode-mcp-item' && node.props.key === name), node => node.props?.className === 'kode-mcp-status-row')
-  assert.equal(visibleText(cliRow('two-mcp')).replace(/\s+/g, ''), 'Codex已连接')
-  assert.equal(cliRow('second-mcp').props['data-status'], 'connected')
+  for (const name of ['two-mcp', 'second-mcp']) {
+    const tag = agentTag(tree, name)
+    assert.equal(tag.type, 'span'); assert.equal(tag.props['data-status'], 'ok')
+    assert.equal(tag.children[0].type, 'check', 'confirmed authorization shows the sync check')
+    assert.equal(visibleText(tag).replace(/\s+/g, ''), 'Codex：已连接')
+  }
 
   let manualRefresh
   const remote = scope.McpList({
@@ -682,6 +696,97 @@ test('plugin toggles preserve source boundaries and sequence MCP login with retr
   assert.doesNotMatch(visibleText(remote), /重试登录/)
   findNode(remote, node => node.type === 'button' && node.children.includes('刷新状态')).props.onClick()
   assert.equal(manualRefresh[1], 'codex')
+})
+
+test('MCP rows reuse the Agent sync tags and one-click authorization logs in each pending pair once', async () => {
+  const slots = [], requests = []
+  let index = 0, release
+  const codex = { id: 'codex', name: 'Codex', type: 'codex', origin: 'builtin' }, claude = { id: 'claude', name: 'Claude Code', type: 'claude', origin: 'builtin' }
+  const agents = { profiles: [codex, claude], configuredDefaultProfileId: 'codex' }
+  const status = {
+    codex: [
+      { packageKey: 'kit', name: 'docs', status: 'login-required' }, { packageKey: 'kit', name: 'docs', status: 'login-required' },
+      { packageKey: 'kit', name: 'figma', status: 'connected' }, { packageKey: 'kit', name: 'local', status: 'not-required' },
+      { packageKey: 'other', name: 'other-mcp', status: 'login-required' },
+    ],
+    claude: [
+      { packageKey: 'kit', name: 'docs', status: 'login-required' }, { packageKey: 'kit', name: 'figma', status: 'manual' },
+      { packageKey: 'kit', name: 'local', status: 'mystery' },
+    ],
+  }
+  const scope = {
+    directory: () => ({ getSnapshot: () => ({ data: agents }) }), useSyncExternalStore: (_, get) => get(),
+    hubCall: async body => {
+      requests.push({ ...body })
+      if (body.action === 'mcp-status') return { rows: status[body.profileId] }
+      if (body.action === 'mcp-login') {
+        if (body.profileId === 'codex') { await new Promise(resolve => { release = resolve }); throw new Error('浏览器登录被取消') }
+        status.claude = status.claude.map(row => row.name === body.name ? { ...row, status: 'authorized' } : row)
+        return { rows: status.claude }
+      }
+      throw new Error(`Unexpected action: ${body.action}`)
+    },
+    React: { Fragment: 'fragment' }, Button: 'button', Modal: 'modal', Failure: 'failure', SelectField: 'select', ...MCP_ICONS,
+    transport: null, h: (type, props, ...children) => ({ type, props, children }), useEffect() {},
+    useState(initial) { const at = index++; if (slots[at] === undefined) slots[at] = typeof initial === 'function' ? initial() : initial; return [slots[at], value => { slots[at] = typeof value === 'function' ? value(slots[at]) : value }] },
+  }
+  vm.runInNewContext(source.slice(source.indexOf('  const hubTargetNames'), source.indexOf('  function GoalBar')), scope)
+  const render = () => { index = 0; return scope.HubSettings({ host: 'local', sessions: { list: { getSnapshot: () => ({ byId: {} }) } } }) }
+  render()
+  slots[0] = {
+    capabilities: { packageToggle: true },
+    sources: [{ id: 'team', kind: 'git', location: 'https://example.test/team', targets: ['codex', 'claude'], updatedAt: 1, release: 'r1', packages: [
+      { key: 'kit', path: 'kit', name: 'kit', enabled: true, mcp: [{ name: 'docs', type: 'http' }, { name: 'figma', type: 'http' }, { name: 'local', type: 'stdio' }, { name: 'silent', type: 'http' }] },
+      { key: 'other', path: 'other', name: 'other', enabled: true, mcp: [{ name: 'other-mcp', type: 'http' }] },
+    ] }],
+    targets: { codex: '.codex/skills', claude: '.claude/skills' }, profileTargets: { codex: 'codex', claude: 'claude' },
+  }
+  findNode(render(), node => node.props?.className === 'kode-source-summary').props.onClick()
+  // Seed the status the effect would have read for both CLIs.
+  // HubSettings state order: data, error, busy, mcpStatuses, …
+  for (const id of ['codex', 'claude']) slots[3]['team\0' + id] = { rows: status[id] }
+  const list = () => { const tree = render(), preview = findNode(tree, node => node.type === scope.SourcePreview); return expand(findNode(preview.type(preview.props), node => node.type === scope.McpList)) }
+  const tags = (tree, name) => findNode(tree, node => node.props?.className === 'kode-mcp-item' && node.props.key === name).children.flat(Infinity)
+    .flatMap(node => node?.props?.role === 'group' ? node.children : []).filter(Boolean)
+  let tree = list()
+  const byAgent = name => Object.fromEntries(tags(tree, name).map(tag => [tag.children.find(child => typeof child === 'string'), tag]))
+  // Same pill vocabulary as the sync picker; statuses keep distinct semantics.
+  for (const tag of tags(tree, 'docs')) assert.ok(tag.props.className.startsWith('kode-source-target-option'))
+  assert.equal(byAgent('figma').Codex.props['data-status'], 'ok'); assert.equal(byAgent('figma').Codex.children[0].type, 'check'); assert.equal(byAgent('figma').Codex.type, 'span')
+  assert.equal(byAgent('figma')['Claude Code'].props['data-status'], 'manual'); assert.equal(byAgent('figma')['Claude Code'].type, 'span')
+  assert.equal(byAgent('local').Codex.props['data-status'], 'not-required'); assert.match(visibleText(byAgent('local').Codex), /无需授权/)
+  assert.equal(byAgent('local')['Claude Code'].props['data-status'], 'unknown'); assert.match(visibleText(byAgent('local')['Claude Code']), /状态未知/)
+  assert.equal(byAgent('silent').Codex.props['data-status'], 'unreported')
+  // Login-required is a real button with an explicit accessible name, so Tab + Enter/Space starts the CLI login.
+  const docs = byAgent('docs')
+  assert.equal(docs.Codex.type, 'button'); assert.equal(docs.Codex.props.type, 'button'); assert.match(docs.Codex.props['aria-label'], /Codex：docs 需要登录，点击登录/)
+  assert.match(visibleText(findNode(tree, node => node.props?.className === 'kode-mcp-manual')), /Claude Code 配置中完成 figma/)
+  const all = findNode(tree, node => node.props?.className === 'kode-mcp-authorize-all')
+  assert.deepEqual(all.children, ['一键授权 2 项'], 'docs on Codex is listed twice but counts once; other packages are excluded')
+
+  const first = all.props.onClick(), second = findNode(list(), node => node.props?.className === 'kode-mcp-authorize-all')
+  assert.equal(second.props.disabled, true); assert.deepEqual(second.children, ['授权中…'])
+  second.props.onClick()
+  await new Promise(resolve => setImmediate(resolve)); await new Promise(resolve => setImmediate(resolve))
+  // A direct click on the pending pair is ignored rather than starting a second CLI login.
+  docs.Codex.props.onClick()
+  release(); await first; await new Promise(resolve => setImmediate(resolve))
+  const logins = requests.filter(row => row.action === 'mcp-login')
+  assert.deepEqual(logins.map(row => `${row.profileId}:${row.packageKey}:${row.name}`), ['codex:kit:docs', 'claude:kit:docs'], 'deduplicated, scoped to the package, and continues after the Codex failure')
+  assert.deepEqual(requests.filter(row => row.action === 'mcp-status').map(row => row.profileId), ['codex', 'claude'])
+  tree = list()
+  const result = findNode(tree, node => node.props?.className === 'kode-mcp-bulk-result')
+  assert.equal(result.props.role, 'status'); assert.equal(result.props['data-failed'], true)
+  assert.equal(visibleText(result).trim(), '一键授权完成：成功 1 项，失败 1 项（Codex · docs），可单独点击重试。')
+  assert.equal(byAgent('docs')['Claude Code'].props['data-status'], 'ok')
+  assert.equal(byAgent('docs').Codex.props['data-failed'], true); assert.match(visibleText(byAgent('docs').Codex), /重试登录/)
+  assert.match(visibleText(tree), /Codex 登录失败：浏览器登录被取消/)
+  assert.deepEqual(findNode(tree, node => node.props?.className === 'kode-mcp-authorize-all').children, ['一键授权 1 项'])
+  // Remote hosts never auto-login: no bulk action, pending pairs fall back to manual guidance.
+  const remote = expand(scope.McpList({ source: slots[0].sources[0], current: slots[0].sources[0].packages[0], packageKey: 'kit', host: 'ssh', mcpProfiles: [{ profile: codex }], mcpStatuses: { 'team\0codex': { rows: status.codex } }, onRefreshMcp() {}, onRetryMcp: () => assert.fail('remote must not login') }))
+  assert.equal(findNode(remote, node => node.props?.className === 'kode-mcp-authorize-all'), undefined)
+  assert.equal(findNode(remote, node => node.props?.className?.split(' ').includes('kode-mcp-agent') && node.type === 'button'), undefined)
+  assert.match(source, /\.kode-source-target-option:focus-visible\{outline:/)
 })
 
 test('Kode settings use the native settings section and a pinnable sidebar panel', () => {
