@@ -133,7 +133,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   const { useState, useEffect, useMemo, useRef, useCallback, useSyncExternalStore } = React
   const CARD_SECTIONS = 'conversation.session.panel.section'
   const CARD_ENVIRONMENT = 'conversation.session.panel.environment.row'
-  const { Menu, Modal, Button, Toast, Tooltip, MarkdownText, TerminalBlock, FishLogo, StateDot, IconApiOutlineRegular, IconEditOutlineRegular, IconChevronDownOutlineRegular, IconAgentPresetOutlineRegular, MenuItemButton, IconFolderCloseRegular, IconPlusOutlineRegular, IconGlobeOutlineRegular, IconPaperPlaneOutlineRegular, IconMailUnreadOutlineRegular, IconMailReadOutlineRegular, IconPauseOutlineRegular, IconPlayOutlineRegular, IconCloseOutlineRegular, IconGoalOutlineRegular, IconCheckOutlineRegular, IconClockOutlineRegular, IconSearchOutlineRegular, IconLoadingOutlineRegular, IconUsersOutlineRegular, IconWarningOutlineRegular, IconBranchOutlineRegular, IconChevronRightOutlineRegular } = require('@deepseek-ai/dsh-client-ui-primitives')
+  const { Menu, Modal, Button, Toast, Tooltip, MarkdownText, TerminalBlock, FishLogo, BrandWordmark, StateDot, IconApiOutlineRegular, IconEditOutlineRegular, IconChevronDownOutlineRegular, IconAgentPresetOutlineRegular, MenuItemButton, IconFolderCloseRegular, IconPlusOutlineRegular, IconGlobeOutlineRegular, IconPaperPlaneOutlineRegular, IconMailUnreadOutlineRegular, IconMailReadOutlineRegular, IconPauseOutlineRegular, IconPlayOutlineRegular, IconCloseOutlineRegular, IconGoalOutlineRegular, IconCheckOutlineRegular, IconClockOutlineRegular, IconSearchOutlineRegular, IconLoadingOutlineRegular, IconUsersOutlineRegular, IconWarningOutlineRegular, IconBranchOutlineRegular, IconChevronRightOutlineRegular } = require('@deepseek-ai/dsh-client-ui-primitives')
   const markdownLabels = { code: { copyLabel: '复制', copiedLabel: '已复制', toolbarLabels: { codeLabel: '代码', wrapLabel: '自动换行', unwrapLabel: '取消自动换行' } }, footnotes: '脚注' }
   const API = '/api/kode/agents', stores = new Map()
   const startupRetryDelays = [250, 500, 1000, 2000, 4000, 8000]
@@ -1415,8 +1415,31 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   // The sidebar slot offers a 24px seat sized for dsh's own wordmark; Kode's mark and name
   // scale up to fill the row up to the collapse toggle (see .kode-brand-name).
   function SidebarBrandMark() { return h(KodeBrandMark, { height: 26, className: 'kode-sidebar-brand-mark' }) }
+  // dsh draws its inverted Harness badge only inside BrandWordmark. Keep exactly that plate and
+  // its glyphs (with their theme fills), drop the deepseek letters and whale outright, and frame
+  // the viewBox on the plate; the text fallback covers primitives without the badge.
+  const HARNESS_BADGE_HEIGHT = 20
+  function nativeHarnessBadge() {
+    if (typeof BrandWordmark !== 'function') return null
+    try {
+      const svg = BrandWordmark({ includeMark: false })
+      const parts = React.Children.toArray(svg?.props?.children)
+      const plate = parts.find(part => part?.type === 'rect')
+      const glyphs = parts.find(part => part?.type === 'g' && /badge/.test(part.props?.clipPath ?? ''))
+      const defs = parts.find(part => part?.type === 'defs')
+      const [x, y, width, height] = ['x', 'y', 'width', 'height'].map(key => Number(plate?.props?.[key]))
+      if (!glyphs || ![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return null
+      return React.cloneElement(svg, {
+        className: 'kode-harness-badge', viewBox: `${x} ${y} ${width} ${height}`,
+        width: Math.round(HARNESS_BADGE_HEIGHT * width / height * 10) / 10, height: HARNESS_BADGE_HEIGHT,
+      }, plate, glyphs, defs)
+    } catch { return null }
+  }
   function KodeBrandName() {
-    return h('span', { className: 'kode-brand-name' }, 'Harness')
+    const badge = nativeHarnessBadge()
+    return badge
+      ? h('span', { className: 'kode-brand-name kode-brand-name-badge', role: 'img', 'aria-label': 'Harness' }, badge)
+      : h('span', { className: 'kode-brand-name' }, 'Harness')
   }
   // The view is only hidden after leaving, so the panel would still be open on
   // the next entry and send Kode straight back; return to the conversation once
@@ -5569,6 +5592,7 @@ html[data-kode-embed] body{-webkit-user-select:none;user-select:none;cursor:defa
 /* dsh fixes the brand seat at 24px for its own wordmark; Kode's pair grows within the unchanged 60px row. */
 [class*="brandIdentity"]:has(.kode-brand-name),[class*="brandName"]:has(>.kode-brand-name){height:26px}
 [class*="brandIdentity"]:has(.kode-brand-name){gap:5px}
+.kode-brand-name-badge{transform:none;color:var(--dsw-alias-label-primary,#EDEFEB)}.kode-harness-badge{display:block;flex:none;margin-inline:3px;overflow:hidden}
 /* Kode hosts the web layout. Reserve the traffic lights inside the existing chrome. */
 html[data-kode-platform=macos] :has(> [data-shell-overlay]):not([data-sidebar-collapsed]) [data-slot=sidebar] [data-window-drag] {
   box-sizing:border-box;
@@ -5731,17 +5755,17 @@ html[data-kode-embed] .kode-token-notch{display:none}
 .kode-package-toggle{display:flex;align-items:center;gap:8px;flex:none;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
 .kode-package-sync-note{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px 12px;margin-bottom:10px}.kode-package-sync-note>.kode-config-note{flex:1 1 280px;margin:0}
 .kode-mcp-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 8px}.kode-mcp-head>h3{margin:0}
-.kode-mcp-bulk-result{margin:0 0 8px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}.kode-mcp-bulk-result[data-failed=true]{color:var(--dsw-alias-state-warning-primary)}
+.kode-mcp-bulk-result{margin:0 0 8px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}.kode-mcp-bulk-result[data-failed=true]{color:var(--dsw-alias-state-warn-primary,#f59e0b)}
 .kode-mcp-agents{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .kode-source-target-option.kode-mcp-agent{min-height:28px;padding:3px 10px;font-size:12px;line-height:18px;cursor:default}
 .kode-mcp-agent-action{color:var(--dsw-alias-label-secondary)}
 span.kode-mcp-agent:hover{background:transparent}span.kode-mcp-agent:active{transform:none}
 .kode-mcp-agent[data-status=ok]{border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary) 45%,transparent)}.kode-mcp-agent[data-status=ok]>svg{color:var(--dsw-alias-state-success-primary)}
-button.kode-mcp-agent{cursor:pointer}button.kode-mcp-agent[data-status=login]{border-color:color-mix(in srgb,var(--dsw-alias-state-warning-primary) 55%,transparent)}button.kode-mcp-agent[data-status=login]>svg{color:var(--dsw-alias-state-warning-primary)}
-button.kode-mcp-agent[data-status=login] .kode-mcp-agent-action{color:var(--dsw-alias-state-warning-primary);font-weight:500}
-.kode-mcp-agent[data-failed=true],.kode-mcp-agent[data-status=read-failed]{border-color:var(--dsw-alias-state-error-primary)}.kode-mcp-agent[data-failed=true]>svg,.kode-mcp-agent[data-status=read-failed]>svg,.kode-mcp-agent[data-status=read-failed] .kode-mcp-agent-action{color:var(--dsw-alias-state-error-primary)}
+button.kode-mcp-agent{cursor:pointer}button.kode-mcp-agent[data-status=login]{border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#f59e0b) 55%,transparent)}button.kode-mcp-agent[data-status=login]>svg{color:var(--dsw-alias-state-warn-primary,#f59e0b)}
+button.kode-mcp-agent[data-status=login] .kode-mcp-agent-action{color:var(--dsw-alias-state-warn-primary,#f59e0b);font-weight:500}
+button.kode-mcp-agent[data-status=login][data-failed=true],.kode-mcp-agent[data-status=read-failed]{border-color:var(--dsw-alias-state-error-primary)}button.kode-mcp-agent[data-status=login][data-failed=true]>svg,button.kode-mcp-agent[data-status=login][data-failed=true] .kode-mcp-agent-action,.kode-mcp-agent[data-status=read-failed]>svg,.kode-mcp-agent[data-status=read-failed] .kode-mcp-agent-action{color:var(--dsw-alias-state-error-primary)}
 .kode-mcp-agent[data-status=not-required]{color:var(--dsw-alias-label-secondary)}
-.kode-mcp-agent[data-status=manual]>svg,.kode-mcp-agent[data-status=manual] .kode-mcp-agent-action{color:var(--dsw-alias-state-warning-primary)}
+.kode-mcp-agent[data-status=manual]>svg,.kode-mcp-agent[data-status=manual] .kode-mcp-agent-action{color:var(--dsw-alias-state-warn-primary,#f59e0b)}
 .kode-mcp-agent:is([data-status=unknown],[data-status=unreported],[data-status=reading]){border-style:dashed;color:var(--dsw-alias-label-secondary)}
 .kode-mcp-manual-row{display:flex;align-items:center;flex-wrap:wrap;gap:4px 10px}.kode-mcp-manual-row>p{flex:1 1 220px}
 .kode-mcp-status-detail{display:block;margin:6px 0 0}

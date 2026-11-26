@@ -6,6 +6,7 @@ import vm from 'node:vm'
 
 const source = await readFile(new URL('../src/agent-client.js', import.meta.url), 'utf8')
 function client(directoryData = { current: 'local', hosts: [] }, windowProperties = {}, contextProperties = {}, globals = {}, hooks = {}) {
+  const { primitives: primitiveOverrides = {}, ...reactHooks } = hooks
   let plugin
   const registry = [], openedSections = [], requests = [], native = () => null, disposers = []
   const shell = { options: {}, component: native, locale: 'settings', children: { 'settings.section': { kind: 'list', scope: 'root' } }, store: { create: () => ({ actions: { openSection: id => openedSections.push(id) } }) } }
@@ -17,9 +18,9 @@ function client(directoryData = { current: 'local', hosts: [] }, windowPropertie
     createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
     useState: value => { const initial = typeof value === 'function' ? value() : value; return [initial === 'general' && windowProperties.settingsSection ? windowProperties.settingsSection : initial, () => {}] },
     useEffect(fn) { fn() }, useRef: value => ({ current: value }), useMemo: fn => fn(), useCallback: fn => fn, useSyncExternalStore: (subscribe, get) => { subscribe(() => {}); return get() },
-    ...hooks,
+    ...reactHooks,
   }
-  const primitives = new Proxy({}, { get: (_object, key) => key })
+  const primitives = new Proxy({}, { get: (_object, key) => primitiveOverrides[key] ?? key })
   vm.runInNewContext(source, { window: { addEventListener() {}, removeEventListener() {}, ...windowProperties, __ModuleLoader__: { load: definition => { plugin = definition.factory(name => name === 'react' ? react : primitives) } } },
     AbortController, setInterval: () => 0, clearInterval() {}, fetch: async (url, options) => { if (options?.body) requests.push(JSON.parse(options.body)); return { ok: true, json: async () => String(url).includes('/api/kode/agents') && windowProperties.agentDirectory ? windowProperties.agentDirectory : String(url).includes('view=directory') ? directoryData : ({ nodeId: 'local', skills: windowProperties.skillFixtures ?? [], sessions: [{ address: { node_id: 'worker.example', session_id: 'session-same-id' }, title: '架构评审会话' }] }) } }, document: { createElement: () => ({ remove() {} }), head: { append() {} } }, ...globals,
   })
@@ -65,6 +66,35 @@ function visibleText(node) {
 test('Standalone Desktop registers the Kode Harness sidebar wordmark', () => {
   const brand = client().entry('sidebar.brand.name')
   assert.equal(visibleText(brand()).trim(), 'Harness')
+})
+
+test('Sidebar Harness reuses only the native inverted badge from BrandWordmark, enlarged to 20px', () => {
+  const el = (type, props = {}) => ({ type, props })
+  // Mirrors dsh-client-ui-primitives BrandWordmark: deepseek letters, the whale, then the badge plate and glyphs.
+  const plate = el('rect', { x: '129.348', y: '5.5', width: '52', height: '14', rx: '2', fill: 'currentColor' })
+  const glyphs = el('g', { clipPath: 'url(#dsh-wordmark-badge-clip)', children: [el('path', { d: 'M137 9', fill: 'var(--dsw-alias-label-primary-inverted)' })] })
+  const defs = el('defs', { children: [el('clipPath', { id: 'dsh-wordmark-badge-clip' })] })
+  const calls = []
+  const BrandWordmark = props => { calls.push(props); return el('svg', { viewBox: '26 0 156 24', width: 156, height: 24, 'aria-hidden': 'true', children: [el('path', { d: 'deepseek-d', fill: 'currentColor' }), el('g', { clipPath: 'url(#dsh-wordmark-whale-clip)' }), plate, glyphs, defs] }) }
+  const Children = { toArray: children => [children].flat(Infinity).filter(child => child != null && typeof child !== 'boolean') }
+  const cloneElement = (node, props, ...children) => ({ ...node, props: { ...node.props, ...props, children } })
+  const brand = client(undefined, {}, {}, {}, { Children, cloneElement, primitives: { BrandWordmark } }).entry('sidebar.brand.name')
+  const name = brand()
+  assert.deepEqual(calls, [{ includeMark: false }])
+  assert.equal(name.props.className, 'kode-brand-name kode-brand-name-badge')
+  assert.deepEqual([name.props.role, name.props['aria-label']], ['img', 'Harness'])
+  const badge = name.children[0]
+  assert.equal(badge.props.className, 'kode-harness-badge')
+  assert.deepEqual([badge.props.viewBox, badge.props.width, badge.props.height], ['129.348 5.5 52 14', 74.3, 20])
+  assert.deepEqual(badge.props.children, [plate, glyphs, defs])
+  assert.doesNotMatch(JSON.stringify(badge), /deepseek|whale/)
+  assert.match(source, /\.kode-harness-badge\{display:block;flex:none;margin-inline:3px;overflow:hidden\}/)
+  assert.match(source, /\.kode-brand-name-badge\{transform:none;color:var\(--dsw-alias-label-primary,#EDEFEB\)\}/)
+
+  const without = el('svg', { children: [el('path', { d: 'deepseek-d' })] })
+  const fallback = client(undefined, {}, {}, {}, { Children, cloneElement, primitives: { BrandWordmark: () => without } }).entry('sidebar.brand.name')()
+  assert.equal(fallback.props.className, 'kode-brand-name')
+  assert.equal(visibleText(fallback).trim(), 'Harness')
 })
 
 test('Agent selector loads the local directory when its route registers after the page', async () => {
