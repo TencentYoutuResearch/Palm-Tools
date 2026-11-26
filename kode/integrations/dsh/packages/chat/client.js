@@ -6757,7 +6757,36 @@ function UserStyleBubble({ content, loadImage, renderFactorySlot, actions, pendi
 			return fileMediaUrl(base, path);
 		}
 		/** Renders non-blank reasoning blocks as independent disclosures alongside the response. */
-		const AssistantMarkdown = (0, react.memo)(function AssistantMarkdown({ blocks, streaming, interrupted, loadImage, groupPart, useDisclosure, reasoningHidden = false, usePresentation, revealProcess, mentions, renderSlot, useGroupAction, t }) {
+		function renderAssistantMarkdown(text, props, renderSlot) {
+  const markdown = value => (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.MarkdownText, { ...props, text: value });
+  if (props.streaming) return markdown(text);
+  const fence = /^ {0,3}(`{3,}|~{3,})([^\r\n]*)\r?$/gm;
+  const children = [];
+  let open, offset = 0;
+  for (const match of text.matchAll(fence)) {
+    if (!open) {
+      open = match;
+      continue;
+    }
+    if (match[1][0] !== open[1][0] || match[1].length < open[1].length || match[2].trim()) continue;
+    if (open[2].trim() === "kode-bot") {
+      if (open.index > offset) children.push(markdown(text.slice(offset, open.index)));
+      const end = match.index + match[0].length;
+      children.push(renderSlot("conversation.chat.markdown.fence", {
+        code: text.slice(open.index + open[0].length, match.index).trim(),
+        streaming: false
+      }, { entryKey: "kode-bot", fallback: markdown(text.slice(open.index, end)) }));
+      offset = end;
+    }
+    open = undefined;
+  }
+  if (!children.length) return markdown(text);
+  if (offset < text.length) children.push(markdown(text.slice(offset)));
+  return (0, react_jsx_runtime.jsx)(react.Fragment, {
+    children: children.map((child, index) => (0, react_jsx_runtime.jsx)(react.Fragment, { children: child }, index))
+  });
+}
+const AssistantMarkdown = (0, react.memo)(function AssistantMarkdown({ blocks, streaming, interrupted, loadImage, groupPart, useDisclosure, reasoningHidden = false, usePresentation, revealProcess, mentions, renderSlot, useGroupAction, t }) {
 			const labels = (0, react.useMemo)(() => markdownLabels(t), [t]);
 			const pathImages = (0, react.useMemo)(() => {
 				return { resolve: (value) => localPathMediaUrl(document.baseURI, value) };
@@ -6772,12 +6801,8 @@ function UserStyleBubble({ content, loadImage, renderFactorySlot, actions, pendi
 				if (groupPart === "response" && block.kind === "reasoning") continue;
 				switch (block.kind) {
 					case "text":
-						rendered.push((0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.MarkdownText, {
-							text: block.text,
-							streaming,
-							labels,
-							fileMentions: mentions,
-							pathImages
+						rendered.push((0, react_jsx_runtime.jsx)(react.Fragment, {
+							children: renderAssistantMarkdown(block.text, { streaming, labels, fileMentions: mentions, pathImages }, renderSlot)
 						}, i));
 						break;
 					case "reasoning":
@@ -7743,6 +7768,7 @@ if (turn?.status !== "closed") return null;
 						kind: "single",
 						scope: "session"
 					},
+					"conversation.chat.markdown.fence": { kind: "keyed", scope: "session" },
 					"conversation.chat.message.images": {
 						kind: "single",
 						scope: "session"
