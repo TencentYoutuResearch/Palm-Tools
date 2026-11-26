@@ -9,6 +9,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomBytes, randomUUID } from 'node:crypto'
 import net from 'node:net'
+import { buildAgentClient } from './build-agent-client.js'
 
 const plugin = resolve(dirname(fileURLToPath(import.meta.url)), '..'), project = resolve(plugin, '../..')
 const root = await mkdtemp(join(tmpdir(), 'kode-mobile-sync-')), children = []
@@ -78,6 +79,7 @@ try {
   console.log('PASS GUI-first creation, native reply and idempotent submission')
 
   const profile = join(root, 'dsh-home/profiles/web'), modules = join(profile, 'node_modules')
+  await buildAgentClient()
   await mkdir(modules, { recursive: true })
   for (const name of await readdir(join(plugin, 'node_modules'))) {
     if (name === '@kode') { await mkdir(join(modules, name)); for (const child of await readdir(join(plugin, 'node_modules/@kode'))) await symlink(join(plugin, 'node_modules/@kode', child), join(modules, '@kode', child)); await symlink(plugin, join(modules, '@kode/dsh')) }

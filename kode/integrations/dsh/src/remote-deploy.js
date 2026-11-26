@@ -6,6 +6,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
+import { buildAgentClient } from '../scripts/build-agent-client.js'
 
 const pluginRoot = fileURLToPath(new URL('..', import.meta.url))
 export const DEPLOY_STEPS = ['connect', 'package', 'upload', 'runtime', 'dependencies', 'start', 'health', 'pair', 'save']
@@ -126,8 +127,9 @@ export async function deployRemote(host, config, { signal, progress, run = runPr
     const bundle = join(local, 'bundle'); await mkdir(join(bundle, 'bin'), { recursive: true }); await mkdir(join(bundle, 'plugin'))
     for (const name of ['kode-session-server', 'kode-ssh-tunnel']) await copyFile(await binaryFor(platform, arch, name, config), join(bundle, 'bin', name))
     const sourceArchive = join(local, 'plugin.tar.gz')
-    await run('tar', ['-czf', sourceArchive, '--exclude=node_modules', '--exclude=assets/remote', '-C', pluginRoot, 'package.json', 'src', 'assets', 'packages', 'scripts/build-remote.js', 'cordis.patch.yml', 'cordis.remote.patch.yml', 'README.md'], { signal })
+    await run('tar', ['-czf', sourceArchive, '--exclude=node_modules', '--exclude=assets/remote', '-C', pluginRoot, 'package.json', 'src', 'assets', 'packages', 'scripts/build-remote.js', 'scripts/build-agent-client.js', 'cordis.patch.yml', 'cordis.remote.patch.yml', 'README.md'], { signal })
     await run('tar', ['-xzf', sourceArchive, '-C', join(bundle, 'plugin')], { signal })
+    await buildAgentClient(join(bundle, 'plugin/lib'))
     // Published npm bundles embed private UI dependencies. The SSH source tree
     // carries those packages directly, so restore their relocatable file specs.
     const manifestPath = join(bundle, 'plugin/package.json')

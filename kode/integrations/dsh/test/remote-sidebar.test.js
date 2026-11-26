@@ -1,8 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {readFile} from 'node:fs/promises'
 import vm from 'node:vm'
-const source=await readFile(new URL('../src/agent-client.js',import.meta.url),'utf8')
+import { readAgentClientSource } from '../scripts/build-agent-client.js'
+const source=await readAgentClientSource()
 const scope={};vm.runInNewContext(source.slice(0,source.indexOf('var directoryBindingCache')),scope)
 
 test('saved SSH hosts show project histories and explicit pins without importing loose histories into the sidebar',()=>{

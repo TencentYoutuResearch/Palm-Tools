@@ -7,7 +7,7 @@
   "exports": {
     ".": "./src/host.js",
     "./client-api": "./src/backend-client.js",
-    "./client": "./src/agent-client.js",
+    "./client": "./lib/agent-client.js",
     "./native-factory": "./src/native-agent-factory.js",
     "./dsh-conversation": "./src/dsh-conversation.js",
     "./package.json": "./package.json",
@@ -16,8 +16,10 @@
   },
   "files": [
     "src",
+    "lib/agent-client.js",
     "assets",
     "packages",
+    "scripts/build-agent-client.js",
     "scripts/build-remote.js",
     "scripts/build-bundle.js",
     "scripts/prepare-desktop-notifications.sh",
@@ -48,6 +50,8 @@
     }
   },
   "scripts": {
+    "build:client": "node scripts/build-agent-client.js",
+    "prepack": "npm run build:client",
     "build:browser": "node scripts/build-browser.js",
     "build:remote": "node scripts/build-remote.js",
     "build:transport": "node scripts/build-transport.js",

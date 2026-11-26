@@ -2,11 +2,11 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import vm from 'node:vm'
 import { Readable } from 'node:stream'
-import { readFile } from 'node:fs/promises'
 import { registerIntegrationApi } from '../src/integration-api.js'
 import { sessionNamingPolicy } from '../src/session-create.js'
+import { readAgentClientSource } from '../scripts/build-agent-client.js'
 
-const source = await readFile(new URL('../src/agent-client.js', import.meta.url), 'utf8')
+const source = await readAgentClientSource()
 const between = (from, to) => { const start = source.indexOf(from); assert.ok(start >= 0, from); return source.slice(start, source.indexOf(to, start)) }
 const h = (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat() })
 const nodes = tree => { const out = []; const visit = value => { if (!value || typeof value !== 'object') return; out.push(value); for (const child of value.children ?? []) visit(child) }; visit(tree); return out }
@@ -85,6 +85,17 @@ test('the partner sidebar collapses, remembers its state and keeps unseen activi
   assert.deepEqual([stopped, prevented], [4, 4])
   cleanup(); assert.equal(listeners.click, undefined); assert.ok(!classes.has('kode-bots-title'))
 
+  const rail = scope.BotsNavTrailing({ wide: false })
+  assert.equal(rail?.props?.className, 'kode-bot-badge')
+  assert.equal(text(rail), '2')
+  storage.set('kode.dsh.botsCollapsed', '0')
+  vm.runInNewContext('setBotsCollapsed(false)', scope)
+  const railExpandedList = scope.BotsNavTrailing({ wide: false })
+  assert.equal(railExpandedList?.props?.className, 'kode-bot-badge')
+  assert.match(source, /\[data-sidebar-toggle\] \.kode-sidebar-brand-mark\{width:24px!important;height:24px!important;/)
+  assert.match(source, /\[class\*="root"\]\[class\*="collapsed"\]:has\(\[data-sidebar-toggle\]\) \[class\*="panelEntry"\] \[class\*="panelRow"\]\{padding:0\}/)
+  assert.match(source, /\[class\*="root"\]\[class\*="collapsed"\]:has\(\[data-sidebar-toggle\]\) \[class\*="scrollArea"\]\{[^}]*overflow-y:auto/)
+
 })
 
 test('collapsed communication rows name the peer and direction but never the body', () => {
@@ -153,16 +164,13 @@ test('the integrations GET exposes the built-in naming rule for display and edit
   assert.ok(payload.sessionNaming.defaultPrompt.length > 0)
 })
 
-test('the bot settings dialog sizes itself and lays out by its own width, never by the window', () => {
-  const rules = [...source.matchAll(/\.kode-bot-settings\{([^}]*)\}/g)].map(match => match[1])
-  assert.equal(rules.length, 2, 'one base rule and one width rule, no later rule resetting the width')
-  const width = rules.map(rule => /width:([^;]+)/.exec(rule)?.[1]).filter(Boolean)
-  assert.deepEqual(width.at(-1), 'min(1040px,calc(100vw - 32px))')
-  assert.match(rules.join(';'), /container-type:inline-size/, 'the dialog is the query container for its body')
+test('bot settings replace the 伙伴 page instead of opening a narrow dialog', () => {
+  assert.doesNotMatch(source, /h\(Modal, \{ open: true, title: `\$\{bot\.name\} · 伙伴设置`/, 'no Modal: its own width rule caps it at 380px')
+  assert.match(source, /if \(settingsBot\) return h\(BotSettingsPage, \{ key: settingsBot\.id/)
+  assert.match(source, /\.kode-bot-settings\{height:100%;min-height:0;display:flex;flex-direction:column;box-sizing:border-box;container-type:inline-size\}/)
   assert.doesNotMatch(source, /\.kode-bot-settings-body\{[^}]*container-type/, 'a container cannot style itself')
-  assert.doesNotMatch(source, /\.kode-bot-settings\{width:fit-content/, 'no fit-content reset')
   assert.match(source, /\.kode-bot-pane-columns\{display:grid;grid-template-columns:repeat\(auto-fit,minmax\(min\(100%,280px\),1fr\)\)/)
   assert.match(source, /@container \(max-width:820px\)\{[^@]*\.kode-bot-settings-nav\{flex-direction:row/)
   assert.match(source, /@container \(max-width:600px\)\{[^@]*\.kode-bot-pane-columns\{grid-template-columns:minmax\(0,1fr\)/)
-  assert.doesNotMatch(source, /@media \(max-width:860px\)\{[^@]*kode-bot-pane-columns/, 'window width must not decide the dialog layout')
+  assert.doesNotMatch(source, /@media \(max-width:640px\)\{\.kode-bot-settings/, 'window width must not decide the settings layout')
 })

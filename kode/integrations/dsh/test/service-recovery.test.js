@@ -11,8 +11,9 @@ import vm from 'node:vm'
 import { hasActiveSharedSessions, hasPendingSessions, localRecoverySupported, backendArguments, prepareLocalRecovery, processCommand } from '../src/service-recovery.js'
 import { ProjectHosts } from '../src/project-hosts.js'
 import { registerIntegrationApi } from '../src/integration-api.js'
+import { readAgentClientSource } from '../scripts/build-agent-client.js'
 
-const source = await readFile(new URL('../src/agent-client.js', import.meta.url), 'utf8')
+const source = await readAgentClientSource()
 const client = { window: { __ModuleLoader__: { load() {} } }, Date, Error }
 vm.runInNewContext(source, client)
 

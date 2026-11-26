@@ -2,8 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { groupWorktreeProjects, rememberWorktreeProject } from '../src/worktree-projects.js'
 import { hostDirectory } from '../src/workspace-directory.js'
-import { readFile } from 'node:fs/promises'
 import vm from 'node:vm'
+import { readAgentClientSource } from '../scripts/build-agent-client.js'
 
 const projects = [
   { id: 'project', title: 'Project', path: '/srv/project', sessionIds: ['main'] },
@@ -17,7 +17,7 @@ test('project grouping retains worktree sessions across hosts/reloads without ch
   assert.deepEqual(grouped.map(row => row.id), ['project', 'other'])
   assert.deepEqual(grouped[0].sessionIds, ['main', 'work', 'nested-work'])
   assert.equal(grouped[0].path, '/srv/project'); assert.deepEqual(projects, before)
-  const source = await readFile(new URL('../src/agent-client.js', import.meta.url), 'utf8'), scope = {}
+  const source = await readAgentClientSource(), scope = {}
   vm.runInNewContext(source.slice(0, source.indexOf('function resumeCandidates(')), scope)
   const clientRows = projects.map(({ id, ...row }) => ({ workspaceId: id, ...row }))
   const rendered = scope.groupProjectWorkspaces(clientRows, parents)

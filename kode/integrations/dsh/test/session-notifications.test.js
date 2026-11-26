@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events'
 import { Context } from '@deepseek-ai/cordis'
 import { registerSessionNotifications, registerNotificationSettings } from '../src/session-notifications.js'
 import { installSessionNotifications } from '../packages/transport/notifications.js'
+import { readAgentClientSource } from '../scripts/build-agent-client.js'
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 function host() {
   const ctx = new Context(), agents = new Map(), routes = []
@@ -106,8 +107,8 @@ test('visited SSH notification streams remain active after switching Hosts and a
 })
 
 test('notification settings explain denied permission and expose independently named switches', async () => {
-  const { readFile } = await import('node:fs/promises'), vm = await import('node:vm')
-  const source = await readFile(new URL('../src/agent-client.js', import.meta.url), 'utf8')
+  const vm = await import('node:vm')
+  const source = await readAgentClientSource()
   const fragment = source.slice(source.indexOf('  function notificationState('), source.indexOf('  const settingsSections ='))
   const h = (type, props, ...children) => ({ type, props, children: children.flat() })
   const state = { permission: 'denied', completed: true, waiting: false }, service = { subscribe() {}, getSnapshot: () => state }

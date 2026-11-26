@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm, mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { readAgentClientSource } from '../scripts/build-agent-client.js'
 import { deploymentHost, sshArgs, shellQuote, bootstrapScript, runProcess, deployRemote } from '../src/remote-deploy.js'
 import { ProjectHosts } from '../src/project-hosts.js'
 
@@ -68,7 +69,7 @@ test('installed plugin deployment packages published files and pairs the shared 
   await mkdir(artifacts)
   for (const name of ['kode-session-server', 'kode-ssh-tunnel']) await writeFile(join(artifacts, name), 'fixture binary, never executed')
   const packed = [], paired = []
-  let stagedManifest
+  let stagedManifest, stagedClient
   const config = {
     remoteArtifactsDirectory: root,
     backendClient: { async call(path, input) {
@@ -84,7 +85,11 @@ test('installed plugin deployment packages published files and pairs the shared 
       await writeFile(join(plugin, 'packages/private-ui/package.json'), JSON.stringify({ name: '@kode/private-ui', version: '0.1.0' }))
     }
     if (command === 'tar' && args[0] === '-czf') {
-      if (!args.includes('package.json')) stagedManifest = JSON.parse(await readFile(join(args[args.indexOf('-C') + 1], 'plugin/package.json'), 'utf8'))
+      if (!args.includes('package.json')) {
+        const plugin = join(args[args.indexOf('-C') + 1], 'plugin')
+        stagedManifest = JSON.parse(await readFile(join(plugin, 'package.json'), 'utf8'))
+        stagedClient = await readFile(join(plugin, 'lib/agent-client.js'), 'utf8')
+      }
       packed.push(args)
       await writeFile(args[1], 'fixture archive')
     }
@@ -99,7 +104,9 @@ test('installed plugin deployment packages published files and pairs the shared 
     assert.equal(stagedManifest.bundledDependencies, undefined)
     const source = packed.find(args => args.includes('package.json'))
     assert.ok(source)
+    assert.ok(source.includes('scripts/build-agent-client.js'))
     assert.ok(!source.includes('package-lock.json'))
+    assert.equal(stagedClient, await readAgentClientSource())
     assert.equal(paired[0].node_id, 'remote-test')
     assert.equal(paired[0].ssh.remote_port, 47870)
     assert.equal(result.remote_port, 47980)
