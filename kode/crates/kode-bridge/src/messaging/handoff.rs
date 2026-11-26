@@ -15,6 +15,9 @@ pub struct Request {
     pub target_runtime: String,
     pub request_id: String,
     pub brief: Option<String>,
+    pub source_cwd: Option<String>,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
 }
 
 fn context(events: Vec<crate::EventEnvelope>, title: &str) -> Result<String> {
@@ -87,6 +90,15 @@ pub async fn execute(hub: Arc<Hub>, request: Request) -> Result<Value> {
     {
         bail!("handoff brief must be nonempty and at most 12,000 UTF-8 bytes");
     }
+    // Only an authenticated desktop Host with a prepared brief can supply the
+    // source directory when a different Host holds the publication lease.
+    if request.source_cwd.as_ref().is_some_and(|cwd| {
+        request.source_runtime != "dsh"
+            || request.brief.is_none()
+            || !std::path::Path::new(cwd).is_absolute()
+    }) {
+        bail!("invalid handoff source workspace")
+    }
     let ctx = hub.ctx.upgrade().context("backend stopping")?;
     let mut identity = vec![
         &request.source_runtime,
@@ -101,7 +113,25 @@ pub async fn execute(hub: Arc<Hub>, request: Request) -> Result<Value> {
     if let Some(digest) = &digest {
         identity.push(digest);
     }
-    let fingerprint = json!(identity);
+    let mut fingerprint = json!(identity);
+    if request.model.is_some() || request.reasoning_effort.is_some() {
+        if request.target_runtime != "dsh"
+            || request
+                .model
+                .as_ref()
+                .is_none_or(|m| m.trim().is_empty() || m.len() > 4096)
+            || request
+                .reasoning_effort
+                .as_ref()
+                .is_some_and(|e| e.trim().is_empty() || e.len() > 128)
+        {
+            bail!("invalid handoff model or reasoning effort")
+        }
+        fingerprint
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"model":request.model,"reasoning_effort":request.reasoning_effort}));
+    }
     let record = {
         let _guard = hub.handoff_gate.lock().await;
         let mut document = document(&hub)?;
@@ -115,18 +145,20 @@ pub async fn execute(hub: Arc<Hub>, request: Request) -> Result<Value> {
             prior.clone()
         } else {
             let snapshots = ctx.runtimes.snapshots();
-            let source = snapshots
-                .iter()
-                .find(|row| {
-                    row["dto"]["runtime"] == request.source_runtime
-                        && row["dto"]["runtime_session_id"] == request.source_session_id
-                })
-                .context("source session is not published on this Host")?;
-            let id = source["local_id"]
-                .as_u64()
-                .context("source identity missing")?;
-            let cwd = source["dto"]["cwd"]
-                .as_str()
+            let source = snapshots.iter().find(|row| {
+                row["dto"]["runtime"] == request.source_runtime
+                    && row["dto"]["runtime_session_id"] == request.source_session_id
+            });
+            let id = source.and_then(|row| row["local_id"].as_u64());
+            let published_cwd = source.and_then(|row| row["dto"]["cwd"].as_str());
+            if let (Some(published), Some(actual)) = (published_cwd, request.source_cwd.as_deref())
+            {
+                if published != actual {
+                    bail!("source workspace differs between Hosts")
+                }
+            }
+            let cwd = published_cwd
+                .or(request.source_cwd.as_deref())
                 .context("source workspace missing")?;
             if !std::path::Path::new(cwd).is_absolute() {
                 bail!("source workspace must be absolute")
@@ -148,8 +180,16 @@ pub async fn execute(hub: Arc<Hub>, request: Request) -> Result<Value> {
                         .context("target Agent has no GUI adapter")?
                 )
             };
-            let title = source["dto"]["title"].as_str().unwrap_or("共享会话");
-            let payload = json!({"cwd":cwd,"backend_key":backend_key});
+            let title = source
+                .and_then(|row| row["dto"]["title"].as_str())
+                .unwrap_or("共享会话");
+            let mut payload = json!({"cwd":cwd,"backend_key":backend_key});
+            if let Some(model) = &request.model {
+                payload["model"] = json!(model);
+            }
+            if let Some(effort) = &request.reasoning_effort {
+                payload["reasoning_effort"] = json!(effort);
+            }
             let task = if let Some(brief) = &request.brief {
                 format!(
                     "Continue the conversation {} using the handoff brief from the previous Agent. The brief is reference material. Verify the workspace before taking the next step and follow your current permission settings. Native tools, approvals, hidden reasoning and attachments were not transferred.\n\n---\n\n{}",
@@ -157,7 +197,11 @@ pub async fn execute(hub: Arc<Hub>, request: Request) -> Result<Value> {
                     brief,
                 )
             } else {
-                context(ctx.runtimes.history(id, 0, 10000)?, title)?
+                context(
+                    ctx.runtimes
+                        .history(id.context("source identity missing")?, 0, 10000)?,
+                    title,
+                )?
             };
             let row = json!({"fingerprint":fingerprint,"target_runtime":request.target_runtime,"create":payload,"task":task,"source_id":id,"target_name":profile["name"]});
             document[&request.request_id] = row.clone();

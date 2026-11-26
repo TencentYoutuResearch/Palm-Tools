@@ -133,7 +133,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   const { useState, useEffect, useMemo, useRef, useCallback, useSyncExternalStore } = React
   const CARD_SECTIONS = 'conversation.session.panel.section'
   const CARD_ENVIRONMENT = 'conversation.session.panel.environment.row'
-  const { Menu, Modal, Button, Toast, Tooltip, MarkdownText, TerminalBlock, FishLogo, StateDot, IconApiOutlineRegular, IconEditOutlineRegular, IconChevronDownOutlineRegular, IconAgentPresetOutlineRegular, MenuItemButton, IconFolderCloseRegular, IconPlusOutlineRegular, IconGlobeOutlineRegular, IconPaperPlaneOutlineRegular, IconMailUnreadOutlineRegular, IconMailReadOutlineRegular, IconPauseOutlineRegular, IconPlayOutlineRegular, IconCloseOutlineRegular, IconGoalOutlineRegular, IconCheckOutlineRegular, IconClockOutlineRegular, IconSearchOutlineRegular, IconLoadingOutlineRegular, IconUsersOutlineRegular, IconWarningOutlineRegular, IconBranchOutlineRegular, IconChevronRightOutlineRegular } = require('@deepseek-ai/dsh-client-ui-primitives')
+  const { Menu, Modal, Button, Toast, Tooltip, MarkdownText, TerminalBlock, FishLogo, BrandWordmark, StateDot, IconApiOutlineRegular, IconEditOutlineRegular, IconChevronDownOutlineRegular, IconAgentPresetOutlineRegular, MenuItemButton, IconFolderCloseRegular, IconPlusOutlineRegular, IconGlobeOutlineRegular, IconPaperPlaneOutlineRegular, IconMailUnreadOutlineRegular, IconMailReadOutlineRegular, IconPauseOutlineRegular, IconPlayOutlineRegular, IconCloseOutlineRegular, IconGoalOutlineRegular, IconCheckOutlineRegular, IconClockOutlineRegular, IconSearchOutlineRegular, IconLoadingOutlineRegular, IconUsersOutlineRegular, IconWarningOutlineRegular, IconBranchOutlineRegular, IconChevronRightOutlineRegular } = require('@deepseek-ai/dsh-client-ui-primitives')
   const markdownLabels = { code: { copyLabel: '复制', copiedLabel: '已复制', toolbarLabels: { codeLabel: '代码', wrapLabel: '自动换行', unwrapLabel: '取消自动换行' } }, footnotes: '脚注' }
   const API = '/api/kode/agents', stores = new Map()
   const startupRetryDelays = [250, 500, 1000, 2000, 4000, 8000]
@@ -932,7 +932,17 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     'login-required': '需要登录', authorized: '已授权', connected: '已连接',
     'not-required': '无需授权', manual: '需手动配置', unknown: '状态未知',
   }
+  // Guards live outside the component so re-renders and repeated clicks cannot start a second login for the same pair.
+  const mcpLoginsInFlight = new Set(), mcpAuthorizeRuns = new Set(), MCP_STATUS_TIMEOUT = 60000
   const mcpStatusKey = (sourceId, profileId) => `${sourceId}\0${profileId}`
+  // Newer services re-read only the MCP just logged in ({partial:true}); older ones still answer with every row.
+  function mergeMcpLoginRows(rows = [], result) {
+    if (!result?.partial) return result?.rows ?? rows
+    const same = (a, b) => a.packageKey === b.packageKey && a.name === b.name
+    const fresh = result.rows ?? []
+    return [...rows.map(row => fresh.find(item => same(item, row)) ?? row), ...fresh.filter(item => !rows.some(row => same(item, row)))]
+  }
+  const mcpBulkKey = (sourceId, packageKey) => `${sourceId}\0${packageKey ?? ''}`
   const mcpRowKey = (sourceId, profileId, row) => `${sourceId}\0${profileId}\0${row.packageKey}\0${row.name}`
   // Services advertising packageToggle key path-only records by their relative path inside the source.
   const sourcePackageKey = (pkg, packageToggle) => pkg?.key ?? (packageToggle ? pkg?.path : undefined)
@@ -947,7 +957,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   }
   function HubSettings({ host, hosts = [], sessions, slots }) {
     const [data, setData] = useState(null), [error, setError] = useState(''), [busy, setBusy] = useState(false)
-    const [mcpStatuses, setMcpStatuses] = useState({}), [mcpErrors, setMcpErrors] = useState({}), [mcpPending, setMcpPending] = useState({})
+    const [mcpStatuses, setMcpStatuses] = useState({}), [mcpErrors, setMcpErrors] = useState({}), [mcpPending, setMcpPending] = useState({}), [mcpBulk, setMcpBulk] = useState({})
     const [draft, setDraft] = useState(null)
     const [previewId, setPreviewId] = useState(null), [previewPackagePath, setPreviewPackagePath] = useState(null)
     const store = directory(undefined, host, true)
@@ -975,42 +985,79 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     const preferred = [activeId, agents?.configuredDefaultProfileId, agents?.selectedProfileId]
       .map(id => sourceProfileTarget(choices.find(profile => profile.id === id), data)).find(Boolean)
     const sources = data?.sources ?? []
+    // Only the newest read of a source × Agent may publish, and every read settles: an aborted or
+    // superseded request can neither overwrite fresher rows nor leave the tag spinning.
+    const mcpReads = useRef(new Map())
     const readMcpStatus = async (source, profileId, signal) => {
-      const key = mcpStatusKey(source.id, profileId)
+      const key = mcpStatusKey(source.id, profileId), ticket = {}
+      const stop = new AbortController(), abort = () => stop.abort()
+      let timedOut = false
+      signal?.addEventListener('abort', abort, { once: true })
+      const timer = setTimeout(() => { timedOut = true; stop.abort() }, MCP_STATUS_TIMEOUT)
+      mcpReads.current.get(key)?.stop.abort()
+      mcpReads.current.set(key, { ticket, stop })
+      const latest = () => mcpReads.current.get(key)?.ticket === ticket
+      const settle = patch => { if (latest()) setMcpStatuses(current => ({ ...current, [key]: { ...current[key], busy: false, ...patch } })) }
       setMcpStatuses(current => ({ ...current, [key]: { ...current[key], busy: true, error: '' } }))
       try {
-        const result = await hubCall({ action: 'mcp-status', id: source.id, profileId }, host, undefined, signal)
-        if (!signal?.aborted) setMcpStatuses(current => ({ ...current, [key]: { ...current[key], rows: result.rows ?? [], busy: false, error: '' } }))
-        return result
+        // Some transports ignore the signal; the race still settles the tag when the read is abandoned.
+        const abandoned = new Promise((_, reject) => stop.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }))
+        abandoned.catch(() => {})
+        const result = await Promise.race([hubCall({ action: 'mcp-status', id: source.id, profileId }, host, undefined, stop.signal), abandoned])
+        if (stop.signal.aborted) throw new Error('aborted')
+        settle({ rows: result.rows ?? [], error: '' })
+        return latest() ? result : undefined
       } catch (error) {
-        if (!signal?.aborted) setMcpStatuses(current => ({ ...current, [key]: { ...current[key], busy: false, error: error.message } }))
+        settle(timedOut ? { error: `读取超时：CLI 未在 ${MCP_STATUS_TIMEOUT / 1000} 秒内返回 MCP 状态` } : stop.signal.aborted ? {} : { error: error.message })
         return undefined
+      } finally {
+        clearTimeout(timer); signal?.removeEventListener('abort', abort)
+        if (latest()) mcpReads.current.delete(key)
       }
     }
     const loginMcp = async (source, profileId, row) => {
-      const statusKey = mcpStatusKey(source.id, profileId), rowKey = mcpRowKey(source.id, profileId, row)
+      const statusKey = mcpStatusKey(source.id, profileId), rowKey = mcpRowKey(source.id, profileId, row), flight = host + '\0' + rowKey
+      if (mcpLoginsInFlight.has(flight)) return null
+      mcpLoginsInFlight.add(flight)
       setMcpPending(current => ({ ...current, [rowKey]: true }))
       setMcpErrors(current => { const next = { ...current }; delete next[rowKey]; return next })
       try {
-        const result = await hubCall({ action: 'mcp-login', id: source.id, profileId, packageKey: row.packageKey, name: row.name }, host)
-        setMcpStatuses(current => ({ ...current, [statusKey]: { ...current[statusKey], rows: result.rows ?? [], busy: false, error: '' } }))
+        const result = await hubCall({ action: 'mcp-login', id: source.id, profileId, packageKey: row.packageKey, name: row.name, partial: true }, host)
+        setMcpStatuses(current => ({ ...current, [statusKey]: { ...current[statusKey], rows: mergeMcpLoginRows(current[statusKey]?.rows, result), error: '' } }))
         return true
       } catch (error) {
         setMcpErrors(current => ({ ...current, [rowKey]: error.message }))
         return false
       } finally {
+        mcpLoginsInFlight.delete(flight)
         setMcpPending(current => { const next = { ...current }; delete next[rowKey]; return next })
       }
     }
+    // Logs in every MCP × CLI pair that freshly reports login-required, one at a time; a failure never stops the rest.
+    const authorizeMcp = async (source, profiles, packageKey) => {
+      const bulkKey = mcpBulkKey(source.id, packageKey), run = host + '\0' + bulkKey
+      if (host !== 'local' || mcpAuthorizeRuns.has(run)) return undefined
+      mcpAuthorizeRuns.add(run)
+      const report = value => setMcpBulk(current => ({ ...current, [bulkKey]: value }))
+      const seen = new Set(), results = []
+      report({ running: true })
+      try {
+        for (const { profile } of profiles) {
+          const status = await readMcpStatus(source, profile.id)
+          if (!status) { results.push({ profile: profile.name, ok: false, readFailed: true }); continue }
+          for (const row of status.rows ?? []) {
+            const key = mcpRowKey(source.id, profile.id, row)
+            if (row.status !== 'login-required' || (packageKey && row.packageKey !== packageKey) || seen.has(key)) continue
+            seen.add(key); report({ running: true, current: `${profile.name} · ${row.name}` })
+            results.push({ profile: profile.name, name: row.name, ok: await loginMcp(source, profile.id, row) })
+          }
+        }
+      } finally { mcpAuthorizeRuns.delete(run); report({ results }) }
+      return results
+    }
     const completeMcpLogins = async (next, body) => {
-      if (host !== 'local') return
       const source = next.sources?.find(row => row.id === body.id)
-      if (!source) return
-      for (const { profile } of sourceMcpProfiles(source, next, choices)) {
-        const result = await readMcpStatus(source, profile.id)
-        const pending = (result?.rows ?? []).filter(row => row.status === 'login-required' && (!body.packageKey || row.packageKey === body.packageKey))
-        for (const row of pending) await loginMcp(source, profile.id, row)
-      }
+      if (source) await authorizeMcp(source, sourceMcpProfiles(source, next, choices), body.packageKey)
     }
     const operate = async body => {
       setBusy(true); setError('')
@@ -1021,12 +1068,17 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       } catch (error) { setError(error.message); return false }
       finally { setBusy(false) }
     }
+    // The hub list is polled every 5 seconds; re-read MCP status only when what it depends on changes,
+    // so a slow CLI (TClaude starts every server) is not cancelled and restarted on each poll.
+    const mcpPlan = data && agents ? sources.flatMap(source => sourceMcpProfiles(source, data, choices).map(({ profile }) => [source.id, profile.id,
+      source.updatedAt, (source.packages ?? []).map(pkg => [pkg.key ?? pkg.path, pkg.enabled, (pkg.mcp ?? []).map(item => item.name)])])) : null
+    const mcpPlanKey = mcpPlan && JSON.stringify(mcpPlan)
     useEffect(() => {
-      if (!data || !agents) return
+      if (!mcpPlanKey) return
       const stop = new AbortController()
-      for (const source of sources) for (const { profile } of sourceMcpProfiles(source, data, choices)) void readMcpStatus(source, profile.id, stop.signal)
+      for (const [sourceId, profileId] of JSON.parse(mcpPlanKey)) void readMcpStatus({ id: sourceId }, profileId, stop.signal)
       return () => stop.abort()
-    }, [host, data, agents])
+    }, [host, mcpPlanKey])
     const field = (label, key, placeholder) => h('label', { className: `kode-field kode-source-field-${key}` }, label,
       h('input', { required: key !== 'subdir', readOnly: key === 'id' && draft.editing, value: draft[key], placeholder,
         onChange: event => setDraft({ ...draft, [key]: event.target.value }) }))
@@ -1126,7 +1178,8 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
         previewSource && h(SourcePreview, {
           source: previewSource, packagePath: previewPackagePath, onPackageChange: setPreviewPackagePath, host, targetOptions: options,
           busy, packageToggle, onTogglePackage: togglePackage, onUpdateService: updateService,
-          mcpProfiles: previewProfiles, mcpStatuses, mcpErrors, mcpPending,
+          mcpProfiles: previewProfiles, mcpStatuses, mcpErrors, mcpPending, mcpBulk,
+          onAuthorizePackage: (source, packageKey) => authorizeMcp(source, previewProfiles, packageKey),
           mcpHostName: hosts.find(row => row.id === host)?.name ?? host,
           onRefreshMcp: readMcpStatus, onRetryMcp: loginMcp,
         })))
@@ -1156,41 +1209,81 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
         (item.description || item.type) && h('p', null, item.description || item.type))))
         : h('p', { className: 'kode-config-note' }, empty))
   }
-  function McpList({ source, current, packageKey, host, mcpHostName, mcpProfiles = [], mcpStatuses = {}, mcpErrors = {}, mcpPending = {}, onRefreshMcp, onRetryMcp, empty }) {
+  // One status per MCP × CLI pair, shown as the same Agent pill the sync picker uses.
+  function mcpTagState(row, state, host) {
+    if (!row) return state?.busy ? 'reading' : state?.error ? 'read-failed' : 'unreported'
+    if (row.status === 'authorized' || row.status === 'connected') return 'ok'
+    if (row.status === 'login-required') return host === 'local' ? 'login' : 'manual'
+    return row.status === 'not-required' || row.status === 'manual' ? row.status : 'unknown'
+  }
+  const MCP_TAG_ACTIONS = { reading: '读取中…', unreported: '未报告', 'not-required': '无需授权', manual: '需手动配置', unknown: '状态未知' }
+  function McpAgentTag({ source, profile, row, tag, state, failure, pending, host, hostName, onRefreshMcp, onRetryMcp }) {
+    const name = profile.name, base = { className: 'kode-source-target-option kode-mcp-agent', 'data-status': tag }
+    if (tag === 'ok') return h('span', { ...base, title: `${name}：${MCP_STATUS_LABELS[row.status]}` },
+      h(IconCheckOutlineRegular, { size: 14, 'aria-hidden': true }), name, h('span', { className: 'kode-sr-only' }, `：${MCP_STATUS_LABELS[row.status]}`))
+    if (tag === 'login') {
+      const action = pending ? '登录中…' : failure ? '重试登录' : '登录'
+      return h('button', { ...base, type: 'button', 'data-failed': Boolean(failure), disabled: pending, 'aria-busy': pending || undefined,
+        title: `在 ${name} 中登录 ${row.name}`, 'aria-label': `${name}：${row.name} ${pending ? '登录中' : failure ? '登录失败，重试登录' : '需要登录，点击登录'}`,
+        onClick: () => void onRetryMcp(source, profile.id, row) },
+      h(pending ? IconLoadingOutlineRegular : failure ? IconWarningOutlineRegular : IconGlobeOutlineRegular, { size: 14, className: pending ? 'kode-spin' : undefined, 'aria-hidden': true }),
+      name, h('span', { className: 'kode-mcp-agent-action' }, action))
+    }
+    if (tag === 'read-failed') return h('button', { ...base, type: 'button', title: state.error, 'aria-label': `${name}：状态读取失败，重试读取`, onClick: () => void onRefreshMcp(source, profile.id) },
+      h(IconWarningOutlineRegular, { size: 14, 'aria-hidden': true }), name, h('span', { className: 'kode-mcp-agent-action' }, '重试读取'))
+    // Manual and unrecognised states are fixed outside Kode, so the tag itself re-reads the CLI afterwards.
+    if (tag === 'manual' || tag === 'unknown') {
+      const reading = Boolean(state?.busy), where = `${hostName ?? host ?? '本机'} 的 ${name}`
+      const hint = tag === 'manual' ? `请在 ${where} 配置中完成 ${row.name} 授权${host && host !== 'local' ? '（浏览器不会跨主机自动登录）' : ''}，完成后点击刷新状态` : `${where} 报告了未识别的 ${row.name} 状态，点击刷新状态`
+      return h('button', { ...base, type: 'button', disabled: reading, 'aria-busy': reading || undefined, title: hint,
+        'aria-label': `${name}：${row.name} ${MCP_TAG_ACTIONS[tag]}，${reading ? '正在刷新状态' : hint}`, onClick: () => void onRefreshMcp(source, profile.id) },
+      reading ? h(IconLoadingOutlineRegular, { size: 14, className: 'kode-spin', 'aria-hidden': true }) : tag === 'manual' ? h(IconWarningOutlineRegular, { size: 14, 'aria-hidden': true }) : null,
+      name, h('span', { className: 'kode-mcp-agent-action' }, reading ? '刷新中…' : MCP_TAG_ACTIONS[tag]))
+    }
+    const icon = tag === 'reading' ? h(IconLoadingOutlineRegular, { size: 14, className: 'kode-spin', 'aria-hidden': true }) : null
+    return h('span', base, icon, name, h('span', { className: 'kode-mcp-agent-action' }, MCP_TAG_ACTIONS[tag]))
+  }
+  function mcpBulkSummary(results) {
+    if (!results.length) return '当前插件没有需要登录的 MCP。'
+    const label = row => row.readFailed ? `${row.profile} 状态读取` : `${row.profile} · ${row.name}`
+    const ok = results.filter(row => row.ok), failed = results.filter(row => row.ok === false), skipped = results.filter(row => row.ok === null)
+    return [`一键授权完成：成功 ${ok.length} 项`, failed.length && `失败 ${failed.length} 项（${failed.map(label).join('、')}），可单独点击重试`,
+      skipped.length && `跳过 ${skipped.length} 项（正在登录）`].filter(Boolean).join('，') + '。'
+  }
+  function McpList({ source, current, packageKey, host, mcpHostName, mcpProfiles = [], mcpStatuses = {}, mcpErrors = {}, mcpPending = {}, mcpBulk = {}, onRefreshMcp, onRetryMcp, onAuthorizePackage, empty }) {
     const declared = current.mcp ?? []
     const rowsFor = profile => packageKey ? (mcpStatuses[mcpStatusKey(source.id, profile.id)]?.rows ?? []).filter(row => row.packageKey === packageKey) : []
     const names = [...new Set([...declared.map(item => item.name), ...mcpProfiles.flatMap(({ profile }) => rowsFor(profile).map(row => row.name))])]
     const note = !names.length ? empty
       : !packageKey ? '更新 Kode 服务后可读取各 CLI 的实际授权状态。'
         : !mcpProfiles.length ? '将来源同步到可用 Agent 后读取各 CLI 的实际授权状态。' : null
+    const pairs = packageKey ? names.flatMap(name => mcpProfiles.map(({ profile }) => {
+      const state = mcpStatuses[mcpStatusKey(source.id, profile.id)], row = rowsFor(profile).find(item => item.name === name)
+      const rowKey = row && mcpRowKey(source.id, profile.id, row)
+      return { name, profile, row, state, tag: mcpTagState(row, state, host), failure: rowKey && mcpErrors[rowKey], pending: Boolean(rowKey && mcpPending[rowKey]) }
+    })) : []
+    const loginable = pairs.filter(pair => pair.tag === 'login' && !pair.pending)
+    const bulk = mcpBulk[mcpBulkKey(source.id, packageKey)]
+    const tagProps = { source, host, hostName: mcpHostName, onRefreshMcp, onRetryMcp }
     return h('section', { className: 'kode-source-preview-section kode-mcp-authorization' },
-      h('h3', null, 'MCP', h('span', null, names.length)),
+      h('div', { className: 'kode-mcp-head' },
+        h('h3', null, 'MCP', h('span', null, names.length)),
+        host === 'local' && (loginable.length > 0 || bulk?.running) && h(Button, { size: 'sm', variant: 'outline', className: 'kode-mcp-authorize-all',
+          disabled: Boolean(bulk?.running), 'aria-busy': bulk?.running || undefined, onClick: () => void onAuthorizePackage(source, packageKey) },
+        bulk?.running ? '授权中…' : `一键授权 ${loginable.length} 项`)),
       note && h('p', { className: 'kode-config-note' }, note),
+      bulk && h('p', { className: 'kode-mcp-bulk-result', role: 'status', 'data-failed': Boolean(bulk.results?.some(row => row.ok === false)) },
+        bulk.running ? `正在登录 ${bulk.current ?? '…'}` : mcpBulkSummary(bulk.results ?? [])),
       names.length > 0 && h('ul', { className: 'kode-source-preview-list kode-mcp-list' }, ...names.map(name => {
-        const spec = declared.find(item => item.name === name)
+        const spec = declared.find(item => item.name === name), own = pairs.filter(pair => pair.name === name)
+        const failures = own.filter(pair => pair.tag === 'login' && pair.failure)
+        const readErrors = own.filter(pair => pair.tag === 'read-failed')
         return h('li', { key: name, className: 'kode-mcp-item' },
           h('div', { className: 'kode-mcp-item-head' }, h('strong', null, name), (spec?.description || spec?.type) && h('span', null, spec.description || spec.type)),
-          packageKey && mcpProfiles.length > 0 && h('ul', { className: 'kode-mcp-cli-list' }, ...mcpProfiles.map(({ profile }) => {
-            const statusKey = mcpStatusKey(source.id, profile.id), state = mcpStatuses[statusKey]
-            const row = rowsFor(profile).find(item => item.name === name)
-            if (!row) return h('li', { key: profile.id, className: 'kode-mcp-status-row', 'data-status': state?.error ? 'error' : 'unknown' },
-              h('span', { className: 'kode-mcp-cli-name' }, profile.name),
-              h('span', { className: 'kode-mcp-status-label', 'data-status': state?.error ? 'error' : 'unknown' }, state?.busy ? '读取中…' : state?.error ? '读取失败' : '未报告'),
-              state?.error && h('span', { className: 'kode-mcp-status-detail' }, h(Failure, { text: state.error })),
-              state?.error && h(Button, { size: 'sm', variant: 'outline', onClick: () => void onRefreshMcp(source, profile.id) }, '重试读取'))
-            const rowKey = mcpRowKey(source.id, profile.id, row), failure = mcpErrors[rowKey], pending = mcpPending[rowKey]
-            const manual = row.status === 'manual' || (host !== 'local' && row.status === 'login-required')
-            const detail = failure || (row.status === 'login-required' && host === 'local' ? '下次同步或开启此插件时发起登录' : '')
-            return h('li', { key: profile.id, className: 'kode-mcp-status-row', 'data-status': row.status ?? 'unknown' },
-              h('span', { className: 'kode-mcp-cli-name' }, profile.name),
-              h('span', { className: 'kode-mcp-status-label', 'data-status': row.status ?? 'unknown' }, MCP_STATUS_LABELS[row.status] ?? row.status ?? MCP_STATUS_LABELS.unknown),
-              detail && h('span', { className: 'kode-mcp-status-detail', 'data-failed': Boolean(failure) }, detail),
-              failure && host === 'local' && h(Button, { size: 'sm', variant: 'outline', disabled: pending, onClick: () => void onRetryMcp(source, profile.id, row) }, pending ? '登录中…' : '重试登录'),
-              manual && h('details', { className: 'kode-mcp-manual' },
-                h('summary', null, '手动配置'),
-                h('p', null, `请在 ${mcpHostName ?? host} 的 ${profile.name} 配置中完成 ${row.name} 授权。${host !== 'local' ? '浏览器不会跨主机自动登录。' : ''}`),
-                h(Button, { size: 'sm', variant: 'outline', onClick: () => void onRefreshMcp(source, profile.id) }, '刷新状态')))
-          })))
+          own.length > 0 && h('div', { className: 'kode-mcp-agents', role: 'group', 'aria-label': `${name} 在各 Agent 的授权状态` },
+            ...own.map(pair => h(McpAgentTag, { key: pair.profile.id, ...tagProps, ...pair }))),
+          ...failures.map(pair => h('p', { key: 'login-' + pair.profile.id, className: 'kode-mcp-status-detail', 'data-failed': true }, `${pair.profile.name} 登录失败：${pair.failure}`)),
+          ...readErrors.map(pair => h('p', { key: 'read-' + pair.profile.id, className: 'kode-mcp-status-detail', 'data-failed': true }, `${pair.profile.name} 状态读取失败：${pair.state.error}`)))
       })))
   }
   function SourcePreview({ source, packagePath, onPackageChange, host, targetOptions, busy = false, packageToggle = false, onTogglePackage = () => {}, onUpdateService = () => {}, ...mcp }) {
@@ -1233,7 +1326,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
               h('strong', null, name),
               (pkg.description || pkg.path) && h('span', null, pkg.description || pkg.path)),
             h('label', { className: 'kode-package-toggle' },
-              h('span', null, key ? (enabled ? '已启用' : '已停用') : '需更新服务'),
+              !key && h('span', null, '需更新服务'),
               h('input', { type: 'checkbox', role: 'switch', checked: enabled, disabled: busy || !key,
                 'aria-label': `${enabled ? '停用' : '启用'} ${name}`, title: key ? undefined : '更新此主机的 Kode 服务后可启停',
                 onChange: event => onTogglePackage(source, pkg, event.target.checked) })))
@@ -1355,8 +1448,31 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   // The sidebar slot offers a 24px seat sized for dsh's own wordmark; Kode's mark and name
   // scale up to fill the row up to the collapse toggle (see .kode-brand-name).
   function SidebarBrandMark() { return h(KodeBrandMark, { height: 26, className: 'kode-sidebar-brand-mark' }) }
+  // dsh draws its inverted Harness badge only inside BrandWordmark. Keep exactly that plate and
+  // its glyphs (with their theme fills), drop the deepseek letters and whale outright, and frame
+  // the viewBox on the plate; the text fallback covers primitives without the badge.
+  const HARNESS_BADGE_HEIGHT = 20
+  function nativeHarnessBadge() {
+    if (typeof BrandWordmark !== 'function') return null
+    try {
+      const svg = BrandWordmark({ includeMark: false })
+      const parts = React.Children.toArray(svg?.props?.children)
+      const plate = parts.find(part => part?.type === 'rect')
+      const glyphs = parts.find(part => part?.type === 'g' && /badge/.test(part.props?.clipPath ?? ''))
+      const defs = parts.find(part => part?.type === 'defs')
+      const [x, y, width, height] = ['x', 'y', 'width', 'height'].map(key => Number(plate?.props?.[key]))
+      if (!glyphs || ![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return null
+      return React.cloneElement(svg, {
+        className: 'kode-harness-badge', viewBox: `${x} ${y} ${width} ${height}`,
+        width: Math.round(HARNESS_BADGE_HEIGHT * width / height * 10) / 10, height: HARNESS_BADGE_HEIGHT,
+      }, plate, glyphs, defs)
+    } catch { return null }
+  }
   function KodeBrandName() {
-    return h('span', { className: 'kode-brand-name' }, 'Harness')
+    const badge = nativeHarnessBadge()
+    return badge
+      ? h('span', { className: 'kode-brand-name kode-brand-name-badge', role: 'img', 'aria-label': 'Harness' }, badge)
+      : h('span', { className: 'kode-brand-name' }, 'Harness')
   }
   // The view is only hidden after leaving, so the panel would still be open on
   // the next entry and send Kode straight back; return to the conversation once
@@ -2913,27 +3029,69 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     }, [])
     return request && h(HandoffDialog, { key: `${request.host}:${request.sessionId}`, ...request, sessions, close: () => setRequest(null) })
   }
+  // The target Agent's own configuration store lists the models it publishes and its default selection.
+  // Model and effort start from that default; a choice survives only while the target still offers it.
+  function handoffModelChoice(data, picked = {}) {
+    const models = data?.models ?? [], fallback = data?.defaultModelSelection
+    const model = models.find(row => row.id === picked.model) ?? models.find(row => row.id === fallback?.model) ?? models[0]
+    const efforts = model?.reasoningEfforts ?? []
+    const effortIds = efforts.map(row => row.id)
+    const inherited = model?.id === fallback?.model ? fallback?.reasoningEffort : undefined
+    const effort = [picked.model === model?.id ? picked.reasoningEffort : undefined, inherited, model?.defaultReasoningEffort].find(id => id && effortIds.includes(id))
+    return { models, model, efforts, effort }
+  }
   function HandoffDialog({ sessionId, sessions, host, close }) {
     const { data, error: directoryError } = useDirectory(sessionId, sessions, host)
-    const [target, setTarget] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState('')
+    const [target, setTarget] = useState(''), [picked, setPicked] = useState({}), [busy, setBusy] = useState(false), [error, setError] = useState('')
     const requestId = useRef(null)
     const current = data?.currentProfile?.id ?? data?.selectedProfileId
     const profiles = (data?.profiles ?? []).filter(profile => profile.id !== current && data?.supportedTypes?.includes(profile.type))
+    const store = target ? directory(undefined, host, true, target) : null
+    const empty = React.useMemo(() => ({ data: undefined, busy: false, error: '' }), [])
+    const subscribe = React.useCallback(fn => store?.subscribe(fn) ?? (() => {}), [store])
+    const targetState = useSyncExternalStore(subscribe, () => store?.getSnapshot() ?? empty)
+    useEffect(() => { if (store) void store.load() }, [store])
+    // The store is keyed by profile, but a fast switch can still render the previous target for a frame.
+    const targetData = targetState.data && (targetState.data.selectedProfileId ?? target) === target ? targetState.data : undefined
+    const { models, model, efforts, effort } = handoffModelChoice(targetData, picked)
+    const loadingModels = Boolean(target && !targetData && !targetState.error)
+    const choose = patch => { setPicked(previous => ({ ...previous, ...patch })); requestId.current = null }
+    const submit = async () => {
+      setBusy(true); setError('')
+      const onScreen = transport?.current ?? 'local'
+      try {
+        requestId.current ??= crypto.randomUUID()
+        const result = await hubCall({ action: 'handoff-skill', sessionId, profileId: target, requestId: requestId.current,
+          ...(model ? { model: model.id } : {}), ...(model && effort ? { reasoningEffort: effort } : {}) }, host)
+        // If the person moved to another host while the handoff ran, leave them there.
+        if ((transport?.current ?? 'local') !== onScreen) throw new Error('交接已完成，请切回原主机查看目标会话。')
+        // Otherwise open the target on the host that ran the handoff through the transport's cold-session
+        // navigation chain, which reconnects when needed and admits sessions the local catalog has not seen.
+        showShared(null)
+        if (transport) await switchHost(host, { sessionId: result.sessionId })
+        else { await sessions.refresh(); await avatarContext.get('uiWorkspace').openSession(result.sessionId) }
+        close()
+      } catch (error) { setError(error.message) } finally { setBusy(false) }
+    }
     return h(Modal, { open: true, title: '用其他 Agent 继续', className: 'kode-handoff-dialog', closeLabel: '关闭', onClose: () => { if (!busy) close() },
         description: '当前 Agent 会用交接技能整理目标、进度和待办，目标 Agent 将在同一工作区根据交接稿继续。',
-        footer: h(React.Fragment, null, h(Button, { variant: 'outline', disabled: busy, onClick: close }, '取消'), h(Button, { disabled: busy || !target, variant: 'primary', onClick: async () => {
-          setBusy(true); setError('')
-          try {
-            requestId.current ??= crypto.randomUUID()
-            const result = await hubCall({ action: 'handoff-skill', sessionId, profileId: target, requestId: requestId.current }, host)
-            if ((transport?.current ?? 'local') !== host) throw new Error('交接已完成，请切回原主机查看目标会话。')
-            await sessions.refresh(); showShared(null); await avatarContext.get('uiWorkspace').openSession(result.sessionId); close()
-          } catch (error) { setError(error.message) } finally { setBusy(false) }
-        } }, busy ? h(React.Fragment, null, h(StateDot, { state: 'ongoing', size: 16, className: 'kode-status-dot' }), '正在交接…') : '开始交接')) },
+        footer: h(React.Fragment, null, h(Button, { variant: 'outline', disabled: busy, onClick: close }, '取消'),
+          h(Button, { disabled: busy || !target || loadingModels, variant: 'primary', onClick: () => void submit() },
+            busy ? h(React.Fragment, null, h(StateDot, { state: 'ongoing', size: 16, className: 'kode-status-dot' }), '正在交接…') : '开始交接')) },
         h('div', { className: 'kode-handoff-body', 'aria-busy': busy },
-          h(SelectField, { label: '目标 Agent', value: target, disabled: busy || !profiles.length, options: [{ value: '', label: profiles.length ? '选择 Agent' : data ? '暂无可交接的 Agent' : '正在读取 Agent…' }, ...profiles.map(profile => ({ value: profile.id, label: profile.name }))], onChange: value => { setTarget(value); requestId.current = null } }),
-          h(Failure, { text: error || directoryError })))
+          h(SelectField, { label: '目标 Agent', value: target, disabled: busy || !profiles.length, options: [{ value: '', label: profiles.length ? '选择 Agent' : data ? '暂无可交接的 Agent' : '正在读取 Agent…' }, ...profiles.map(profile => ({ value: profile.id, label: profile.name }))],
+            onChange: value => { if (value === target) return; setTarget(value); setPicked({}); requestId.current = null } }),
+          target && (loadingModels
+            ? h('p', { className: 'kode-config-note', role: 'status' }, '正在读取此 Agent 的模型…')
+            : models.length > 0 && h('div', { className: 'kode-handoff-model' },
+              h(SelectField, { label: '模型', value: model?.id ?? '', disabled: busy, options: models.map(row => ({ value: row.id, label: (row.name ?? row.id) + (row.id === targetData?.defaultModelSelection?.model ? '（默认）' : '') })),
+                onChange: id => choose({ model: id, reasoningEffort: undefined }) }),
+              efforts.length > 0 && h(SelectField, { label: '推理强度', value: effort ?? '', disabled: busy || efforts.length < 2, options: efforts.map(row => ({ value: row.id, label: row.name ?? row.id })),
+                onChange: id => choose({ model: model.id, reasoningEffort: id }) }))),
+          target && !loadingModels && !models.length && !targetState.error && h('p', { className: 'kode-config-note' }, '此 Agent 未公布可选模型，将使用它的默认模型。'),
+          h(Failure, { text: error || directoryError || (target && (targetState.error || targetData?.modelError)) })))
   }
+
 
   function InterfaceSettingsBody() {
     const service = avatarContext?.get('kodeInterface')
@@ -5509,6 +5667,7 @@ html[data-kode-embed] body{-webkit-user-select:none;user-select:none;cursor:defa
 /* dsh fixes the brand seat at 24px for its own wordmark; Kode's pair grows within the unchanged 60px row. */
 [class*="brandIdentity"]:has(.kode-brand-name),[class*="brandName"]:has(>.kode-brand-name){height:26px}
 [class*="brandIdentity"]:has(.kode-brand-name){gap:5px}
+.kode-brand-name-badge{transform:none;color:var(--dsw-alias-label-primary,#EDEFEB)}.kode-harness-badge{display:block;flex:none;margin-inline:3px;overflow:hidden}
 /* Kode hosts the web layout. Reserve the traffic lights inside the existing chrome. */
 html[data-kode-platform=macos] :has(> [data-shell-overlay]):not([data-sidebar-collapsed]) [data-slot=sidebar] [data-window-drag] {
   box-sizing:border-box;
@@ -5650,8 +5809,8 @@ html[data-kode-embed] .kode-token-notch{display:none}
 .kode-source-preview-header>div{min-width:0}
 .kode-source-preview-header strong{font-size:15px;font-weight:600}
 .kode-source-preview-header p{margin:4px 0 0;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;white-space:pre-wrap;overflow-wrap:anywhere}
-.kode-source-preview-section>h3{display:flex;align-items:center;gap:8px;margin:0 0 8px;font-size:14px;font-weight:600;line-height:20px}
-.kode-source-preview-section>h3>span{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 6px;border-radius:10px;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);font-size:11px;font-weight:500}
+.kode-source-preview-section>h3,.kode-mcp-head>h3{display:flex;align-items:center;gap:8px;margin:0 0 8px;font-size:14px;font-weight:600;line-height:20px}
+.kode-source-preview-section>h3>span,.kode-mcp-head>h3>span{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 6px;border-radius:10px;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);font-size:11px;font-weight:500}
 .kode-source-preview-list{margin:0;padding:0 12px;list-style:none;border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-settings-card-fill)}
 .kode-source-preview-list>li{padding:12px 0;border-bottom:.5px solid var(--dsw-alias-border-l2)}
 .kode-source-preview-list>li:last-child{border-bottom:0}
@@ -5667,32 +5826,36 @@ html[data-kode-embed] .kode-token-notch{display:none}
 .kode-package-select{display:flex;flex:1;flex-direction:column;gap:3px;min-width:0;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
 .kode-package-select>strong{font-size:13px;font-weight:600;line-height:20px;overflow-wrap:anywhere}
 .kode-package-select>span{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;overflow-wrap:anywhere}
-.kode-package-select:focus-visible,.kode-mcp-manual summary:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:3px}
+.kode-package-select:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:3px}
 .kode-package-toggle{display:flex;align-items:center;gap:8px;flex:none;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
 .kode-package-sync-note{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px 12px;margin-bottom:10px}.kode-package-sync-note>.kode-config-note{flex:1 1 280px;margin:0}
+.kode-mcp-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 8px}.kode-mcp-head>h3{margin:0}
+.kode-mcp-bulk-result{margin:0 0 8px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}.kode-mcp-bulk-result[data-failed=true]{color:var(--dsw-alias-state-warn-primary,#f59e0b)}
+.kode-mcp-agents{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.kode-source-target-option.kode-mcp-agent{min-height:28px;padding:3px 10px;font-size:12px;line-height:18px;cursor:default}
+.kode-mcp-agent-action{color:var(--dsw-alias-label-secondary)}
+span.kode-mcp-agent:hover{background:transparent}span.kode-mcp-agent:active{transform:none}
+.kode-mcp-agent[data-status=ok]{border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary) 45%,transparent)}.kode-mcp-agent[data-status=ok]>svg{color:var(--dsw-alias-state-success-primary)}
+button.kode-mcp-agent{cursor:pointer}button.kode-mcp-agent[data-status=login]{border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#f59e0b) 55%,transparent)}button.kode-mcp-agent[data-status=login]>svg{color:var(--dsw-alias-state-warn-primary,#f59e0b)}
+button.kode-mcp-agent[data-status=login] .kode-mcp-agent-action{color:var(--dsw-alias-state-warn-primary,#f59e0b);font-weight:500}
+button.kode-mcp-agent[data-status=login][data-failed=true],.kode-mcp-agent[data-status=read-failed]{border-color:var(--dsw-alias-state-error-primary)}button.kode-mcp-agent[data-status=login][data-failed=true]>svg,button.kode-mcp-agent[data-status=login][data-failed=true] .kode-mcp-agent-action,.kode-mcp-agent[data-status=read-failed]>svg,.kode-mcp-agent[data-status=read-failed] .kode-mcp-agent-action{color:var(--dsw-alias-state-error-primary)}
+.kode-mcp-agent[data-status=not-required]{color:var(--dsw-alias-label-secondary)}
+.kode-mcp-agent[data-status=manual]>svg,.kode-mcp-agent[data-status=manual] .kode-mcp-agent-action{color:var(--dsw-alias-state-warn-primary,#f59e0b)}
+.kode-mcp-agent:is([data-status=unknown],[data-status=unreported],[data-status=reading]){border-style:dashed;color:var(--dsw-alias-label-secondary)}
+.kode-mcp-status-detail{display:block;margin:6px 0 0}
 .kode-mcp-item-head{display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 10px;min-width:0}
 .kode-mcp-item-head>span{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}
-.kode-mcp-cli-list{display:flex;flex-direction:column;gap:6px;margin:8px 0 0;padding:0;list-style:none}
-.kode-mcp-status-row{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;min-height:28px}
-.kode-mcp-cli-name{flex:0 1 160px;min-width:0;font-size:12px;line-height:18px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .kode-mcp-status-detail{flex:1 1 160px;min-width:0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
 .kode-mcp-status-detail[data-failed=true]{color:var(--dsw-alias-state-error-primary)}
-.kode-mcp-status-row>button{margin-inline-start:auto}
-.kode-mcp-status-label{flex:none;padding:2px 7px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px}
-.kode-mcp-status-label[data-status=authorized],.kode-mcp-status-label[data-status=connected]{color:var(--dsw-alias-state-success-primary)}
-.kode-mcp-status-label[data-status=login-required],.kode-mcp-status-label[data-status=manual]{color:var(--dsw-alias-state-warning-primary)}
-.kode-mcp-status-label[data-status=error]{color:var(--dsw-alias-state-error-primary)}
-.kode-mcp-manual{flex:1 1 100%;padding-top:4px}
-.kode-mcp-manual>summary{width:fit-content;color:var(--dsw-alias-label-primary);font-size:12px;cursor:pointer}
-.kode-mcp-manual>p{margin:8px 0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}
 .kode-source-about dl{margin:0}
 .kode-source-about dl>div{display:grid;grid-template-columns:110px minmax(0,1fr);gap:12px;padding:9px 0;border-bottom:.5px solid var(--dsw-alias-border-l2)}
 .kode-source-about dl>div:last-child{border-bottom:0}
 .kode-source-about dt{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}
 .kode-source-about dd{margin:0;font-size:13px;line-height:20px;white-space:pre-wrap;overflow-wrap:anywhere}
 .kode-source-actions>button{width:auto;min-width:0}
-.kode-source-remove{color:var(--dsw-alias-state-error-primary)}
-.kode-source-remove:hover:not(:disabled),.kode-delete:hover:not(:disabled){background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 10%,transparent)}
+/* Same tokens as dsh's plugin manager uninstall button (outline + .danger): red label, red outline, red-tinted hover. */
+.kode-source-remove{color:var(--dsw-alias-state-error-primary);--dsh-button-outline-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 30%,transparent);--dsw-alias-interactive-bg-hover:color-mix(in srgb,var(--dsw-alias-state-error-primary) 8%,transparent)}
+.kode-delete:hover:not(:disabled){background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 10%,transparent)}
 .kode-avatar-editor{display:flex;flex-direction:column;gap:12px;padding:8px 0}
 .kode-avatar-content{display:flex;flex-direction:column;gap:12px}
 .kode-avatar-content>*{flex-shrink:0}
@@ -5780,6 +5943,8 @@ html[data-kode-embed] .kode-token-notch{display:none}
 .kode-settings-card:is(.kode-agent-list-card,.kode-hub-sources-card,.kode-ssh-hosts-card)>.kode-agent-rows>.kode-agent-row+.kode-agent-row{border-top:.5px solid var(--dsw-alias-border-l2)}
 .kode-settings-card>.kode-personalization{height:auto;overflow:visible}
 .kode-handoff-body .kode-field{margin-bottom:12px}
+.kode-handoff-model{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0 12px}.kode-handoff-model>.kode-field:only-child{grid-column:1/-1}
+@media(max-width:480px){.kode-handoff-model{grid-template-columns:minmax(0,1fr)}}
 .kode-handoff-body>.kode-config-note{margin:0}
 .kode-settings-main{height:100%;min-height:0;overflow:auto;box-sizing:border-box;padding:24px clamp(16px,4vw,48px) 32px;width:100%;min-width:0}
 .kode-settings-page .kode-settings-section .kode-agent-settings{width:100%;max-width:none;min-width:0;box-sizing:border-box}

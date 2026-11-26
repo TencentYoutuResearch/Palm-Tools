@@ -42,6 +42,7 @@ test('publications retain provenance for backend filtering and exclude hidden re
 })
 test('HTTP adapter authenticates owners and delegates shared operations to the backend after publishing history', async t => {
   const calls = [], events = [{ type: 'plugin:kode/goal-state', data: { goal: { objective: 'durable', status: 'paused' } } }]
+  let publishConflict = false
   let handler, resumed = 0, closed = 0, published = false; const controlled = []
   const backend = { call: async (path, input) => { calls.push({ path, input }); if (path.includes('/workbench/handoff')) { assert.equal(published, true); return { sessionId: 'target' } } return { sources: [], keepAwake: false, power: { active: false } } }, asset: async path => { calls.push({ path }); return { contentType: 'image/png', body: Buffer.from([0x89, 0x50, 0x4e, 0x47]) } } }
   const hub = new ExtensionHub(backend)
@@ -67,9 +68,9 @@ test('HTTP adapter authenticates owners and delegates shared operations to the b
     webServer: { register: route => { handler = route.handler; return () => {} } },
     connection: { admit: req => req.headers['x-role'] === 'owner' ? { peer: { principal: { kind: 'owner' } } } : { rejection: 401 } },
     agents: { get: () => null }, get: name => ({
-      sessionController: { list: async () => ({ items: [{ sessionId: 'source' }] }), resolveAgent: async () => { resumed++; return { agent } } },
+      sessionController: { list: async () => ({ items: [{ sessionId: 'source', cwd: tmpdir() }] }), resolveAgent: async () => { resumed++; return { agent } } },
       sessionPersistence: { open: async () => ({ read: async () => ({ events }), close: async () => { closed++ } }) },
-      kodeRuntimeBridge: { publish: async () => { published = true } },
+      kodeRuntimeBridge: { publish: async () => { if (publishConflict) throw new Error("Another Host already owns this runtime; stop it before reconnecting"); published = true } },
     })[name],
   }
   const service = { hasRuntime: () => true, profiles: { binding: () => ({ profile: { type: 'codex' } }), list: () => [{ id: 'target-agent', type: 'claude' }] }, adapter: { catalogs: new Map(), live: new Map([['source', { goal() {} }]]), controlGoal: async (_agent, input) => { controlled.push(input) } } }
@@ -120,9 +121,14 @@ test('HTTP adapter authenticates owners and delegates shared operations to the b
   const last = calls.at(-1)
   assert.equal(last.path, '/api/v1/messaging/workbench/handoff/skill')
   assert.equal(last.input.brief, brief)
+  publishConflict = true
+  assert.equal((await request({ ...skill, model: 'fixture', reasoningEffort: 'high' })).status, 200)
+  assert.equal(calls.at(-1).input.reasoning_effort, 'high')
+  assert.equal(calls.at(-1).input.source_cwd, tmpdir())
+  const lastSuccessful = calls.at(-1)
   reply = ''
   assert.equal((await request({ ...skill, requestId: 'invalid-brief' })).status, 400)
-  assert.equal(calls.at(-1), last)
+  assert.equal(calls.at(-1), lastSuccessful)
 })
 
 test('native launch uses only the synced destination and skips a changed CLI home', () => {
@@ -176,10 +182,12 @@ test('real backend dispatches only the skill brief once through the existing dsh
     resolveAgent: async id => ({ agent: live.get(id) }),
     prompt: async input => { submitted++; const text = input.content[0].text; assert.match(text, /Only the prepared Markdown brief/); assert.doesNotMatch(text, /Original fixture|PRIVATE REASONING|PRIVATE PEER/); return { accepted: true } },
   }
-  const services = { sessionController: controller, kodeNativeFactory: { promote: async agent => { agent.selectModel = () => {}; return agent } }, agents: { get: id => live.get(id) }, kodeAgents: { profiles, hasRuntime: () => true, adapter: { listModels: async () => [{ id: 'fixture', isDefault: true }] }, recordBinding() {} }, workspaceRegistry: { resolveByPath: async () => ({ id: 'fixture-workspace' }) } }
+  const services = { sessionController: controller, kodeNativeFactory: { promote: async agent => { agent.selectModel = route => { assert.equal(route.model, 'fixture'); assert.equal(route.reasoningEffort, 'high') }; return agent } }, agents: { get: id => live.get(id) }, kodeAgents: { profiles, hasRuntime: () => true, adapter: { listModels: async () => [{ id: 'fixture', isDefault: true, reasoningEfforts: [{ id: 'high' }] }] }, recordBinding() {} }, workspaceRegistry: { resolveByPath: async () => ({ id: 'fixture-workspace' }) } }
   const bridge = new RuntimeBridge({ get: key => services[key], logger: { warn() {} } }, backend, { intervalMs: 10 })
   await bridge.publish(); bridge.start(); t.after(() => bridge.close())
-  const request = { source_session_id: sourceId, source_runtime: 'dsh', profile_id: profile.id, target_runtime: 'dsh', request_id: 'handoff-' + randomUUID(), brief: 'Only the prepared Markdown brief' }
+  const secondHost = new RuntimeBridge({ get: key => services[key], logger: { warn() {} } }, backend)
+  await assert.rejects(secondHost.publish(), /Another Host already owns this runtime/)
+  const request = { source_session_id: 'unpublished-' + sourceId, source_cwd: root, source_runtime: 'dsh', profile_id: profile.id, target_runtime: 'dsh', request_id: 'handoff-' + randomUUID(), brief: 'Only the prepared Markdown brief', model: 'fixture', reasoning_effort: 'high' }
   const first = await backend.call('/api/v1/messaging/workbench/handoff/skill', request)
   const repeated = await backend.call('/api/v1/messaging/workbench/handoff/skill', request)
   assert.deepEqual(repeated, first); assert.equal(created, 1); assert.equal(submitted, 1); assert.notEqual(first.sessionId, sourceId)

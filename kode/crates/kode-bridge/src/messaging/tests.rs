@@ -1150,7 +1150,9 @@ case "$4" in
 get) [ "$5" = "plugin:demo:calendar" ] || exit 3
      if [ -f "$PROBE_FILE" ]; then echo 'Status: ✓ Connected'; else echo 'Status: ⚠ Needs authentication'; fi
      echo 'private-cli-output';;
-login) [ "$5" = "--" ] && [ "$6" = "plugin:demo:calendar" ] || exit 4
+login) [ -t 0 ] || exit 1
+       [ "$5" = "--" ] && [ "$6" = "plugin:demo:calendar" ] || exit 4
+       [ ! -f "$PROBE_FILE.skip" ] || exit 0
        touch "$PROBE_FILE";;
 *) exit 5;;
 esac
@@ -1160,7 +1162,7 @@ esac
     let mut state = agents["value"].clone();
     state["profiles"] = json!([{"id":"fixture","type":"claude","executable":executable,"env":{"PROBE_FILE":root.join("authorized")}}]);
     hub.store.save_document("agents",agents["revision"].as_u64().unwrap(),state).unwrap();
-    hub.extensions.change(hub, json!({"action":"save-source","source":{"id":"sample","kind":"local","location":origin,"targets":["claude"]}})).unwrap();
+    hub.extensions.change(hub, json!({"action":"save-source","source":{"id":"sample","kind":"local","location":origin,"targets":["claude","tclaude","dsh"]}})).unwrap();
     hub.extensions.change(hub, json!({"action":"sync-source","id":"sample"})).unwrap();
     let mut request = json!({"action":"mcp-status","id":"sample","profileId":"fixture"});
     let expected = |status| json!({"rows":[{"name":"calendar","packageKey":".","status":status}]});
@@ -1171,7 +1173,30 @@ esac
     assert!(super::extension_auth::execute(hub,&request).await.is_err());
     assert!(!root.join("authorized").exists());
     request["name"] = json!("calendar");
+    let skip = root.join("authorized.skip");
+    std::fs::write(&skip, "").unwrap();
+    assert!(super::extension_auth::execute(hub,&request).await.unwrap_err().to_string().contains("尚未确认"));
+    std::fs::remove_file(skip).unwrap();
     assert_eq!(super::extension_auth::execute(hub,&request).await.unwrap(), expected("connected"));
+    request["partial"] = json!(true);
+    assert_eq!(super::extension_auth::execute(hub,&request).await.unwrap(), json!({"partial":true,"rows":expected("connected")["rows"]}));
+    let wrapper = root.join("tclaude");
+    std::fs::write(&wrapper, "#!/bin/sh\n[ \"$1:$2:$3\" = 'mcp:get:plugin:demo:calendar' ] || exit 2\necho '  URL: https://example.com/calendar'\necho '  Status: ✔ Connected'\n").unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let agents = hub.store.document("agents").unwrap();
+    let mut state = agents["value"].clone();
+    state["profiles"][0]["executable"] = json!(wrapper);
+    hub.store.save_document("agents",agents["revision"].as_u64().unwrap(),state).unwrap();
+    request["action"] = json!("mcp-status");
+    assert_eq!(super::extension_auth::execute(hub,&request).await.unwrap(), expected("connected"));
+    let script = std::fs::read_to_string(&wrapper).unwrap();
+    std::fs::write(&wrapper, script.replace("example.com/calendar", "example.com/other")).unwrap();
+    assert_eq!(super::extension_auth::execute(hub,&request).await.unwrap(), expected("manual"));
+    request["action"] = json!("mcp-status");
+    request["profileId"] = json!("builtin-dsh");
+    assert_eq!(super::extension_auth::execute(hub,&request).await.unwrap(), expected("manual"));
+    request["profileId"] = json!("missing-profile");
+    assert!(super::extension_auth::execute(hub,&request).await.is_err());
 }
 
 #[tokio::test]
@@ -1465,6 +1490,10 @@ async fn backend_handoff_case(source_runtime: &str, target_runtime: &str, brief:
             assert_eq!(rejected.status(), 400);
         }
         input["brief"] = json!(brief);
+        input["source_session_id"] = json!("not-in-owner-directory");
+        input["source_cwd"] = json!(s._root.path());
+        input["model"] = json!("fixture-model");
+        input["reasoning_effort"] = json!("high");
         let legacy = client.post(&legacy_url).bearer_auth("admin-test").json(&input).send().await.unwrap();
         assert_eq!(legacy.status(), 400);
         url
@@ -1496,6 +1525,7 @@ async fn backend_handoff_case(source_runtime: &str, target_runtime: &str, brief:
                 let payload = &command["payload"];
                 let value = if kind == "create_session" {
                     assert_eq!(payload["cwd"], json!(s._root.path()));
+                    if brief.is_some() { assert_eq!(payload["model"], "fixture-model"); assert_eq!(payload["reasoning_effort"], "high"); }
                     assert!(payload["backend_key"].as_str().unwrap().starts_with(&format!("{target_runtime}:")));
                     let mapped = ctx.runtimes.publish(&ctx, publication(target_runtime, "target", vec![])).unwrap();
                     let id = mapped["sessions"][0]["id"].as_u64().unwrap();
@@ -1530,6 +1560,10 @@ async fn backend_handoff_case(source_runtime: &str, target_runtime: &str, brief:
     assert!(ctx.runtimes.claim(target_runtime, &boot).unwrap()["commands"].as_array().unwrap().is_empty());
     let mut conflict = input.clone();
     if brief.is_some() {
+        let mut changed_model = input.clone();
+        changed_model["model"] = json!("other-model");
+        let retry = client.post(&url).bearer_auth("admin-test").json(&changed_model).send().await.unwrap();
+        assert_eq!(retry.status(), 400);
         conflict["brief"] = json!("Another handoff brief");
     } else {
         conflict["source_session_id"] = json!("different");
