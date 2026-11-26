@@ -2719,6 +2719,7 @@ dependencies = [
  "kode-relay",
  "kode-relay-protocol",
  "libc",
+ "nix 0.28.0",
  "notify",
  "parking_lot",
  "portable-pty",

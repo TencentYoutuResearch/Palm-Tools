@@ -32,6 +32,17 @@ async fn cli(profile: &Value, args: &[String], seconds: u64, capture: bool) -> R
     } else {
         Stdio::null()
     });
+    // Claude's browser OAuth callback works unattended, but its optional paste prompt
+    // rejects non-terminal stdin even when the browser is available.
+    #[cfg(unix)]
+    let _login_terminal = if !capture && profile["type"] == "claude" {
+        let terminal = nix::pty::openpty(None, None).context("无法为 Claude MCP 授权创建终端")?;
+        // OwnedFd::try_clone sets CLOEXEC. Keep only the child's stdin inheritable.
+        command.stdin(Stdio::from(terminal.slave.try_clone()?));
+        Some(terminal.master.try_clone()?)
+    } else {
+        None
+    };
     let child = command.spawn().context("无法启动 Agent CLI")?;
     let output = timeout(Duration::from_secs(seconds), child.wait_with_output())
         .await

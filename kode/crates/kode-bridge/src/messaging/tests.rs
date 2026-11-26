@@ -1150,7 +1150,8 @@ case "$4" in
 get) [ "$5" = "plugin:demo:calendar" ] || exit 3
      if [ -f "$PROBE_FILE" ]; then echo 'Status: ✓ Connected'; else echo 'Status: ⚠ Needs authentication'; fi
      echo 'private-cli-output';;
-login) [ "$5" = "--" ] && [ "$6" = "plugin:demo:calendar" ] || exit 4
+login) [ -t 0 ] || exit 1
+       [ "$5" = "--" ] && [ "$6" = "plugin:demo:calendar" ] || exit 4
        [ ! -f "$PROBE_FILE.skip" ] || exit 0
        touch "$PROBE_FILE";;
 *) exit 5;;
