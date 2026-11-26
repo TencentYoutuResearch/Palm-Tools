@@ -38,8 +38,11 @@ const MODES = { plan: 'read-only', default: 'workspace-write', acceptEdits: 'wor
 /** The dsh Agent profile that runs `backendKey`, if this Host has one. */
 // The Agents dsh offers: shadowed built-in twins of a desktop-configured
 // Agent are hidden there, and session creation only accepts what is offered.
+// `dsh` is DeepSeek Harness itself: it runs in-process and needs its own model
+// provider, so it cannot be a bot's Agent the way a CLI can.
+export const botAgentTypes = profile => profile.type !== 'dsh'
 function offered(runtime) {
-  return (runtime?.appearance?.profilesView() ?? runtime?.profiles.list() ?? []).filter(profile => runtime.hasRuntime(profile.type))
+  return (runtime?.appearance?.profilesView() ?? runtime?.profiles.list() ?? []).filter(profile => runtime.hasRuntime(profile.type) && botAgentTypes(profile))
 }
 
 export function agentFor(runtime, backendKey) {

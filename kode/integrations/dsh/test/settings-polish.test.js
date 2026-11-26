@@ -152,3 +152,17 @@ test('the integrations GET exposes the built-in naming rule for display and edit
   assert.deepEqual(payload.sessionNaming, { defaultPrompt: sessionNamingPolicy().prompt, maxWords: sessionNamingPolicy().maxWords })
   assert.ok(payload.sessionNaming.defaultPrompt.length > 0)
 })
+
+test('the bot settings dialog sizes itself and lays out by its own width, never by the window', () => {
+  const rules = [...source.matchAll(/\.kode-bot-settings\{([^}]*)\}/g)].map(match => match[1])
+  assert.equal(rules.length, 2, 'one base rule and one width rule, no later rule resetting the width')
+  const width = rules.map(rule => /width:([^;]+)/.exec(rule)?.[1]).filter(Boolean)
+  assert.deepEqual(width.at(-1), 'min(1040px,calc(100vw - 32px))')
+  assert.match(rules.join(';'), /container-type:inline-size/, 'the dialog is the query container for its body')
+  assert.doesNotMatch(source, /\.kode-bot-settings-body\{[^}]*container-type/, 'a container cannot style itself')
+  assert.doesNotMatch(source, /\.kode-bot-settings\{width:fit-content/, 'no fit-content reset')
+  assert.match(source, /\.kode-bot-pane-columns\{display:grid;grid-template-columns:repeat\(auto-fit,minmax\(min\(100%,280px\),1fr\)\)/)
+  assert.match(source, /@container \(max-width:820px\)\{[^@]*\.kode-bot-settings-nav\{flex-direction:row/)
+  assert.match(source, /@container \(max-width:600px\)\{[^@]*\.kode-bot-pane-columns\{grid-template-columns:minmax\(0,1fr\)/)
+  assert.doesNotMatch(source, /@media \(max-width:860px\)\{[^@]*kode-bot-pane-columns/, 'window width must not decide the dialog layout')
+})

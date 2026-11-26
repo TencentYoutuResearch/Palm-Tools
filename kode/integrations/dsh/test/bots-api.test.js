@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { agentFor, botRoutines, botsView, botTemplates, registerBotsApi, runBotForWatch } from '../src/bots-api.js'
+import { agentFor, botAgentTypes, botRoutines, botsView, botTemplates, registerBotsApi, runBotForWatch } from '../src/bots-api.js'
 
 const runtime = {
   hasRuntime: type => type !== 'missing',
@@ -210,4 +210,17 @@ test('a 创建伙伴 conversation starts in the builder folder with the skill an
     assert.doesNotMatch(created[0].task, /^---/, 'the skill front matter is not sent')
     assert.equal((await post({ action: 'builder', template: 'nope' })).statusCode, 400)
   } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('a bot never runs on DeepSeek Harness itself, which needs its own model provider', () => {
+  assert.equal(botAgentTypes({ type: 'dsh' }), false)
+  assert.equal(botAgentTypes({ type: 'claude' }), true)
+  const withDsh = {
+    hasRuntime: () => true,
+    profiles: { list: () => [{ id: 'builtin-dsh', name: 'DeepSeek Harness', type: 'dsh' }, { id: 'builtin-codex', name: 'Codex', type: 'codex' }], sharedState: { desktop_ids: {} } },
+  }
+  assert.equal(agentFor(withDsh, 'dsh'), null, 'the in-process dsh Agent is not offered to bots')
+  assert.equal(agentFor(withDsh, 'codex').id, 'builtin-codex')
+  const view = botsView({ bots: [], workspaces: {}, homes: {} }, { runtime: withDsh, sessions: [], archived: new Set(), workspaces: [] })
+  assert.deepEqual(view.agents.map(row => row.backend_key), ['codex'], 'the picker and the builder see the same list')
 })
