@@ -65,6 +65,10 @@ test('avatar delivery is owner-only and cannot read files outside the configured
   const brand = await fetch(base + '/media?type=brand&state=idle', { headers: { 'x-test-owner': 'yes' } })
   assert.equal(brand.status, 200)
   assert.deepEqual(Buffer.from(await brand.arrayBuffer()), await readFile(new URL('../assets/agents/kode-logo.png', import.meta.url)))
+  for (const layer of ['ink', 'red']) {
+    const response = await fetch(base + `/media?type=brand-${layer}&state=idle`, { headers: { 'x-test-owner': 'yes' } })
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), await readFile(new URL(`../assets/agents/kode-wordmark-${layer}.png`, import.meta.url)))
+  }
   const nativeKode = await fetch(base + '/media?type=dsh&state=idle', { headers: { 'x-test-owner': 'yes' } })
   assert.equal(nativeKode.status, 200)
   assert.deepEqual(Buffer.from(await nativeKode.arrayBuffer()), await readFile(new URL('../assets/agents/kode.png', import.meta.url)))
