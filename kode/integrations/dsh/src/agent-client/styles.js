@@ -347,7 +347,7 @@ html[data-kode-embed] body{-webkit-user-select:none;user-select:none;cursor:defa
 .kode-sidebar-app-icon{display:block;flex:none;transform:scale(1.21)}
 .kode-sidebar-brand-mark{display:inline-flex;align-items:center;gap:8px;margin-inline-start:4px}
 [class*="brandIdentity"]:has(.kode-brand-name){gap:5px}
-[data-sidebar-toggle] .kode-sidebar-brand-mark{margin-inline-start:0;width:24px!important;height:24px!important;border-radius:6px;background:url("/api/kode/avatars/media?type=kode&state=idle") center/contain no-repeat}
+[data-sidebar-toggle] .kode-sidebar-brand-mark{width:24px!important;height:24px!important;margin-inline-start:0;border-radius:6px;background:url("/api/kode/avatars/media?type=kode&state=idle") center/contain no-repeat}
 [data-sidebar-toggle] .kode-sidebar-brand-mark>*{display:none}
 html:not([data-windows-titlebar]) [class*="root"][class*="collapsed"]:has([data-sidebar-toggle]){padding:12px 10px 8px}
 html:not([data-windows-titlebar]) [class*="root"][class*="collapsed"]:has([data-sidebar-toggle]) [class*="logoRow"],
