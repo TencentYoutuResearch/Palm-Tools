@@ -1766,3 +1766,103 @@ test('subagent titles strip Markdown markers from the first task line', () => {
  assert.equal(childTitle({ name: 'reviewer', task: '**x**' }), 'reviewer')
  assert.equal(childTitle({ task: '**' }), '子 Agent')
 })
+
+const plain = value => JSON.parse(JSON.stringify(value))
+function botsUiScope(extra = {}) {
+  const scope = {
+    h: (type, props, ...children) => ({ type, props: props ?? {}, children }),
+    BOT_CEILINGS: [{ value: 'plan', label: '只做计划' }, { value: 'default', label: '改动前询问' }, { value: 'acceptEdits', label: '可以改文件' }, { value: 'bypassPermissions', label: '完全访问' }],
+    BOT_BANNER_PRESETS: [{ id: 'preset:aurora', css: 'x' }], botsSnapshot: { data: { bots: [{ id: 'old' }] } },
+    ...extra,
+  }
+  vm.runInNewContext(source.slice(source.indexOf('  const BOT_SLUG ='), source.indexOf('  // Profile card body shared by')), scope)
+  return scope
+}
+
+test('a kode-bot proposal is reduced to storable fields and this Host\'s Agents', () => {
+  const { botProposal } = botsUiScope()
+  const agents = [{ backend_key: 'claude', name: 'Claude', type: 'claude' }, { backend_key: 'codex', name: 'Codex', type: 'codex' }]
+  const parsed = botProposal(JSON.stringify({
+    name: '  审查员 ', tagline: 't', persona: 'p', backend_key: 'codex', model: '', permission_ceiling: 'root', default_cwd: 'relative',
+    avatar: 'gallery/../x', banner: 'preset:aurora', template: 'code-reviewer', extra: 1,
+    skills: [{ slug: 'code-review', name: 'Code Review' }, { slug: 'code-review', name: 'dup' }, { slug: '../x', name: 'bad' }, { slug: '.hidden', name: 'h' }, { slug: 'git-commit-helper' }],
+  }), agents)
+  assert.deepEqual({ ...parsed.bot }, { name: '审查员', tagline: 't', persona: 'p', backend_key: 'codex', model: null, permission_ceiling: 'default', default_cwd: null, avatar: null, banner: 'preset:aurora', template: 'code-reviewer' })
+  assert.deepEqual(plain(parsed.skills.map(row => [row.slug, row.source, row.name])), [['code-review', 'skillhub', 'Code Review'], ['git-commit-helper', 'skillhub', 'git-commit-helper']])
+  assert.equal(parsed.agentMissing, false)
+  const fallback = botProposal(JSON.stringify({ name: 'x', backend_key: 'cursor', banner: 'url(evil)' }), agents)
+  assert.equal(fallback.bot.backend_key, 'claude', 'an Agent this computer lacks falls back to the first one')
+  assert.equal(fallback.agentMissing, true)
+  assert.equal(fallback.bot.banner, null)
+  assert.throws(() => botProposal('{"name":', agents), /JSON/)
+  assert.throws(() => botProposal('{"persona":"x"}', agents), /名字/)
+  assert.throws(() => botProposal('[1]', agents), /不完整/)
+})
+
+test('creating a bot installs its skills one by one and keeps the bot when a skill fails', async () => {
+  const calls = [], published = []
+  const scope = botsUiScope({
+    publishBots: value => published.push(value),
+    botsCall: async body => {
+      calls.push(body)
+      if (body.action === 'upsert') return { bots: [{ id: 'old' }, { id: 'bot_new', name: body.bot.name }] }
+      if (body.slug === 'broken') throw new Error('SkillHub 暂不可用')
+      return { bots: [{ id: 'old' }, { id: 'bot_new' }] }
+    },
+  })
+  const notes = []
+  const result = await scope.createBot({ name: 'Kit', backend_key: 'claude' }, [{ slug: 'code-review', name: 'Review' }, { slug: 'broken', name: 'Broken' }], note => notes.push(note))
+  assert.equal(result.bot.id, 'bot_new')
+  assert.deepEqual(plain(result.failed), ['Broken（SkillHub 暂不可用）'])
+  assert.deepEqual(calls.map(row => [row.action, row.id ?? null, row.slug ?? null, row.source ?? null]), [['upsert', null, null, null], ['skill_install', 'bot_new', 'code-review', 'skillhub'], ['skill_install', 'bot_new', 'broken', 'skillhub']])
+  assert.deepEqual(notes, ['正在安装技能 1/2：Review', '正在安装技能 2/2：Broken'])
+  await assert.rejects(scope.createBot({ name: 'x', backend_key: '' }, []), /Agent/)
+})
+
+test('the proposal card waits for the block to finish and creates once however often it is clicked', async () => {
+  let release, creates = 0
+  const states = []
+  const scope = botsUiScope({
+    React: {}, useState: init => [typeof init === 'function' ? init() : init, next => states.push(next)], useEffect: () => {},
+    useBots: () => ({ data: { agents: [{ backend_key: 'claude', name: 'Claude', type: 'claude' }] } }), useAvatarLibrary: () => ({ avatars: [] }),
+    Failure: 'failure', Button: 'button', BotNameplate: 'nameplate', IconLoadingOutlineRegular: 'loading',
+    botsCall: async body => { if (body.action === 'upsert') { creates++; await new Promise(resolve => { release = resolve }) } return { bots: [{ id: 'bot_new' }] } },
+    publishBots: () => {}, botsSnapshot: { data: { bots: [] } },
+  })
+  assert.equal(scope.BotProposalCard({ code: '{"na', streaming: true }).props.role, 'status')
+  const code = JSON.stringify({ name: 'Kit', backend_key: 'claude' })
+  const card = scope.BotProposalCard({ code, streaming: false })
+  const button = card.children[2].children[0]
+  button.props.onClick(); button.props.onClick()
+  assert.equal(creates, 1)
+  assert.equal(scope.BotProposalCard({ code, streaming: false }).children[2].children[0].props.disabled, true, 'a re-rendered card shows the running creation')
+  release(); await new Promise(resolve => setTimeout(resolve, 0))
+  assert.deepEqual(plain(states.at(-1)), { phase: 'done', id: 'bot_new', failed: [] })
+  const bad = scope.BotProposalCard({ code: 'oops', streaming: false })
+  assert.equal(bad.children[0].type, 'failure')
+})
+
+test('the 伙伴 page lists bots as an avatar rail and registers the kode-bot proposal card', () => {
+  const scope = { h: (type, props, ...children) => ({ type, props: props ?? {}, children }), BotAvatar: 'avatar', IconPlusOutlineRegular: 'plus' }
+  vm.runInNewContext(source.slice(source.indexOf('  // The roster as a row of avatars'), source.indexOf('  function BotProfilePopover')), scope)
+  const picks = []
+  let created = 0
+  const rail = scope.BotsRail({ bots: [{ id: 'b1', name: 'Kit', tagline: '审 PR' }, { id: 'b2', name: 'Rex' }], selected: 'b1', defaultBot: 'b2', unseen: { b2: 3 }, onSelect: (...args) => picks.push(args), onCreate: () => created++ })
+  assert.equal(rail.props['aria-label'], '我的伙伴')
+  const [kit, rex, add] = rail.children
+  assert.equal(kit.props['aria-pressed'], true)
+  assert.equal(kit.props.title, 'Kit · 审 PR')
+  kit.props.onClick({ currentTarget: 'el' }); rex.props.onClick({ currentTarget: 'el2' })
+  assert.deepEqual(picks, [[null, 'el'], ['b2', 'el2']], 'clicking the open bot closes its card')
+  const rexAvatar = rex.children[1]
+  assert.ok(rexAvatar.children.some(child => child?.props?.title === '默认伙伴'))
+  assert.ok(rexAvatar.children.some(child => child?.props?.className === 'kode-bot-badge'))
+  add.props.onClick(); assert.equal(created, 1)
+
+  const c = client(undefined, undefined, { layout: { selectPanel() {} } })
+  const fence = c.ctx.slots.entries('conversation.chat.markdown.fence').find(entry => entry.options.key === 'kode-bot')
+  assert.equal(fence?.component.name, 'BotProposalCard')
+  assert.match(source, /action: 'builder'/)
+  assert.match(source, /function BotSettingsModal/)
+  assert.match(source, /function BotSkillsPanel/)
+})

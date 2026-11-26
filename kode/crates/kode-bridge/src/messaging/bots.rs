@@ -11,6 +11,7 @@ use std::path::PathBuf;
 const DOCUMENT: &str = "bots";
 const MAX_BOTS: usize = 64;
 const MAX_PERSONA_BYTES: usize = 16 * 1024;
+const MAX_SKILLS: usize = 32;
 
 /// Least to most permissive. A bot never runs above its ceiling.
 pub const PERMISSION_MODES: &[&str] = &["plan", "default", "acceptEdits", "bypassPermissions"];
@@ -28,6 +29,15 @@ pub struct Bot {
     pub banner: Option<String>,
     #[serde(default)]
     pub persona: String,
+    /// One line shown under the name wherever the bot is listed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tagline: Option<String>,
+    /// Skills installed into the bot's own folder.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<BotSkill>,
+    /// Recommended template the bot was made from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
     /// Agent that runs the bot (a backend key such as `claude`).
     pub backend_key: String,
     #[serde(default)]
@@ -44,6 +54,19 @@ pub struct Bot {
     pub created_at: u64,
     #[serde(default)]
     pub updated_at: u64,
+}
+
+/// A skill the front end installed under the bot's folder. Kode records it;
+/// the files themselves are the front end's.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct BotSkill {
+    pub slug: String,
+    /// `skillhub` or `local`.
+    pub source: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -131,6 +154,7 @@ impl Bot {
     pub fn public(&self, default: bool) -> Value {
         json!({
             "id": self.id, "name": self.name, "avatar": self.avatar, "banner": self.banner,
+            "tagline": self.tagline, "skills": self.skills.iter().map(|s| &s.slug).collect::<Vec<_>>(),
             "backend_key": self.backend_key, "model": self.model,
             "permission_ceiling": self.permission_ceiling, "memory_scope": self.memory_scope(),
             "main_session": self.main_session,
@@ -160,6 +184,24 @@ impl Bot {
             || self.model.as_ref().is_some_and(|m| m.len() > 160)
         {
             bail!("avatar, banner, or model is invalid or too long")
+        }
+        let line = |value: &Option<String>, max: usize| value.as_ref().is_some_and(|v| v.chars().count() > max || v.chars().any(|c| c.is_control()));
+        if line(&self.tagline, 120) || line(&self.template, 64) {
+            bail!("tagline or template is invalid or too long")
+        }
+        if self.skills.len() > MAX_SKILLS {
+            bail!("at most {MAX_SKILLS} skills")
+        }
+        let mut seen = std::collections::HashSet::new();
+        for skill in &self.skills {
+            let slug_ok = !skill.slug.is_empty() && skill.slug.len() <= 128
+                && skill.slug.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)) && !skill.slug.starts_with('.');
+            if !slug_ok || !seen.insert(skill.slug.as_str()) || !["skillhub", "local"].contains(&skill.source.as_str())
+                || skill.name.trim().is_empty() || line(&Some(skill.name.clone()), 120)
+                || skill.description.as_ref().is_some_and(|d| d.chars().count() > 1024)
+            {
+                bail!("invalid skill {}", skill.slug)
+            }
         }
         Ok(())
     }
@@ -390,6 +432,31 @@ mod tests {
         assert_eq!(public["banner"], "preset:aurora");
         assert!(public.get("persona").is_none());
         assert!(kit.persona_prompt().contains("Reviews code.") && kit.persona_prompt().contains("bot:bot_kit"));
+    }
+
+    #[test]
+    fn profile_and_skills_are_optional_and_validated() {
+        let old: Bot = serde_json::from_value(json!({"name":"Kit","backend_key":"claude"})).unwrap();
+        assert!(old.skills.is_empty() && old.tagline.is_none());
+        assert!(serde_json::to_value(&old).unwrap().get("skills").is_none(), "older readers still parse new writes");
+        let mut roster = Roster::default();
+        let skill = |slug: &str| json!({"slug": slug, "source": "skillhub", "name": "Review"});
+        let mut kit = bot("Kit");
+        kit.tagline = Some("Reviews every PR".into());
+        kit.skills = vec![serde_json::from_value(skill("code-review")).unwrap()];
+        apply(&mut roster, Change::Upsert { bot: kit.clone() }, 1).unwrap();
+        assert_eq!(roster.bots[0].public(false)["skills"], json!(["code-review"]));
+        for bad in [skill("../x"), skill(".hidden"), json!({"slug":"x","source":"web","name":"X"}), json!({"slug":"x","source":"local","name":" "})] {
+            let mut candidate = kit.clone();
+            candidate.skills = vec![serde_json::from_value(bad.clone()).unwrap()];
+            assert!(apply(&mut Roster::default(), Change::Upsert { bot: candidate }, 1).is_err(), "{bad}");
+        }
+        let mut twice = kit.clone();
+        twice.skills.push(twice.skills[0].clone());
+        assert!(apply(&mut Roster::default(), Change::Upsert { bot: twice }, 1).is_err(), "duplicate slug");
+        let mut long = kit;
+        long.tagline = Some("x".repeat(121));
+        assert!(apply(&mut Roster::default(), Change::Upsert { bot: long }, 1).is_err());
     }
 
     #[test]
