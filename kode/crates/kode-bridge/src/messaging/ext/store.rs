@@ -72,7 +72,12 @@ impl Store {
             CREATE TABLE IF NOT EXISTS bot_watch_runs(id TEXT PRIMARY KEY, watch_id TEXT NOT NULL, bot TEXT NOT NULL, status TEXT NOT NULL, trigger TEXT NOT NULL,
                 session_id INTEGER, session_uuid TEXT, workspace TEXT, summary TEXT NOT NULL DEFAULT '', error TEXT, seen INTEGER NOT NULL DEFAULT 0, started INTEGER NOT NULL, finished INTEGER);
             CREATE INDEX IF NOT EXISTS bot_watch_runs_watch ON bot_watch_runs(watch_id, started);
-            CREATE INDEX IF NOT EXISTS bot_watch_runs_session ON bot_watch_runs(session_id);",
+            CREATE INDEX IF NOT EXISTS bot_watch_runs_session ON bot_watch_runs(session_id);
+            CREATE TABLE IF NOT EXISTS bot_tasks(id TEXT PRIMARY KEY, bot TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL, detail TEXT NOT NULL, status TEXT NOT NULL,
+                reason TEXT NOT NULL, payload TEXT NOT NULL, session_id INTEGER, session_uuid TEXT, due INTEGER, nudged INTEGER NOT NULL, last_activity INTEGER NOT NULL,
+                created INTEGER NOT NULL, updated INTEGER NOT NULL, closed INTEGER);
+            CREATE INDEX IF NOT EXISTS bot_tasks_bot ON bot_tasks(bot, closed);
+            CREATE INDEX IF NOT EXISTS bot_tasks_session ON bot_tasks(session_id);",
         )?;
         Ok(Self { db: Mutex::new(db) })
     }
@@ -534,5 +539,124 @@ impl Store {
     pub fn mark_runs_seen(&self, bot: &str) -> Result<()> {
         self.db.lock().execute("UPDATE bot_watch_runs SET seen=1 WHERE bot=?1 AND finished IS NOT NULL", [bot])?;
         Ok(())
+    }
+}
+
+/// A bot's task. `kind` is `task`, `plan` (waits for the user to approve
+/// its steps) or `outbound` (a drafted message waiting to be sent).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct TaskRecord {
+    pub id: String,
+    pub bot: String,
+    pub kind: String,
+    pub title: String,
+    pub detail: String,
+    pub status: String,
+    pub reason: String,
+    pub payload: Value,
+    pub session_id: Option<u64>,
+    pub session_uuid: Option<String>,
+    pub due: Option<u64>,
+    pub nudged: u64,
+    pub last_activity: u64,
+    pub created: u64,
+    pub updated: u64,
+    pub closed: Option<u64>,
+}
+
+const TASK_SELECT: &str = "SELECT id,bot,kind,title,detail,status,reason,payload,session_id,session_uuid,due,nudged,last_activity,created,updated,closed FROM bot_tasks";
+
+fn task_row(r: &rusqlite::Row) -> rusqlite::Result<TaskRecord> {
+    Ok(TaskRecord {
+        id: r.get(0)?,
+        bot: r.get(1)?,
+        kind: r.get(2)?,
+        title: r.get(3)?,
+        detail: r.get(4)?,
+        status: r.get(5)?,
+        reason: r.get(6)?,
+        payload: serde_json::from_str(&r.get::<_, String>(7)?).unwrap_or(Value::Null),
+        session_id: r.get(8)?,
+        session_uuid: r.get(9)?,
+        due: r.get(10)?,
+        nudged: r.get(11)?,
+        last_activity: r.get(12)?,
+        created: r.get(13)?,
+        updated: r.get(14)?,
+        closed: r.get(15)?,
+    })
+}
+
+impl Store {
+    pub fn save_task(&self, t: &TaskRecord) -> Result<()> {
+        self.db.lock().execute(
+            "INSERT INTO bot_tasks VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16) ON CONFLICT(id) DO UPDATE SET
+             kind=excluded.kind,title=excluded.title,detail=excluded.detail,status=excluded.status,reason=excluded.reason,payload=excluded.payload,
+             session_id=excluded.session_id,session_uuid=excluded.session_uuid,due=excluded.due,nudged=excluded.nudged,last_activity=excluded.last_activity,
+             updated=excluded.updated,closed=excluded.closed",
+            params![t.id, t.bot, t.kind, t.title, t.detail, t.status, t.reason, serde_json::to_string(&t.payload)?, t.session_id, t.session_uuid, t.due, t.nudged, t.last_activity, t.created, t.updated, t.closed],
+        )?;
+        Ok(())
+    }
+
+    pub fn task(&self, id: &str) -> Result<Option<TaskRecord>> {
+        Ok(self.db.lock().query_row(&format!("{TASK_SELECT} WHERE id=?1"), [id], task_row).optional()?)
+    }
+
+    /// Open tasks, and ones closed since `closed_since`, newest first.
+    pub fn tasks(&self, bot: Option<&str>, closed_since: u64) -> Result<Vec<TaskRecord>> {
+        let db = self.db.lock();
+        let mut stmt = db.prepare(&format!("{TASK_SELECT} WHERE (?1 IS NULL OR bot=?1) AND (closed IS NULL OR closed>=?2) ORDER BY updated DESC LIMIT 500"))?;
+        // u64::MAX means open tasks only; SQLite integers are signed.
+        let rows = stmt.query_map(params![bot, closed_since.min(i64::MAX as u64)], task_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn tasks_by_session(&self, session: u64) -> Result<Vec<TaskRecord>> {
+        let db = self.db.lock();
+        let mut stmt = db.prepare(&format!("{TASK_SELECT} WHERE session_id=?1 AND closed IS NULL"))?;
+        let rows = stmt.query_map([session], task_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn delete_task(&self, id: &str) -> Result<bool> {
+        Ok(self.db.lock().execute("DELETE FROM bot_tasks WHERE id=?1", [id])? > 0)
+    }
+
+    /// Conversations whose latest lifecycle event is a question still open:
+    /// (session, summary, since when).
+    pub fn waiting_sessions(&self, since: u64) -> Result<Vec<(u64, String, u64)>> {
+        let db = self.db.lock();
+        let mut stmt = db.prepare(
+            "SELECT e.session_id,e.payload,e.ts FROM ext_events e JOIN (
+                SELECT MAX(seq) seq FROM ext_events WHERE ts>=?1 AND session_id<>0
+                AND kind IN ('session.awaiting','session.awaiting_cleared','session.turn_started','session.turn_completed','session.exited') GROUP BY session_id
+             ) last ON last.seq=e.seq WHERE e.kind='session.awaiting' ORDER BY e.ts",
+        )?;
+        let rows = stmt.query_map([since], |r| Ok((r.get::<_, u64>(0)?, r.get::<_, String>(1)?, r.get::<_, u64>(2)?)))?;
+        rows.map(|row| {
+            let (session, payload, ts) = row?;
+            let summary = serde_json::from_str::<Value>(&payload).ok().and_then(|p| p["summary"].as_str().map(str::to_owned)).unwrap_or_default();
+            Ok((session, summary, ts))
+        })
+        .collect()
+    }
+
+    /// Recent conversation activity, oldest first: (session, kind, payload, ts).
+    pub fn activity_since(&self, since: u64, limit: usize) -> Result<Vec<(u64, String, Value, u64)>> {
+        let db = self.db.lock();
+        let mut stmt = db.prepare(
+            "SELECT session_id,kind,payload,ts FROM ext_events WHERE ts>=?1 AND session_id<>0
+             AND kind IN ('session.turn_completed','session.awaiting','session.exited') ORDER BY seq DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![since, limit as i64], |r| Ok((r.get::<_, u64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, u64>(3)?)))?;
+        let mut out = rows
+            .map(|row| {
+                let (session, kind, payload, ts) = row?;
+                Ok((session, kind, serde_json::from_str(&payload).unwrap_or(Value::Null), ts))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        out.reverse();
+        Ok(out)
     }
 }

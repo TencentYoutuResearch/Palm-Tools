@@ -4,15 +4,34 @@
  * as an ordinary dsh session started with the bot's Agent, persona and
  * permission limit, and records it as the bot's main session.
  */
-import { mkdir } from 'node:fs/promises'
+import { mkdir, readFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
+import { join } from 'node:path'
 import { admitHostRequest } from './host-admission.js'
+import { installLocal, installSkillHub, localSkills, removeSkill, repairSkillLinks, skillhub, skillRecord, validSlug } from './bot-skills.js'
+import { runWeComTool } from './wecom-bridge.js'
 
 const BOTS = '/api/v1/messaging/workbench/bots'
 const WATCHES = '/api/v1/messaging/workbench/watches'
-const ROSTER_ACTIONS = ['upsert', 'delete', 'set_default', 'set_root', 'adopt']
+const TASKS = '/api/v1/messaging/workbench/bot-tasks'
+const ROSTER_ACTIONS = ['upsert', 'delete', 'set_default', 'set_root', 'adopt', 'set_quiet_hours']
+// Task board: `task_<action>` is Kode's task action.
+const TASK_ACTIONS = ['task_upsert', 'task_delete', 'task_approve', 'task_reject']
 // 关注 (bot watches): `watch_<action>` is Kode's watch action.
 const WATCH_ACTIONS = ['watch_upsert', 'watch_toggle', 'watch_delete', 'watch_run', 'watch_seen']
+const TEMPLATES = new URL('../assets/bot-templates.json', import.meta.url)
+const BUILDER_SKILL = new URL('../assets/skills/kode-bot-builder/SKILL.md', import.meta.url)
+// Fields the dsh view adds; the roster stores everything else.
+const VIEW_FIELDS = ['agent', 'agent_type', 'agent_id', 'main_session_id', 'workspace', 'home', 'sessions']
+export const storedBot = bot => Object.fromEntries(Object.entries(bot).filter(([key]) => !VIEW_FIELDS.includes(key)))
+let catalog
+function templateCatalog() {
+  catalog ??= readFile(TEMPLATES, 'utf8').then(text => JSON.parse(text)).catch(error => { catalog = undefined; throw error })
+  return catalog
+}
+export async function botTemplates() { return (await templateCatalog()).templates }
+/** Recurring routines (standup, weekly brief, …) a bot can be given. */
+export async function botRoutines() { return (await templateCatalog()).routines ?? [] }
 // dsh sandbox modes. New dsh sessions never start above workspace-write.
 const MODES = { plan: 'read-only', default: 'workspace-write', acceptEdits: 'workspace-write', bypassPermissions: 'workspace-write' }
 
@@ -33,7 +52,7 @@ export function agentFor(runtime, backendKey) {
  *  in the bot's own folder (generated assets, side tasks) or is one of its
  *  watch runs. Each bot sees only its own. */
 function inside(path, folder) { return Boolean(path && folder) && (path === folder || path.startsWith(`${folder.replace(/\/$/, '')}/`)) }
-export function botsView(roster, { runtime, sessions, archived, workspaces, runs = [] }) {
+export function botsView(roster, { runtime, sessions, archived, workspaces, runs = [], templates = [], routines = [] }) {
   const live = new Set(sessions.map(row => row.sessionId))
   // One owner per session: a main conversation, one filed under a bot, then
   // a folder, then a run.
@@ -60,6 +79,9 @@ export function botsView(roster, { runtime, sessions, archived, workspaces, runs
     default_root: roster.default_root ?? null,
     agents: offered(runtime).map(profile => ({ profile_id: profile.id, name: profile.name, type: profile.type, backend_key: runtime.profiles.sharedState?.desktop_ids?.[profile.id] ?? profile.type })),
     workspaces: workspaces.map(row => ({ id: row.id, title: row.title, path: row.path })),
+    templates,
+    routines,
+    quiet_hours: roster.quiet_hours ?? null,
   }
 }
 
@@ -68,6 +90,7 @@ export async function ensureBotHome(ctx, roster, bot) {
   const home = roster.homes?.[bot.id]
   if (!home) throw new Error('Kode 服务版本较旧，需要更新后才能给伙伴单独的文件夹')
   await mkdir(home, { recursive: true })
+  await repairSkillLinks(home, bot.skills)
   const registry = ctx.get('workspaceRegistry')
   const workspace = await registry?.resolveByPath?.(home) ?? await registry?.create?.(home, bot.name)
   return { path: home, workspace_id: workspace?.id ?? null }
@@ -117,14 +140,96 @@ export async function runBotForWatch(ctx, backend, payload, requestId) {
   return created.address.session_id
 }
 
-export function registerBotsApi(ctx, backend) {
+/** First message of a 创建伙伴 conversation: the builder skill and the only
+ *  values its proposal may use on this Host. */
+export async function builderPrompt({ agents, avatars, workspaces, template, routines = [] }) {
+  const skill = await readFile(BUILDER_SKILL, 'utf8')
+  const context = {
+    agents: agents.map(row => ({ backend_key: row.backend_key, name: row.name, type: row.type })),
+    avatars: avatars.map(row => ({ id: row.id, name: row.name })),
+    banners: ['preset:blurple', 'preset:aurora', 'preset:cyber', 'preset:sunset', 'preset:forest', 'preset:sakura', 'preset:ocean', 'preset:amber'],
+    routines: routines.map(row => ({ id: row.id, name: row.name, cron: row.cron, when: row.when, summary: row.summary })),
+    permission_ceilings: ['plan', 'default', 'acceptEdits', 'bypassPermissions'],
+    workspaces: workspaces.slice(0, 40).map(row => ({ title: row.title, path: row.path })),
+    ...(template ? { template } : {}),
+  }
+  const opening = template
+    ? `我想从模板「${template.name}」开始创建伙伴。先简单介绍这个模板，再按步骤确认需要调整的地方。`
+    : '我想创建一个新伙伴，请一步步引导我。'
+  return `${skill.replace(/^---[\s\S]*?---\s*/, '')}\n\n## 上下文\n\n\`\`\`json\n${JSON.stringify(context, null, 2)}\n\`\`\`\n\n${opening}`
+}
+
+export function registerBotsApi(ctx, backend, { fetcher = globalThis.fetch, wecom = null } = {}) {
   const send = (res, status, value) => { res.statusCode = status; res.setHeader('content-type', 'application/json'); res.setHeader('cache-control', 'no-store'); res.end(JSON.stringify(value)) }
   const view = async roster => {
     const registry = ctx.get('workspaceRegistry')
     const sessions = (await ctx.get('sessionController')?.list({}))?.items ?? []
     // Older Kode has no watches; bots still list their other sessions.
     const runs = (await backend.call(WATCHES).catch(() => null))?.runs ?? []
-    return botsView(roster ?? await backend.call(BOTS), { runtime: ctx.get('kodeAgents'), sessions, archived: new Set(registry?.archivedSessionIds ?? []), workspaces: registry?.list() ?? [], runs })
+    return botsView(roster ?? await backend.call(BOTS), { runtime: ctx.get('kodeAgents'), sessions, archived: new Set(registry?.archivedSessionIds ?? []), workspaces: registry?.list() ?? [], runs, templates: await botTemplates().catch(() => []), routines: await botRoutines().catch(() => []) })
+  }
+  const botById = async id => {
+    const roster = await backend.call(BOTS), bot = roster.bots.find(row => row.id === id)
+    if (!bot) throw new Error('这个伙伴已不存在')
+    const home = roster.homes?.[bot.id]
+    if (!home) throw new Error('Kode 服务版本较旧，需要更新后才能给伙伴安装技能')
+    await mkdir(home, { recursive: true })
+    return { roster, bot, home }
+  }
+  // Installs touch one folder and rewrite the bot record: one at a time.
+  let skillChain = Promise.resolve()
+  const serial = task => { const run = skillChain.then(task); skillChain = run.catch(() => {}); return run }
+  const installSkill = input => serial(async () => {
+    const { bot, home } = await botById(input.id)
+    if (!validSlug(input.slug)) throw new Error('无效的技能标识')
+    if (!['skillhub', 'local'].includes(input.source)) throw new Error('未知的技能来源')
+    if (!bot.skills?.some(row => row.slug === input.slug) && (bot.skills?.length ?? 0) >= 32) throw new Error('一个伙伴最多安装 32 个技能')
+    const skipped = input.source === 'skillhub' ? await installSkillHub(home, input.slug, { fetcher }) : await installLocal(home, input.slug, input.path)
+    const record = skillRecord(input.source, { slug: input.slug, name: input.name, description: input.description })
+    const skills = [...(bot.skills ?? []).filter(row => row.slug !== input.slug), record]
+    await backend.call(BOTS, { action: 'upsert', bot: { ...storedBot(bot), skills } })
+    return skipped
+  })
+  const dropSkill = input => serial(async () => {
+    const { bot, home } = await botById(input.id)
+    await removeSkill(home, input.slug)
+    await backend.call(BOTS, { action: 'upsert', bot: { ...storedBot(bot), skills: (bot.skills ?? []).filter(row => row.slug !== input.slug) } })
+  })
+  // A drafted outbound message, sent once the user approves it (optionally edited).
+  const sendDraft = async input => {
+    const { tasks } = await backend.call(TASKS)
+    const draft = tasks.find(row => row.id === input.id)
+    if (!draft || draft.kind !== 'outbound') throw new Error('这条草稿已不存在')
+    if (draft.status !== 'needs_user') throw new Error('这条草稿已经处理过了')
+    const content = typeof input.content === 'string' && input.content.trim() ? input.content.slice(0, 8000) : draft.payload?.content
+    if (draft.payload?.channel !== 'wecom' || !draft.payload?.chat_id || !content) throw new Error('草稿缺少发送目标或内容')
+    if (!wecom) throw new Error('企业微信机器人桥接尚未就绪')
+    await runWeComTool(wecom, 'wecom_message_send', { chat_id: draft.payload.chat_id, content, format: draft.payload.format ?? 'markdown' })
+    await backend.call(TASKS, { action: 'upsert', task: { id: draft.id, status: 'done', reason: '已发送', detail: content, payload: { ...draft.payload, content } } })
+  }
+  const builder = async input => {
+    const runtime = ctx.get('kodeAgents'), creator = ctx.get('kodeSessionCreator'), registry = ctx.get('workspaceRegistry')
+    if (!runtime || !creator) throw new Error('dsh 还在启动，请稍后再试')
+    const roster = await backend.call(BOTS)
+    const agents = offered(runtime)
+    const agent = agents.find(row => row.id === input.agent_id) ?? agents.find(row => row.id === runtime.profiles.defaultProfileId) ?? agents[0]
+    if (!agent) throw new Error('这台电脑的 dsh 里还没有可用的 Agent')
+    const template = typeof input.template === 'string' ? (await botTemplates()).find(row => row.id === input.template) : undefined
+    if (input.template && !template) throw new Error('这个模板已不存在')
+    const root = roster.root ?? roster.default_root
+    if (!root) throw new Error('Kode 服务版本较旧，需要更新后才能创建伙伴')
+    const workspace = join(root, '.builder')
+    await mkdir(workspace, { recursive: true })
+    if (registry && !(await registry.resolveByPath?.(workspace))) await registry.create?.(workspace, '创建伙伴')
+    const view = botsView(roster, { runtime, sessions: [], archived: new Set(), workspaces: registry?.list() ?? [] })
+    const task = await builderPrompt({ agents: view.agents, avatars: await runtime.appearance?.gallery().catch(() => []) ?? [], workspaces: view.workspaces.filter(row => row.path !== workspace), template, routines: await botRoutines().catch(() => []) })
+    const created = await creator.create({
+      title: template ? `创建伙伴 · ${template.name}` : '创建伙伴', task, agent: agent.id, workspace,
+      // Searching SkillHub needs the network; the skill forbids writes.
+      permission: 'workspace-write',
+      idempotency_key: String(input.idempotency_key ?? '').slice(0, 160) || `bot-builder-${Date.now()}`,
+    })
+    return { sessionId: created.address.session_id }
   }
   const homes = async (only) => {
     const roster = await backend.call(BOTS)
@@ -152,6 +257,8 @@ export function registerBotsApi(ctx, backend) {
     try {
       if (req.method === 'GET') {
         const query = new URL(req.url, 'http://host').searchParams
+        if (query.has('skillhub')) return send(res, 200, await skillhub(query, { fetcher }))
+        if (query.get('skills') === 'local') return send(res, 200, { skills: await localSkills() })
         if (!query.has('watches')) return send(res, 200, await view())
         // Long poll: Kode answers when watches or runs change (or after a while).
         const after = Number(query.get('after'))
@@ -173,6 +280,17 @@ export function registerBotsApi(ctx, backend) {
         return send(res, 200, await ensureBotHome(ctx, roster, bot))
       }
       if (input?.action === 'start') return send(res, 200, await start(input))
+      if (input?.action === 'builder') return send(res, 200, await builder(input))
+      if (input?.action === 'skill_install') {
+        const skipped = await installSkill(input)
+        return send(res, 200, { ...await view(), ...(skipped.length ? { skipped } : {}) })
+      }
+      if (input?.action === 'skill_remove') { await dropSkill(input); return send(res, 200, await view()) }
+      if (TASK_ACTIONS.includes(input?.action)) {
+        const { action, ...rest } = input
+        return send(res, 200, await backend.call(TASKS, { ...rest, action: action.slice('task_'.length) }))
+      }
+      if (input?.action === 'outbox_send') { await sendDraft(input); return send(res, 200, { sent: true }) }
       if (WATCH_ACTIONS.includes(input?.action)) return send(res, 200, await backend.call(WATCHES, { ...input, action: input.action.slice('watch_'.length) }))
       if (input?.action === 'forget') {
         await backend.call(BOTS, { action: 'set_main_session', id: input.id, session: null })

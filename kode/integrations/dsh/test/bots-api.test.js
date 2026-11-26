@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { agentFor, botsView, registerBotsApi, runBotForWatch } from '../src/bots-api.js'
+import { agentFor, botRoutines, botsView, botTemplates, registerBotsApi, runBotForWatch } from '../src/bots-api.js'
 
 const runtime = {
   hasRuntime: type => type !== 'missing',
@@ -159,4 +159,55 @@ test("each bot lists only its own sessions: main, ones in its folder and its wat
   assert.deepEqual(view.bots[1].sessions.map(row => [row.id, row.kind, row.adopted]), [['rex', 'side', false], ['old', 'subtask', true]], 'another bot never sees them; filed sessions join their bot as subtasks')
   assert.equal(view.bots[0].home, '/bots/b1')
   assert.equal(view.bots[0].agent_id, 'p-claude')
+})
+
+test('templates ship with real skill slugs and valid presets', async () => {
+  const templates = await botTemplates(), routines = await botRoutines()
+  assert.ok(templates.length >= 6)
+  assert.deepEqual(routines.map(row => row.id), ['standup', 'weekly', 'replies', 'patrol'])
+  for (const template of templates) {
+    assert.match(template.id, /^[a-z0-9-]+$/)
+    assert.match(template.banner, /^preset:(blurple|aurora|cyber|sunset|forest|sakura|ocean|amber)$/)
+    assert.ok(['plan', 'default', 'acceptEdits'].includes(template.permission_ceiling))
+    assert.ok(template.tagline.length <= 120 && template.persona.length > 20)
+    for (const skill of template.skills) assert.ok(/^[A-Za-z0-9_.-]+$/.test(skill.slug) && skill.source === 'skillhub' && skill.name)
+    assert.ok(['direct', 'draft'].includes(template.outbound))
+    for (const id of template.routines) assert.ok(routines.some(row => row.id === id), `${template.id} uses unknown routine ${id}`)
+  }
+  for (const routine of routines) {
+    assert.match(routine.cron, /^\S+( \S+){4}$/)
+    assert.ok(routine.instructions.includes('kode_progress_snapshot') || routine.instructions.includes('bot_tasks_list'), routine.id)
+  }
+})
+
+test('a 创建伙伴 conversation starts in the builder folder with the skill and this Host\'s choices', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const root = await mkdtemp(join(tmpdir(), 'kode-builder-'))
+  const registered = [], created = []
+  let handler
+  const roster = { bots: [], root, workspaces: {} }
+  const services = {
+    kodeAgents: { ...runtime, profiles: { ...runtime.profiles, defaultProfileId: 'p-tclaude' }, appearance: { profilesView: () => runtime.profiles.list(), gallery: async () => [{ id: 'gallery/03-violet', name: 'violet', url: '/x' }] } },
+    kodeSessionCreator: { create: async input => { created.push(input); return { address: { session_id: 'builder-1' } } } },
+    workspaceRegistry: { list: () => registered, resolveByPath: async path => registered.find(row => row.path === path), create: async (path, title) => { registered.push({ path, title }) } },
+  }
+  registerBotsApi({ get: name => services[name], connection: { admit: () => ({ peer: { principal: { kind: 'owner' } } }) }, webServer: { register: route => { handler = route.handler } } }, { call: async () => roster })
+  const post = async body => { const res = { setHeader() {}, end(text) { this.body = JSON.parse(text) } }; await handler({ method: 'POST', async *[Symbol.asyncIterator]() { yield JSON.stringify(body) } }, res); return res }
+  try {
+    assert.deepEqual((await post({ action: 'builder', template: 'code-reviewer', idempotency_key: 'k' })).body, { sessionId: 'builder-1' })
+    assert.equal(created[0].agent, 'p-tclaude', "the user's default Agent runs the conversation")
+    assert.equal(created[0].workspace, join(root, '.builder'))
+    assert.deepEqual(registered, [{ path: join(root, '.builder'), title: '创建伙伴' }])
+    assert.equal(created[0].title, '创建伙伴 · 代码审查员')
+    assert.match(created[0].task, /kode-bot/)
+    assert.match(created[0].task, /"backend_key": "tclaude"/)
+    assert.match(created[0].task, /gallery\/03-violet/)
+    assert.match(created[0].task, /从模板「代码审查员」开始/)
+    assert.match(created[0].task, /"id": "standup"/, 'the builder knows the routines it may offer')
+    assert.match(created[0].task, /日常节奏/)
+    assert.doesNotMatch(created[0].task, /^---/, 'the skill front matter is not sent')
+    assert.equal((await post({ action: 'builder', template: 'nope' })).statusCode, 400)
+  } finally { await rm(root, { recursive: true, force: true }) }
 })

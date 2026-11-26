@@ -32,6 +32,11 @@ impl Feed {
     pub(super) fn send(&self, message: Value) {
         let _ = self.sender.send(message);
     }
+
+    #[cfg(test)]
+    pub(super) fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Value> {
+        self.sender.subscribe()
+    }
 }
 
 #[derive(Deserialize)]

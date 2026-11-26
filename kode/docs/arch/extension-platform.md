@@ -244,9 +244,9 @@ GET /api/ext/v1/events/stream?kinds=…&owner=self&label=…&after=<cursor>   (S
 | `POST bots/:id/spawn` `{node_id?, cwd?, worktree?, labels, parent?}` | 用伙伴的配置开一个临时会话 |
 | 事件 `bot.session_rotated` / `bot.turn_completed` | 主会话轮换、回合结束 |
 
-### 9.6 关注：事件唤醒伙伴（不用定时任务）
+### 9.6 关注：事件或时间唤醒伙伴
 
-伙伴自己开始做事，靠的是**关注**（watch）：「当某件事发生时，伙伴开一个独立会话去处理」。没有定时器，也不轮询会话。
+伙伴自己开始做事，靠的是**关注**（watch）：「当某件事发生时（或到点时），伙伴开一个独立会话去处理」。不轮询会话。
 
 ```jsonc
 {
@@ -261,12 +261,23 @@ GET /api/ext/v1/events/stream?kinds=…&owner=self&label=…&after=<cursor>   (S
   - 会话：`session.turn_completed`、`session.awaiting`、`session.exited`，补上 `title`、`cwd`、`backend_key`、`labels`，可以按工作区（含子目录）和标签过滤。
   - 文件与 Git：`fs.changed {workspace, paths}`、`git.commit`、`git.branch`。用系统文件通知（macOS FSEvents），只监听有关注的工作区，一阵改动静默 2 秒后合成一条；Git 只在 HEAD 真的移动时才发。
   - 扩展：`POST /api/ext/v1/events/publish {name, payload}`（capability `events.publish`），主题是 `<扩展 id>/<name>`。kode-team 发 `kode.team/mention`、`message`、`call_finished`、`crew_awaiting`。
+  - 时间：主题 `schedule`，`match.cron` 是本地时间的 5 段 cron（`0 9 * * 1-5` = 工作日 9 点）。由分发器的时钟触发，不经过事件日志；Kode 关着时错过的时间点，重新打开后 12 小时内补跑一次，更早的跳过；暂停再打开不补跑。站会、周报等常用节奏在 `assets/bot-templates.json` 的 `routines` 里。
+  - `policy.post_to_wecom`：运行结束时用伙伴的企业微信工具把汇报发到这个会话（伙伴设为「先起草」时变成草稿）。
 - **匹配**：字段相等、`*`/`**` 路径通配、数组任一命中、工作区前缀（按路径段，不是字符串前缀）。
 - **运行**：命中的事件在窗口内合并成一次运行；同一个关注同时只跑一个，每小时有上限。运行是伙伴的**独立会话**（不进主会话），dsh 在就在 dsh 里开（runtime 命令 `bot_run`），否则在 GUI 里开；工作区依次取关注指定的、事件发生的地方、伙伴自己的文件夹。任务里写明触发事件、上次结论和要做的事。
 - **权限**：默认只读（`plan`），最高「可以改文件」，并且不超过伙伴上限（9.4 第 2 条）。
 - **防循环**：运行会话自己的事件不触发任何关注；伙伴运行期间（及结束后 10 秒）它在该工作区的文件改动不唤醒它自己；每小时上限兜底。
 - **结果**：运行的第一轮结束即完成，结论记入「动态」，默认也作为一条排队消息发到伙伴的主对话（`report_to_main`，可关）；伙伴自己的主对话不会触发它自己的关注，避免来回唤醒。需要人处理或失败时通知（可改成每次都通知或不通知）。动态有未读数，dsh 侧栏伙伴名后显示。
-- **接口**：`GET /api/v1/messaging/workbench/watches?after=<revision>`（长轮询）、`POST …/watches {action: upsert|toggle|delete|run|seen}`，admin。dsh 的 `/api/kode/bots` 用 `watch_<action>` 代理。
+- **接口**：`GET /api/v1/messaging/workbench/watches?after=<revision>`（长轮询，同时带回任务板）、`POST …/watches {action: upsert|toggle|delete|run|seen}`，admin。dsh 的 `/api/kode/bots` 用 `watch_<action>` 代理。
+
+### 9.7 任务板、计划、进度与提醒
+
+伙伴替用户盯进度靠这几样，都在 `messaging/ext`：
+
+- **任务板**（`tasks.rs`，表 `bot_tasks`）：状态 `planned / in_progress / waiting / needs_user / done / cancelled`，可关联执行会话。关联会话完成一轮、提问、结束时，Kode 把情况排队发到伙伴主对话让它跟进；进行中但 2 小时没动静、或过了截止时间，提醒一次伙伴并通知用户。`kind: plan` 的计划等用户批准，批准后按步骤建任务再通知伙伴开始；`kind: outbound` 是伙伴起草、等用户确认的对外消息，由 dsh 发送。接口 `GET/POST /api/v1/messaging/workbench/bot-tasks {action: upsert|delete|approve|reject}`。
+- **进度快照**（`progress.rs`）：`GET /api/v1/messaging/workbench/progress?since&workspace&bot`，返回这段时间有动静的会话及最后结论、在等人处理的会话、这些目录的 Git 提交、任务板。
+- **提醒**（`attention.rs`）：伙伴的通知走同一处；名单上的 `quiet_hours`（可跨午夜）内先攒着，结束后合成一条。
+- **伙伴的工具**（dsh `bot-tools.js`）：`bot_tasks_list`、`bot_task_update`、`bot_plan_propose`、`kode_progress_snapshot`、`bot_schedules_list / upsert / delete`；`kode_sessions_create` 可带 `task_id` 关联任务。伙伴的 `outbound: draft` 让 `wecom_message_send` 变成草稿。
 
 ## 10. 语言与 SDK 策略
 

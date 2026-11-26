@@ -11,6 +11,7 @@ use std::path::PathBuf;
 const DOCUMENT: &str = "bots";
 const MAX_BOTS: usize = 64;
 const MAX_PERSONA_BYTES: usize = 16 * 1024;
+const MAX_SKILLS: usize = 32;
 
 /// Least to most permissive. A bot never runs above its ceiling.
 pub const PERMISSION_MODES: &[&str] = &["plan", "default", "acceptEdits", "bypassPermissions"];
@@ -28,6 +29,19 @@ pub struct Bot {
     pub banner: Option<String>,
     #[serde(default)]
     pub persona: String,
+    /// One line shown under the name wherever the bot is listed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tagline: Option<String>,
+    /// Skills installed into the bot's own folder.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<BotSkill>,
+    /// Recommended template the bot was made from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    /// Messages the bot sends outside Kode (WeCom): `direct` (default) or
+    /// `draft`, which waits for the user to approve each one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outbound: Option<String>,
     /// Agent that runs the bot (a backend key such as `claude`).
     pub backend_key: String,
     #[serde(default)]
@@ -44,6 +58,19 @@ pub struct Bot {
     pub created_at: u64,
     #[serde(default)]
     pub updated_at: u64,
+}
+
+/// A skill the front end installed under the bot's folder. Kode records it;
+/// the files themselves are the front end's.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct BotSkill {
+    pub slug: String,
+    /// `skillhub` or `local`.
+    pub source: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -73,6 +100,38 @@ pub struct Roster {
     /// session id → bot id.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub adopted: std::collections::BTreeMap<String, String>,
+    /// Bot notifications in this local-time window wait and arrive as one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quiet_hours: Option<QuietHours>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct QuietHours {
+    /// `HH:MM`; a window may cross midnight (`22:00`–`08:00`).
+    pub start: String,
+    pub end: String,
+}
+
+fn minutes(hhmm: &str) -> Option<u32> {
+    let (h, m) = hhmm.split_once(':')?;
+    let (h, m): (u32, u32) = (h.parse().ok()?, m.parse().ok()?);
+    (h < 24 && m < 60 && hhmm.len() == 5).then_some(h * 60 + m)
+}
+
+impl QuietHours {
+    pub fn validate(&self) -> Result<()> {
+        match (minutes(&self.start), minutes(&self.end)) {
+            (Some(a), Some(b)) if a != b => Ok(()),
+            _ => bail!("免打扰时段要写成 HH:MM，且开始和结束不能相同"),
+        }
+    }
+
+    /// Is `now` (minutes since local midnight) inside the window?
+    pub fn contains(&self, now: u32) -> bool {
+        let (Some(start), Some(end)) = (minutes(&self.start), minutes(&self.end)) else { return false };
+        if start < end { (start..end).contains(&now) } else { now >= start || now < end }
+    }
 }
 
 impl Roster {
@@ -97,6 +156,7 @@ pub enum Change {
     SetRoot { root: Option<String> },
     /// File a dsh session under a bot (`id: None` releases it).
     Adopt { session: String, id: Option<String> },
+    SetQuietHours { quiet_hours: Option<QuietHours> },
 }
 
 impl Bot {
@@ -131,6 +191,7 @@ impl Bot {
     pub fn public(&self, default: bool) -> Value {
         json!({
             "id": self.id, "name": self.name, "avatar": self.avatar, "banner": self.banner,
+            "tagline": self.tagline, "skills": self.skills.iter().map(|s| &s.slug).collect::<Vec<_>>(),
             "backend_key": self.backend_key, "model": self.model,
             "permission_ceiling": self.permission_ceiling, "memory_scope": self.memory_scope(),
             "main_session": self.main_session,
@@ -160,6 +221,27 @@ impl Bot {
             || self.model.as_ref().is_some_and(|m| m.len() > 160)
         {
             bail!("avatar, banner, or model is invalid or too long")
+        }
+        let line = |value: &Option<String>, max: usize| value.as_ref().is_some_and(|v| v.chars().count() > max || v.chars().any(|c| c.is_control()));
+        if line(&self.tagline, 120) || line(&self.template, 64) {
+            bail!("tagline or template is invalid or too long")
+        }
+        if self.outbound.as_deref().is_some_and(|mode| !["direct", "draft"].contains(&mode)) {
+            bail!("outbound must be direct or draft")
+        }
+        if self.skills.len() > MAX_SKILLS {
+            bail!("at most {MAX_SKILLS} skills")
+        }
+        let mut seen = std::collections::HashSet::new();
+        for skill in &self.skills {
+            let slug_ok = !skill.slug.is_empty() && skill.slug.len() <= 128
+                && skill.slug.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)) && !skill.slug.starts_with('.');
+            if !slug_ok || !seen.insert(skill.slug.as_str()) || !["skillhub", "local"].contains(&skill.source.as_str())
+                || skill.name.trim().is_empty() || line(&Some(skill.name.clone()), 120)
+                || skill.description.as_ref().is_some_and(|d| d.chars().count() > 1024)
+            {
+                bail!("invalid skill {}", skill.slug)
+            }
         }
         Ok(())
     }
@@ -267,6 +349,12 @@ fn apply(roster: &mut Roster, change: Change, now: u64) -> Result<()> {
                     roster.adopted.remove(&session);
                 }
             }
+        }
+        Change::SetQuietHours { quiet_hours } => {
+            if let Some(quiet) = &quiet_hours {
+                quiet.validate()?;
+            }
+            roster.quiet_hours = quiet_hours;
         }
         Change::SetDefault { id } => {
             if id.as_ref().is_some_and(|id| !roster.bots.iter().any(|b| &b.id == id)) {
@@ -390,6 +478,50 @@ mod tests {
         assert_eq!(public["banner"], "preset:aurora");
         assert!(public.get("persona").is_none());
         assert!(kit.persona_prompt().contains("Reviews code.") && kit.persona_prompt().contains("bot:bot_kit"));
+    }
+
+    #[test]
+    fn profile_and_skills_are_optional_and_validated() {
+        let old: Bot = serde_json::from_value(json!({"name":"Kit","backend_key":"claude"})).unwrap();
+        assert!(old.skills.is_empty() && old.tagline.is_none());
+        assert!(serde_json::to_value(&old).unwrap().get("skills").is_none(), "older readers still parse new writes");
+        let mut roster = Roster::default();
+        let skill = |slug: &str| json!({"slug": slug, "source": "skillhub", "name": "Review"});
+        let mut kit = bot("Kit");
+        kit.tagline = Some("Reviews every PR".into());
+        kit.skills = vec![serde_json::from_value(skill("code-review")).unwrap()];
+        apply(&mut roster, Change::Upsert { bot: kit.clone() }, 1).unwrap();
+        assert_eq!(roster.bots[0].public(false)["skills"], json!(["code-review"]));
+        for bad in [skill("../x"), skill(".hidden"), json!({"slug":"x","source":"web","name":"X"}), json!({"slug":"x","source":"local","name":" "})] {
+            let mut candidate = kit.clone();
+            candidate.skills = vec![serde_json::from_value(bad.clone()).unwrap()];
+            assert!(apply(&mut Roster::default(), Change::Upsert { bot: candidate }, 1).is_err(), "{bad}");
+        }
+        let mut twice = kit.clone();
+        twice.skills.push(twice.skills[0].clone());
+        assert!(apply(&mut Roster::default(), Change::Upsert { bot: twice }, 1).is_err(), "duplicate slug");
+        let mut long = kit;
+        long.tagline = Some("x".repeat(121));
+        assert!(apply(&mut Roster::default(), Change::Upsert { bot: long }, 1).is_err());
+    }
+
+    #[test]
+    fn quiet_hours_cross_midnight_and_outbound_is_checked() {
+        let night = QuietHours { start: "22:00".into(), end: "08:00".into() };
+        assert!(night.contains(23 * 60) && night.contains(7 * 60 + 59) && !night.contains(8 * 60) && !night.contains(12 * 60));
+        let lunch = QuietHours { start: "12:00".into(), end: "13:30".into() };
+        assert!(lunch.contains(12 * 60 + 30) && !lunch.contains(13 * 60 + 30));
+        let mut roster = Roster::default();
+        apply(&mut roster, Change::SetQuietHours { quiet_hours: Some(night.clone()) }, 1).unwrap();
+        assert_eq!(roster.quiet_hours, Some(night));
+        for bad in [("9:00", "10:00"), ("22:00", "22:00"), ("24:00", "08:00")] {
+            assert!(apply(&mut roster, Change::SetQuietHours { quiet_hours: Some(QuietHours { start: bad.0.into(), end: bad.1.into() }) }, 2).is_err(), "{bad:?}");
+        }
+        let mut kit = bot("Kit");
+        kit.outbound = Some("draft".into());
+        apply(&mut roster, Change::Upsert { bot: kit.clone() }, 3).unwrap();
+        kit.outbound = Some("yolo".into());
+        assert!(apply(&mut Roster::default(), Change::Upsert { bot: kit }, 3).is_err());
     }
 
     #[test]
