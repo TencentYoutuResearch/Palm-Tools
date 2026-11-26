@@ -82,8 +82,12 @@ pub struct SendRequest {
     #[serde(default = "default_ttl")]
     pub ttl_seconds: u64,
 }
-fn interrupt_default() -> bool { true }
-fn is_interrupt_default(value: &bool) -> bool { *value }
+fn interrupt_default() -> bool {
+    true
+}
+fn is_interrupt_default(value: &bool) -> bool {
+    *value
+}
 fn default_ttl() -> u64 {
     86400
 }

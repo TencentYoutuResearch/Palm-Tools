@@ -709,6 +709,26 @@ mod protocol_tests {
         server.await.unwrap();
     }
     #[tokio::test]
+    async fn queue_only_is_sent_to_capable_peers_and_rejected_for_legacy_peers() {
+        let (hub, _ctx, _root) = fixture();
+        hub.store.register(RegisterRequest {
+            session_id: "worker".into(), title: "Test".into(), runtime: "dsh".into(), owner_token: None,
+        }).unwrap();
+        let req = SendRequest {
+            source: None, target: Address { node_id: "old".into(), session_id: "other".into() },
+            content: "After this turn".into(), title: None, idempotency_key: "queue".into(),
+            in_reply_to: None, interrupt: false, ttl_seconds: 300,
+        };
+        let message = hub.send("worker", req).unwrap();
+        let mut link = DeliveryLink::default();
+        link.negotiate(&[QUEUED_MESSAGE_FEATURE.into()]);
+        let frames = link.frames(&hub, "old", &mut HashMap::new()).unwrap();
+        assert!(frames.iter().any(|f| matches!(f, Frame::Message { message } if !message.interrupt)));
+        let frames = DeliveryLink::default().frames(&hub, "old", &mut HashMap::new()).unwrap();
+        assert!(!frames.iter().any(|f| matches!(f, Frame::Message { .. })));
+        assert_eq!(hub.store.get(&message.id).unwrap().unwrap().status, Status::Rejected);
+    }
+    #[tokio::test]
     async fn new_server_preserves_legacy_wire_and_requires_v2_capabilities() {
         let (hub, _ctx, _root) = fixture();
         let registered = hub
