@@ -92,7 +92,21 @@ pub(super) async fn execute(hub: &Hub, input: &Value) -> Result<Value> {
     let rows = query(hub, input, login).await?;
     if login {
         // Login completion alone does not prove credentials were stored in this CLI profile.
-        query(hub, input, false).await
+        let result = query(hub, input, false).await?;
+        let confirmed = result["rows"].as_array().is_some_and(|rows| {
+            rows.iter().any(|row| {
+                row["packageKey"] == input["packageKey"]
+                    && row["name"] == input["name"]
+                    && matches!(
+                        row["status"].as_str(),
+                        Some("connected" | "authorized" | "not-required")
+                    )
+            })
+        });
+        if !confirmed {
+            bail!("CLI 尚未确认此 MCP 的授权，请刷新状态或重试");
+        }
+        Ok(result)
     } else {
         Ok(rows)
     }

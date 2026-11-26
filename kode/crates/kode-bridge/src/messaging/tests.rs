@@ -1151,6 +1151,7 @@ get) [ "$5" = "plugin:demo:calendar" ] || exit 3
      if [ -f "$PROBE_FILE" ]; then echo 'Status: ✓ Connected'; else echo 'Status: ⚠ Needs authentication'; fi
      echo 'private-cli-output';;
 login) [ "$5" = "--" ] && [ "$6" = "plugin:demo:calendar" ] || exit 4
+       [ ! -f "$PROBE_FILE.skip" ] || exit 0
        touch "$PROBE_FILE";;
 *) exit 5;;
 esac
@@ -1171,6 +1172,10 @@ esac
     assert!(super::extension_auth::execute(hub,&request).await.is_err());
     assert!(!root.join("authorized").exists());
     request["name"] = json!("calendar");
+    let skip = root.join("authorized.skip");
+    std::fs::write(&skip, "").unwrap();
+    assert!(super::extension_auth::execute(hub,&request).await.unwrap_err().to_string().contains("尚未确认"));
+    std::fs::remove_file(skip).unwrap();
     assert_eq!(super::extension_auth::execute(hub,&request).await.unwrap(), expected("connected"));
     request["action"] = json!("mcp-status");
     request["profileId"] = json!("builtin-dsh");
