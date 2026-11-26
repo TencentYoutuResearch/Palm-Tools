@@ -56,7 +56,7 @@ function visibleText(node) {
 }
 test('Standalone Desktop registers the Kode Harness sidebar wordmark', () => {
   const brand = client().entry('sidebar.brand.name')
-  assert.match(visibleText(brand()), /Kode Harness/)
+  assert.equal(visibleText(brand()).trim(), 'Harness')
 })
 
 test('Agent selector loads the local directory when its route registers after the page', async () => {
@@ -506,17 +506,19 @@ test('Plugin and Skills sources stay a multi-item list with an on-demand editor 
  const logoNode=findNode(closed,node=>node.type===scope.SourceLogo),logo=findNode(logoNode.type(logoNode.props),node=>node.type==='img');assert.match(logo.props.src,/logo=remote&package=0&v=1/)
  const imageStyle={display:''};logo.props.onError({currentTarget:{style:imageStyle}});assert.equal(imageStyle.display,'none')
  const refreshedLogo=findNode(scope.SourceLogo({...logoNode.props,source:{...logoNode.props.source,updatedAt:2}}),node=>node.type==='img');assert.notEqual(refreshedLogo.props.key,logo.props.key);refreshedLogo.props.onLoad({currentTarget:{style:imageStyle}});assert.equal(imageStyle.display,'')
- const actions=findNode(closed,node=>node.props?.className==='kode-source-actions')
- assert.ok(actions);assert.deepEqual(actions.children.map(node=>node.children[0]),['编辑','更新并同步','移除'])
- assert.equal(actions.children[2].props.className,'kode-source-remove')
- assert.match(source,/\.kode-source-actions\{[^}]*justify-content:flex-end/)
+ assert.ok(findNode(closed,node=>node.props?.className==='kode-agent-row kode-source-card'),'source rows share the custom Agent row layout')
+ const actions=findNode(closed,node=>node.props?.className==='kode-agent-row-actions kode-source-actions')
+ assert.ok(actions);assert.deepEqual(actions.children.map(node=>node.children[0]),['详情','编辑','同步','移除'])
+ assert.equal(actions.children[2].props['aria-label'],'更新并同步 Remote Toolkit')
+ assert.equal(actions.children[3].props.className,'kode-source-remove')
+ assert.match(source,/\.kode-agent-row-actions\{[^}]*justify-content:flex-end/)
  assert.match(source,/\.kode-source-remove\{[^}]*color:var\(--dsw-alias-state-error-primary\)/)
  const summary=findNode(closed,node=>node.props?.className==='kode-source-summary');summary.props.onClick()
  const preview=render(),dialog=findNode(preview,node=>node.type==='modal'&&node.props.open);assert.ok(dialog)
  const details=visibleText(dialog);assert.match(details,/Agent 同步/);assert.match(details,/DeepSeek Harness/);assert.match(details,/Skills 已同步/);assert.match(details,/example-skill/);assert.match(details,/Skill summary/);assert.match(details,/Subagents/);assert.match(details,/reviewer/);assert.match(details,/Reviews changes/);assert.match(details,/PreToolUse/);assert.match(details,/Hook summary/);assert.match(details,/\/build/);assert.match(details,/discipline/);assert.match(details,/Rule summary/);assert.match(details,/remote-mcp/);assert.match(details,/Long remote summary/);assert.match(details,/https:\/\/example.test\/remote/)
  const previewNode=findNode(dialog,node=>node.type===scope.SourcePreview),previewTree=previewNode.type(previewNode.props)
  const syncSection=findNode(previewTree,node=>node.type===scope.SourcePreviewSection&&node.props.title==='Agent 同步（来源）');const syncTree=syncSection.type(syncSection.props);assert.ok(findNode(syncTree,node=>node.type==='check'&&node.props.className==='kode-source-sync-icon'))
- assert.match(source,/\.kode-source-dialog\{[^}]*max-height:min\(640px,calc\(100dvh - 64px\)\)/);assert.match(source,/\.kode-source-dialog :has\(>\.kode-source-preview\)\{[^}]*overflow-y:auto/)
+ assert.match(source,/\.kode-source-dialog\{[^}]*max-height:min\(720px,calc\(100dvh - 64px\)\)/);assert.match(source,/\.kode-source-dialog :has\(>\.kode-source-preview\)\{[^}]*overflow-y:auto/)
  dialog.props.onClose();assert.equal(findNode(render(),node=>node.type==='modal').props.open,false)
  findNode(closed,node=>node.type==='button'&&node.children.includes('添加来源')).props.onClick()
  const editor=findNode(render(),node=>node.props?.className==='kode-agent-editor kode-source-editor');assert.ok(editor)
@@ -567,10 +569,17 @@ test('plugin detail selection follows a stable package path when polling reorder
  assert.equal(findNode(tree,node=>node.type===scope.SourcePreviewSection&&node.props.title==='Skills').props.items[0].name,'two-skill')
  const logoNode=findNode(tree,node=>node.type===scope.SourceLogo),logo=findNode(logoNode.type(logoNode.props),node=>node.type==='img')
  assert.match(logo.props.src,/logo=multi&package=0/)
- let synced
- tree=scope.SourcePreview({source:multi,packagePath:'plugins/two',onPackageChange:()=>{},onSyncSource:value=>{synced=value},host:'local'})
- findNode(tree,node=>node.type==='button'&&node.children.includes('更新并同步')).props.onClick()
- assert.equal(synced,multi)
+ // Path-only packages from an old service ask for a service update instead of another sync.
+ let updated=0
+ tree=scope.SourcePreview({source:multi,packagePath:'plugins/two',onPackageChange:()=>{},onUpdateService:()=>{updated++},host:'local'})
+ assert.equal(findNode(tree,node=>node.type==='button'&&node.children.includes('更新并同步')),undefined)
+ findNode(tree,node=>node.type==='button'&&node.children.includes('更新 Kode 服务')).props.onClick()
+ assert.equal(updated,1)
+ assert.equal(findNode(tree,node=>node.type==='input'&&node.props.role==='switch').props.disabled,true)
+ // Services advertising packageToggle key path-only records by their path, so the same rows toggle.
+ tree=scope.SourcePreview({source:multi,packagePath:'plugins/two',onPackageChange:()=>{},packageToggle:true,host:'local'})
+ assert.equal(findNode(tree,node=>node.type==='button'&&node.children.includes('更新 Kode 服务')),undefined)
+ assert.equal(findNode(tree,node=>node.type==='input'&&node.props.role==='switch').props.disabled,false)
 })
 
 test('plugin toggles preserve source boundaries and sequence MCP login with retry', async () => {
@@ -623,7 +632,7 @@ test('plugin toggles preserve source boundaries and sequence MCP login with retr
   findNode(tree, node => node.props?.className === 'kode-source-summary').props.onClick()
   tree = render()
   const previewTree = root => { const node = findNode(root, item => item.type === scope.SourcePreview); return node.type(node.props) }
-  const authorizationTree = root => { const node = findNode(previewTree(root), item => item.type === scope.McpAuthorization); return node.type(node.props) }
+  const authorizationTree = root => { const node = findNode(previewTree(root), item => item.type === scope.McpList); return node.type(node.props) }
   const toggle = (root, label) => findNode(previewTree(root), node => node.type === 'input' && node.props['aria-label'] === label)
   assert.equal(toggle(tree, '停用 Legacy').props.disabled, true)
 
@@ -655,16 +664,19 @@ test('plugin toggles preserve source boundaries and sequence MCP login with retr
   assert.equal(requests.at(-1).name, 'two-mcp')
   tree = render()
   assert.doesNotMatch(visibleText(tree), /OAuth expired|重试登录/)
-  assert.match(visibleText(tree), /Codex · two-mcp/)
+  const cliRow = name => findNode(findNode(authorizationTree(tree), node => node.props?.className === 'kode-mcp-item' && node.props.key === name), node => node.props?.className === 'kode-mcp-status-row')
+  assert.equal(visibleText(cliRow('two-mcp')).replace(/\s+/g, ''), 'Codex已连接')
+  assert.equal(cliRow('second-mcp').props['data-status'], 'connected')
 
   let manualRefresh
-  const remote = scope.McpAuthorization({
-    source: slots[0].sources[0], current: slots[0].sources[0].packages[1], host: 'ssh', mcpHostName: 'Build host',
+  const remote = scope.McpList({
+    source: slots[0].sources[0], current: slots[0].sources[0].packages[1], packageKey: 'plugins/two', host: 'ssh', mcpHostName: 'Build host',
     mcpProfiles: [{ profile: codex, target: 'codex' }],
     mcpStatuses: { ['team\0codex']: { rows: [{ packageKey: 'plugins/two', name: 'two-mcp', status: 'login-required' }] } },
     mcpErrors: {}, mcpPending: {},
     onRefreshMcp: (...args) => { manualRefresh = args }, onRetryMcp: () => assert.fail('remote rows must not auto-login'),
   })
+  assert.ok(findNode(remote, node => node.props?.className === 'kode-mcp-item' && node.props.key === 'second-mcp'), 'every declared MCP stays listed even without a status row')
   assert.match(visibleText(remote), /手动配置/)
   assert.match(visibleText(remote), /浏览器不会跨主机自动登录/)
   assert.doesNotMatch(visibleText(remote), /重试登录/)
@@ -706,25 +718,28 @@ test('Kode sidebar brand registers the Kode mark and name inside desktop embed',
   const markEntry = c.ctx.slots.entries('sidebar.brand.mark').find(row => row.options.name === 'sidebar.brand.mark')
   assert.ok(markEntry, 'sidebar.brand.mark must be registered when embedded in Kode')
   const markEl = markEntry.component({ size: 24 })
-  assert.equal(markEl.type, 'img')
-  assert.equal(markEl.props.width, 55)
-  assert.equal(markEl.props.height, 24)
-  assert.equal(markEl.props.src, '/api/kode/avatars/media?type=brand&state=idle')
-  assert.ok(markEl.props.className.includes('kode-brand-logo'))
+  const mark = markEl.type(markEl.props)
+  assert.equal(mark.type, 'span')
+  assert.ok(mark.props.className.includes('kode-brand-mark'))
+  assert.deepEqual({ ...mark.props.style, '--kode-brand-ink': undefined }, { width: 63, height: 26, '--kode-brand-ink': undefined })
+  assert.equal(mark.props.style['--kode-brand-ink'], 'url("/api/kode/avatars/media?type=brand-ink&state=idle")')
+  assert.equal(mark.children[1].props.src, '/api/kode/avatars/media?type=brand-red&state=idle')
   const heroEntry = c.ctx.slots.entries('conversation.hero.brand.mark').find(row => row.options.name === 'conversation.hero.brand.mark')
   const heroEl = heroEntry.component({ size: 34, className: 'native-hero-mark' })
-  assert.equal(heroEl.props.src, markEl.props.src)
-  assert.equal(heroEl.props.width, 78)
+  assert.equal(heroEl.children[1].props.src, mark.children[1].props.src)
+  assert.deepEqual([heroEl.props.style.width, heroEl.props.style.height], [75, 31])
   assert.ok(heroEl.props.className.includes('native-hero-mark'))
+  assert.doesNotMatch(source, /type=brand&state/)
 
   const nameEntry = c.ctx.slots.entries('sidebar.brand.name').find(row => row.options.name === 'sidebar.brand.name')
   assert.ok(nameEntry, 'sidebar.brand.name must be registered when embedded in Kode')
   const nameEl = nameEntry.component()
   assert.equal(nameEl.type, 'span')
   assert.ok(nameEl.props.className.includes('kode-brand-name'))
-  assert.match(JSON.stringify(nameEl), /Kode/)
-  assert.match(JSON.stringify(nameEl), /Harness/)
-  assert.match(JSON.stringify(nameEl), /Powered by dsh/)
+  assert.equal(visibleText(nameEl).trim(), 'Harness')
+  assert.doesNotMatch(JSON.stringify(nameEl), /Kode|Powered by dsh/)
+  assert.match(source, /\[class\*="brandIdentity"\]:has\(\.kode-brand-name\),\[class\*="brandName"\]:has\(>\.kode-brand-name\)\{height:26px\}/)
+  assert.doesNotMatch(source, /logoRow"\]:has\(\.kode-brand-name\)/)
 })
 
 test('cross-host arrival waits for both catalogs and binds subscriptions before cancelling draft restoration', () => {
