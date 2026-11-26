@@ -291,7 +291,7 @@
                 h(Button, { size: 'sm', variant: 'outline', disabled: busy || Boolean(draft && !editing), 'aria-label': `编辑 ${presentation.name}`, 'aria-expanded': editing,
                   onClick: () => editing ? setDraft(null) : edit(source) }, editing ? '收起' : '编辑'),
                 h(Button, { size: 'sm', variant: 'outline', disabled: busy || Boolean(draft), 'aria-label': `更新并同步 ${presentation.name}`, onClick: () => void operate({ action: 'sync-source', id: source.id }) }, '同步'),
-                h(Button, { size: 'sm', variant: 'outline', className: 'kode-source-remove', disabled: busy || Boolean(draft), 'aria-label': `移除 ${presentation.name}`,
+                h(Button, { size: 'sm', variant: 'primary', className: 'kode-source-remove', disabled: busy || Boolean(draft), 'aria-label': `移除 ${presentation.name}`,
                   onClick: () => void operate({ action: 'remove-source', id: source.id }).then(ok => { if (ok && previewId === source.id) setPreviewId(null) }) },
                 '移除'))),
             h(Failure, { text: source.error }),

@@ -233,6 +233,7 @@ fn requested_version(headers: &HeaderMap) -> Result<u32> {
 }
 const CANCEL_FEATURE: &str = "input_cancellation_v1";
 const DELIVERY_FEATURE: &str = "delivery_observations_v1";
+const QUEUED_MESSAGE_FEATURE: &str = "queued_message_v1";
 const MESSAGE_TITLE_FEATURE: &str = "message_title_v1";
 #[derive(Default)]
 struct DeliveryLink {
@@ -241,11 +242,13 @@ struct DeliveryLink {
     cancel_enabled: bool,
     cancel_after: String,
     message_titles: bool,
+    queued_messages: bool,
 }
 impl DeliveryLink {
     fn negotiate(&mut self, features: &[String]) {
         self.enabled = features.iter().any(|feature| feature == DELIVERY_FEATURE);
         self.cancel_enabled = features.iter().any(|feature| feature == CANCEL_FEATURE);
+        self.queued_messages = features.iter().any(|feature| feature == QUEUED_MESSAGE_FEATURE);
         self.message_titles = features.iter().any(|feature| feature == MESSAGE_TITLE_FEATURE);
     }
 
@@ -256,6 +259,19 @@ impl DeliveryLink {
         sent: &mut HashMap<String, Status>,
     ) -> Result<Vec<Frame>> {
         let mut frames = frames(hub, peer, sent)?;
+        if !self.queued_messages {
+            let mut supported = Vec::with_capacity(frames.len());
+            for frame in frames {
+                if let Frame::Message { message } = &frame {
+                    if !message.interrupt {
+                        hub.receipt(peer, &message.id, Status::Rejected, Some("Peer does not support non-interrupting delivery".into()))?;
+                        continue;
+                    }
+                }
+                supported.push(frame);
+            }
+            frames = supported;
+        }
         if !self.message_titles {
             for frame in &mut frames {
                 if let Frame::Message { message } = frame {
@@ -288,7 +304,7 @@ impl DeliveryLink {
 }
 fn capabilities() -> Frame {
     Frame::Capabilities {
-        features: vec![DELIVERY_FEATURE.into(), CANCEL_FEATURE.into(), MESSAGE_TITLE_FEATURE.into()],
+        features: vec![DELIVERY_FEATURE.into(), CANCEL_FEATURE.into(), MESSAGE_TITLE_FEATURE.into(), QUEUED_MESSAGE_FEATURE.into()],
     }
 }
 fn check_capabilities(text: &str) -> Result<Vec<String>> {
@@ -563,7 +579,7 @@ mod protocol_tests {
         .is_err());
         assert_eq!(
             check_capabilities(&serde_json::to_string(&capabilities()).unwrap()).unwrap(),
-            [DELIVERY_FEATURE, CANCEL_FEATURE, MESSAGE_TITLE_FEATURE]
+            [DELIVERY_FEATURE, CANCEL_FEATURE, MESSAGE_TITLE_FEATURE, QUEUED_MESSAGE_FEATURE]
         );
     }
     #[tokio::test]
@@ -583,6 +599,7 @@ mod protocol_tests {
             title: None,
             idempotency_key: "receipt-replay".into(),
             in_reply_to: None,
+            interrupt: true,
             hop_count: 0,
             created_at: now(),
             expires_at: now() + 60_000,
@@ -692,6 +709,26 @@ mod protocol_tests {
         server.await.unwrap();
     }
     #[tokio::test]
+    async fn queue_only_is_sent_to_capable_peers_and_rejected_for_legacy_peers() {
+        let (hub, _ctx, _root) = fixture();
+        hub.store.register(RegisterRequest {
+            session_id: "worker".into(), title: "Test".into(), runtime: "dsh".into(), owner_token: None,
+        }).unwrap();
+        let req = SendRequest {
+            source: None, target: Address { node_id: "old".into(), session_id: "other".into() },
+            content: "After this turn".into(), title: None, idempotency_key: "queue".into(),
+            in_reply_to: None, interrupt: false, ttl_seconds: 300,
+        };
+        let message = hub.send("worker", req).unwrap();
+        let mut link = DeliveryLink::default();
+        link.negotiate(&[QUEUED_MESSAGE_FEATURE.into()]);
+        let frames = link.frames(&hub, "old", &mut HashMap::new()).unwrap();
+        assert!(frames.iter().any(|f| matches!(f, Frame::Message { message } if !message.interrupt)));
+        let frames = DeliveryLink::default().frames(&hub, "old", &mut HashMap::new()).unwrap();
+        assert!(!frames.iter().any(|f| matches!(f, Frame::Message { .. })));
+        assert_eq!(hub.store.get(&message.id).unwrap().unwrap().status, Status::Rejected);
+    }
+    #[tokio::test]
     async fn new_server_preserves_legacy_wire_and_requires_v2_capabilities() {
         let (hub, _ctx, _root) = fixture();
         let registered = hub
@@ -710,6 +747,7 @@ mod protocol_tests {
             title: Some("Fixture review".into()),
             idempotency_key: "title-negotiation".into(),
             in_reply_to: None,
+            interrupt: true,
             ttl_seconds: 300,
         }).unwrap();
         let expected = json!({"type":"directory","sessions":[{"address":{"node_id":"new","session_id":"worker"},"title":"Fixture","runtime":"dsh","online":true,"updated_at":registered.session.updated_at}]});
@@ -745,7 +783,7 @@ mod protocol_tests {
                 let caps = ws.next().await.unwrap().unwrap().into_text().unwrap();
                 assert_eq!(
                     check_capabilities(&caps).unwrap(),
-                    [DELIVERY_FEATURE, CANCEL_FEATURE, MESSAGE_TITLE_FEATURE]
+                    [DELIVERY_FEATURE, CANCEL_FEATURE, MESSAGE_TITLE_FEATURE, QUEUED_MESSAGE_FEATURE]
                 );
                 assert!(tokio::time::timeout(Duration::from_millis(50), ws.next())
                     .await

@@ -281,6 +281,7 @@ impl Store {
                 || (p.title != m.title && !title_may_be_omitted && !legacy_assignment)
                 || p.idempotency_key != m.idempotency_key
                 || p.in_reply_to != m.in_reply_to
+                || p.interrupt != m.interrupt
                 || p.hop_count != m.hop_count
                 || p.expires_at.saturating_sub(p.created_at)
                     != m.expires_at.saturating_sub(m.created_at)
@@ -390,6 +391,7 @@ mod query_tests {
             title: None,
             idempotency_key: id.into(),
             in_reply_to: None,
+            interrupt: true,
             hop_count: 0,
             created_at: now(),
             expires_at: now() + 60_000,

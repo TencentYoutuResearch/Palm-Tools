@@ -150,7 +150,7 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
 async fn node(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
     auth(&hub, &h)?;
     let (executable, built_at) = server_binary();
-    Ok(Json(json!({"node_id":hub.node_id(),"protocol_version":1,"delivery_tracking":true,"input_cancellation":true,"message_titles":true,"managed_peers":true,
+    Ok(Json(json!({"node_id":hub.node_id(),"protocol_version":1,"delivery_tracking":true,"input_cancellation":true,"message_titles":true,"queued_messages":true,"managed_peers":true,
         "pid":std::process::id(),"executable":executable,"built_at":built_at})))
 }
 /// Executable path and its modification time (Unix seconds), so a host app
@@ -486,10 +486,16 @@ async fn offline(
     hub.store.offline(&id)?;
     Ok(Json(json!({"ok":true})))
 }
+#[derive(serde::Deserialize)]
+struct ClaimOptions {
+    #[serde(default)]
+    queued_messages: bool,
+}
 async fn claim(
     State(hub): State<Arc<Hub>>,
     h: HeaderMap,
     Path(id): Path<String>,
+    Query(options): Query<ClaimOptions>,
 ) -> Result<Json<serde_json::Value>> {
     owner(&hub, &h, &id)?;
     if hub.native.lock().contains_key(&id) {
@@ -498,7 +504,7 @@ async fn claim(
             "native runtime owns this inbox".into(),
         ));
     }
-    Ok(Json(json!({"messages":hub.claim(&id)?})))
+    Ok(Json(json!({"messages":hub.claim_for_runtime(&id, options.queued_messages)?})))
 }
 async fn pending(
     State(hub): State<Arc<Hub>>,

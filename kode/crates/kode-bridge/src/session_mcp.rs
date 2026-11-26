@@ -110,7 +110,7 @@ impl Client {
             .into_iter()
             .map(|tool| json!({"name":tool["name"],"description":tool["description"],"inputSchema":tool["inputSchema"],"x-kode-extension":true}))
             .collect();
-        let builtin: Vec<Value> = tool_definitions(capabilities["message_titles"] == true)
+        let builtin: Vec<Value> = tool_definitions(capabilities["message_titles"] == true, capabilities["queued_messages"] == true)
             .into_iter()
             .filter(|tool| {
                 if matches!(tool["name"].as_str(), Some("kode_sessions_cancel_input" | "kode_sessions_cancellation_status")) && capabilities["input_cancellation"] != true { return false; }
@@ -159,6 +159,7 @@ impl Client {
                     "target":{"node_id":args["node_id"],"session_id":args["session_id"]},
                     "content":args["content"],"idempotency_key":args["idempotency_key"],"in_reply_to":args["in_reply_to"]
                 });
+                if let Some(interrupt) = args.get("interrupt") { body["interrupt"] = interrupt.clone(); }
                 if let Some(title) = args.get("title").filter(|_| tool["inputSchema"]["properties"].get("title").is_some()) {
                     body["title"] = title.clone();
                 }
@@ -191,12 +192,15 @@ impl Client {
 fn definition(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({"name":name,"description":description,"inputSchema":{"type":"object","additionalProperties":false,"properties":properties,"required":required}})
 }
-fn tool_definitions(message_titles: bool) -> Vec<Value> {
+fn tool_definitions(message_titles: bool, queued_messages: bool) -> Vec<Value> {
     let mut send_properties = json!({
         "node_id":{"type":"string"},"session_id":{"type":"string"},"content":{"type":"string"},
         "idempotency_key":{"type":"string"},"in_reply_to":{"type":"string"}
     });
     let mut send_description = "Send a request or reply to another conversation. Delivery is not task completion. Reuse idempotency_key only for a retry; reply with in_reply_to.".to_owned();
+    if queued_messages {
+        send_properties["interrupt"] = json!({"type":"boolean","description":"Set false to queue until the recipient finishes its current turn. Defaults to true."});
+    }
     if message_titles {
         send_description.push_str(" Write a concise title and put the description in content.");
         send_properties["title"] = json!({

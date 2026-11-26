@@ -270,10 +270,17 @@ test('unchanged unloaded conversations are not re-read every pass, changed or un
  assert.equal(reads,1)
  row={...row,updatedAt:2};await bridge.publish()
  assert.equal(reads,2)
+ const call = backend.call
+ row={...row,updatedAt:3}
+ backend.call=async(path,body)=>{ if(body?.sessions?.[0]?.session_id==='cold')throw Error('service restarting'); return call(path,body) }
+ await assert.rejects(bridge.publish(),/service restarting/)
+ backend.call=call
+ await bridge.publish()
+ assert.equal(reads,4, 'retry the failed publication even though the catalog row is unchanged')
  archived.push('cold');await bridge.publish()
  assert.equal(last(),'exited')
  archived.pop();await bridge.publish()
- assert.equal(reads,3);assert.notEqual(last(),'exited')
+ assert.equal(reads,5);assert.notEqual(last(),'exited')
  // Archiving and unarchiving here edit Kode's shared open list; the first pass
  // only took the baseline, so nothing was added for what was open before.
  assert.deepEqual(index.gui.tabs.map(tab=>tab.dsh_session_id),['cold'])

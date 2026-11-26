@@ -16,18 +16,19 @@
     }
   }
   // `hint` names what the leading icon shows: a tooltip for pointers and hidden text for screen readers.
-  function SessionPanelRow({ icon, label, hint, detail, detailTitle = detail, trailing, actionLabel, onClick, expanded, href, compact, tone }) {
+  function SessionPanelRow({ icon, label, hint, preview, detail, detailTitle = detail, trailing, actionLabel, onClick, expanded, href, compact, tone }) {
     const body = [
-      h('span', { key: 'icon', 'data-row-part': 'icon', 'aria-hidden': true, title: hint }, icon),
+      h('span', { key: 'icon', 'data-row-part': 'icon', 'aria-hidden': true, title: preview ? undefined : hint }, icon),
       h('span', { key: 'label', 'data-row-part': 'lines' },
-        h('span', { 'data-row-part': 'content', title: label }, label),
+        h('span', { 'data-row-part': 'content', title: preview ? undefined : label }, label),
         hint && h('span', { className: 'kode-sr-only' }, `，${hint}`),
-        detail && h('span', { 'data-row-part': 'detail', title: detailTitle }, detail)),
+        detail && h('span', { 'data-row-part': 'detail', title: preview ? undefined : detailTitle }, detail)),
     ]
-    return h('div', { 'data-session-panel-row': '', 'data-kode-panel-row': '', 'data-kode-compact': compact ? '' : undefined, 'data-kode-tone': tone },
-      href ? h('a', { 'data-row-part': 'body', className: 'kode-panel-link', href, target: '_blank', rel: 'noopener noreferrer', 'aria-label': actionLabel }, body) :
+    const anchor = href ? h('a', { 'data-row-part': 'body', className: 'kode-panel-link', href, target: '_blank', rel: 'noopener noreferrer', 'aria-label': actionLabel }, body) :
         onClick ? h('button', { type: 'button', 'data-row-part': 'body', 'aria-label': actionLabel, 'aria-expanded': expanded, onClick }, body) :
-          h('span', { 'data-row-part': 'body' }, body),
+          h('span', { 'data-row-part': 'body' }, body)
+    return h('div', { 'data-session-panel-row': '', 'data-kode-panel-row': '', 'data-kode-compact': compact ? '' : undefined, 'data-kode-tone': tone },
+      preview ? h(Tooltip, { label: h('span', {style:{display:'grid',gap:3,whiteSpace:'normal',overflowWrap:'anywhere'}}, h('strong',null,preview[0]), ...preview.slice(1).map((line,i) => h('span',{key:i},line))), side: 'bottom', maxWidth: 360, delayMs: 350, portal: true }, anchor) : anchor,
       trailing && h('span', { 'data-row-part': 'trailing' }, trailing))
   }
   function SessionGitLocation({ git }) {
@@ -137,6 +138,7 @@
         const kind = relayKinds[relayKind(row, messages)], peer = relayPeer(row, nameOf), title = relayTitle(row)
         return { icon: h('span', { className: 'kode-relay-icon', 'data-relay-kind': relayKind(row, messages) }, h(kind.icon, { size: 16 })),
           label: title, hint: kind.label, tone: kind.tone,
+          preview: [title, peer.direction + ' ' + peer.name + ' · ' + kind.label],
           detail: h('span', { className: 'kode-relay-peer' }, h('span', { className: 'kode-relay-direction' }, peer.direction), ' ', peer.name),
           detailTitle: `${peer.direction} ${peer.name}`, actionLabel: `${title}，${kind.label}，${peer.direction} ${peer.name}`,
           trailing: h(IconChevronDownOutlineRegular, { size: 14, 'aria-hidden': true }) }
@@ -161,6 +163,7 @@
     const rows = reviews?.filter(row => /^https?:\/\//i.test(row.url) && !tracked.has(row.url)).toReversed()
     return rows?.length ? h(PanelList, { key: cardKey(sessionId), rows, renderFactorySlot,
       renderRow: row => h(SessionPanelRow, { key: row.url, href: row.url, compact: true, icon: h(IconBranchOutlineRegular, { size: 16 }),
+        preview: [`${row.repo} · ${row.kind} #${row.number}`, row.url],
         label: `${row.kind} #${row.number}`, detail: row.repo, actionLabel: `打开 ${row.repo} 的 ${row.kind} #${row.number}`,
         trailing: h(IconChevronRightOutlineRegular, { size: 14, 'aria-hidden': true }) }),
     }) : null

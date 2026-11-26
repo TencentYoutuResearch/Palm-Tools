@@ -282,7 +282,7 @@ test('incoming session messages steer a ready native turn without losing durable
     const own = (await admin.call('/api/v1/messaging/sessions')).sessions.find(row => row.address.session_id === id)
     const other = await admin.call('/api/v1/messaging/sessions', { session_id: `peer-${randomUUID()}`, title: 'Reviewer', runtime: 'external' })
     const peer = admin.forSession(other.owner_token)
-    const send = (content, title) => peer.call('/api/v1/messaging/messages', { target: own.address, content, title, idempotency_key: randomUUID() })
+    const send = (content, title, interrupt) => peer.call('/api/v1/messaging/messages', { target: own.address, content, title, interrupt, idempotency_key: randomUUID() })
 
     const active = await send('Adjust the running work using this review', 'Review feedback')
     await waitForGate(flushStarted, 'runtime never flushed queued message')
@@ -305,13 +305,14 @@ test('incoming session messages steer a ready native turn without losing durable
     assert.equal(consumed.input_id, expectedId)
     assert.equal(consumed.event_seq, consumedSeq)
 
-    for (const [status, ready, content] of [
+    for (const [status, ready, content, interrupt] of [
       ['idle', true, 'Start a later turn'],
+      ['running', true, 'Do not interrupt active work', false],
       ['running', false, 'Queue when mid-turn admission is unavailable'],
     ]) {
       agent.status = status
       steeringReady = ready
-      const message = await send(content)
+      const message = await send(content, undefined, interrupt)
       await until(() => admin.call(endpoint(message)), row => row.status === 'accepted')
       const evidence = await delivery(message)
       assert.equal(evidence.phase, 'queued')
@@ -319,7 +320,7 @@ test('incoming session messages steer a ready native turn without losing durable
       assert.equal(submitted.at(-1).target, 'next-turn')
       assert.equal(submitted.at(-1).message.id, evidence.input_id)
     }
-    assert.equal(submitted.length, 3, 'one runtime input per message even after delivery recovery')
+    assert.equal(submitted.length, 4, 'one runtime input per message even after delivery recovery')
 
     agent.status = 'running'
     steeringReady = true

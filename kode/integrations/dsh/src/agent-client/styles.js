@@ -342,11 +342,12 @@ html[data-kode-embed] body{-webkit-user-select:none;user-select:none;cursor:defa
 .kode-brand-mark>*{position:absolute;inset:0;display:block;width:100%;height:100%}
 .kode-brand-ink{background:currentColor;-webkit-mask:var(--kode-brand-ink) center/contain no-repeat;mask:var(--kode-brand-ink) center/contain no-repeat}
 .kode-brand-mark>img{object-fit:contain;-webkit-user-drag:none}
-.kode-brand-name{display:inline-flex;align-items:center;box-sizing:border-box;height:26px;font-size:18px;font-weight:600;line-height:22px;transform:translateY(2px);letter-spacing:-0.015em;white-space:nowrap;user-select:none;color:var(--dsw-alias-label-secondary,#A8AEA7);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Avenir Next",system-ui,sans-serif}
-/* dsh fixes the brand seat at 24px for its own wordmark; Kode's pair grows within the unchanged 60px row. */
-[class*="brandIdentity"]:has(.kode-brand-name),[class*="brandName"]:has(>.kode-brand-name){height:26px}
+.kode-brand-name{display:inline-flex;align-items:center;box-sizing:border-box;height:24px;font-size:18px;font-weight:600;line-height:22px;transform:translateY(2px);letter-spacing:-0.015em;white-space:nowrap;user-select:none;color:var(--dsw-alias-label-secondary,#A8AEA7);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Avenir Next",system-ui,sans-serif}
+/* The 512px app tile has 46px transparent margins; match its visible face to the 24px wordmark. */
+.kode-sidebar-app-icon{display:block;flex:none;transform:scale(1.21)}
+.kode-sidebar-brand-mark{display:inline-flex;align-items:center;gap:8px;margin-inline-start:4px}
 [class*="brandIdentity"]:has(.kode-brand-name){gap:5px}
-[data-sidebar-toggle] .kode-sidebar-brand-mark{width:24px!important;height:24px!important;border-radius:6px;background:url("/api/kode/avatars/media?type=kode&state=idle") center/contain no-repeat}
+[data-sidebar-toggle] .kode-sidebar-brand-mark{width:24px!important;height:24px!important;margin-inline-start:0;border-radius:6px;background:url("/api/kode/avatars/media?type=kode&state=idle") center/contain no-repeat}
 [data-sidebar-toggle] .kode-sidebar-brand-mark>*{display:none}
 html:not([data-windows-titlebar]) [class*="root"][class*="collapsed"]:has([data-sidebar-toggle]){padding:12px 10px 8px}
 html:not([data-windows-titlebar]) [class*="root"][class*="collapsed"]:has([data-sidebar-toggle]) [class*="logoRow"],
@@ -549,7 +550,7 @@ button.kode-mcp-agent[data-status=login][data-failed=true],.kode-mcp-agent[data-
 .kode-source-about dd{margin:0;font-size:13px;line-height:20px;white-space:pre-wrap;overflow-wrap:anywhere}
 .kode-source-actions>button{width:auto;min-width:0}
 /* Same tokens as dsh's plugin manager uninstall button (outline + .danger): red label, red outline, red-tinted hover. */
-.kode-source-remove{color:var(--dsw-alias-state-error-primary);--dsh-button-outline-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 30%,transparent);--dsw-alias-interactive-bg-hover:color-mix(in srgb,var(--dsw-alias-state-error-primary) 8%,transparent)}
+.kode-source-remove{--dsw-alias-button-primary-fill:var(--dsw-alias-state-error-primary);--dsw-alias-button-primary-hover:var(--dsw-alias-state-error-primary)}
 .kode-delete:hover:not(:disabled){background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 10%,transparent)}
 .kode-avatar-editor{display:flex;flex-direction:column;gap:12px;padding:8px 0}
 .kode-avatar-content{display:flex;flex-direction:column;gap:12px}

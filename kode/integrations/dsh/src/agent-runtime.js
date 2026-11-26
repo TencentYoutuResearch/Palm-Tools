@@ -1,3 +1,4 @@
+import { asyncQuestion } from './codex-async-question.js'
 /** Native CLI protocols and model discovery; the Kode driver owns inbox scheduling and the shell renders canonical events. */
 import { nativeSubagentRecord } from './native-subagents.js'
 import { randomUUID } from 'node:crypto'
@@ -407,6 +408,7 @@ export class AgentRuntimeAdapter {
       if (context.length) appendPluginRecord(agent.session, 'plugin:kode/shell-context-consumed', { ids: context.map(row => row.id) })
       await agent.ctx.parallel('session/flush', agent.session)
       let text = '', reasoning = '', textIndex, reasoningIndex, textItemId, nextIndex = 0
+      const shownQuestions = new Set()
       const streamed = new Set(), reasoningChannels=new Map()
       function* closeSegment() {
         if (reasoningIndex === undefined && textIndex === undefined) return
@@ -419,6 +421,22 @@ export class AgentRuntimeAdapter {
       for await (const event of runtime.turn(input, { model: options.model, effort: options.reasoningEffort, fast, serviceTier, signal, command, skillNames, observe: options.nativeContinuation })) {
         const { method, params } = event
         if (method === 'turn/started') options.onNativeTurnReady?.()
+        const questions = codex && (method === 'item/started' || method === 'item/completed') && asyncQuestion(params.item)
+        if (questions && !shownQuestions.has(params.item.id)) {
+          yield* closeSegment()
+          options.prepareStep?.()
+          const callId = 'kode-async:' + JSON.stringify([params.threadId,params.turnId,params.item.id])
+          this.logCall(agent,callId,'ask_user_question',{questions})
+          this.logResult(agent,callId,[{type:'text',text:JSON.stringify({pending:true,callId})}])
+          shownQuestions.add(params.item.id)
+        }
+        // Codex also emits a plaintext copy of a structured async question.
+        // Its durable, answerable DSH tool row is the sole transcript entry.
+        if (questions || (method === 'item/agentMessage/delta' && shownQuestions.has(params.itemId))
+            || (method === 'item/completed' && shownQuestions.has(params.item?.id))) {
+          this.recordNative(agent.session, { ...this.boundary(agent), event })
+          continue
+        }
         const messageOutput = method === 'item/agentMessage/delta' && params.delta || method === 'item/completed' && params.item?.type === 'agentMessage' && !streamed.has(params.item.id) && params.item.text
         const thoughtOutput = ['item/reasoning/summaryTextDelta', 'item/reasoning/textDelta'].includes(method) && params.delta && (!reasoningChannels.has(params.itemId ?? 'reasoning') || reasoningChannels.get(params.itemId ?? 'reasoning') === method)
         const toolOutput = params.item && ['commandExecution', 'fileChange', 'mcpToolCall', 'webSearch', 'imageView', 'collabAgentToolCall'].includes(params.item.type)

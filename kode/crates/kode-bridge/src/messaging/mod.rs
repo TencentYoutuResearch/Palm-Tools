@@ -292,6 +292,7 @@ impl Hub {
             title: req.title.map(|title| title.trim().to_owned()),
             idempotency_key: req.idempotency_key,
             in_reply_to: req.in_reply_to,
+            interrupt: req.interrupt,
             hop_count,
             created_at: now(),
             expires_at: now() + req.ttl_seconds * 1000,
@@ -362,6 +363,9 @@ impl Hub {
         self.store.save(&m)
     }
     fn claim(&self, session: &str) -> Result<Vec<Message>> {
+        self.claim_for_runtime(session, true)
+    }
+    fn claim_for_runtime(&self, session: &str, queued_messages: bool) -> Result<Vec<Message>> {
         let _guard = self.gate.lock();
         self.store.heartbeat(session)?;
         let mut pending = Vec::new();
@@ -372,6 +376,12 @@ impl Hub {
             {
                 if m.expires_at <= now() {
                     m.status = Status::Expired;
+                    self.store.save(&m)?;
+                    continue;
+                }
+                if !m.interrupt && !queued_messages {
+                    m.status = Status::Rejected;
+                    m.detail = Some("Update the receiving runtime for non-interrupting delivery".into());
                     self.store.save(&m)?;
                     continue;
                 }

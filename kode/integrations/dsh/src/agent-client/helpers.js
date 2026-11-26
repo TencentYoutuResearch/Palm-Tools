@@ -95,9 +95,10 @@ async function parseHostJson(response) {
     throw new Error(`主机返回了无效响应（HTTP ${response.status ?? '未知'}），请检查连接后重试。`)
   }
 }
-async function recoverHostService(host, { request, readSettings, delay, signal, progress }) {
+async function recoverHostService(host, { request, readSettings, delay, signal, progress, confirmedSessions }) {
   signal.throwIfAborted()
-  let job = await request({ action: 'recover-service', id: host })
+  let job = await request({ action: 'recover-service', id: host, ...(confirmedSessions ? { confirmedSessions } : {}) })
+  if (job.status === 'confirmation-required') return job
   const deadline = Date.now() + (host === 'local' ? 90000 : 1800000)
   while (Date.now() < deadline) {
     signal.throwIfAborted()

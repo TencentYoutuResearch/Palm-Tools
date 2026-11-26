@@ -550,7 +550,7 @@ test('Plugin and Skills sources stay a multi-item list with an on-demand editor 
  assert.equal(actions.children[2].props['aria-label'],'更新并同步 Remote Toolkit')
  assert.equal(actions.children[3].props.className,'kode-source-remove')
  assert.match(source,/\.kode-agent-row-actions\{[^}]*justify-content:flex-end/)
- assert.match(source,/\.kode-source-remove\{[^}]*color:var\(--dsw-alias-state-error-primary\)/)
+  assert.match(source,/\.kode-source-remove\{--dsw-alias-button-primary-fill:var\(--dsw-alias-state-error-primary\)/)
  const summary=findNode(closed,node=>node.props?.className==='kode-source-summary');summary.props.onClick()
  const preview=render(),dialog=findNode(preview,node=>node.type==='modal'&&node.props.open);assert.ok(dialog)
  const details=visibleText(dialog);assert.match(details,/Agent 同步/);assert.match(details,/DeepSeek Harness/);assert.match(details,/Skills 已同步/);assert.match(details,/example-skill/);assert.match(details,/Skill summary/);assert.match(details,/Subagents/);assert.match(details,/reviewer/);assert.match(details,/Reviews changes/);assert.match(details,/PreToolUse/);assert.match(details,/Hook summary/);assert.match(details,/\/build/);assert.match(details,/discipline/);assert.match(details,/Rule summary/);assert.match(details,/remote-mcp/);assert.match(details,/Long remote summary/);assert.match(details,/https:\/\/example.test\/remote/)
@@ -862,10 +862,15 @@ test('Kode sidebar brand registers the Kode mark and name inside desktop embed',
   const markEntry = c.ctx.slots.entries('sidebar.brand.mark').find(row => row.options.name === 'sidebar.brand.mark')
   assert.ok(markEntry, 'sidebar.brand.mark must be registered when embedded in Kode')
   const markEl = markEntry.component({ size: 24 })
-  const mark = markEl.type(markEl.props)
+  assert.equal(markEl.props.className, 'kode-sidebar-brand-mark')
+  assert.equal(markEl.children[0].props.src, '/api/kode/avatars/media?type=kode&state=idle')
+  assert.deepEqual([markEl.children[0].props.width, markEl.children[0].props.height], [24, 24])
+  assert.equal(markEl.children[0].props.className, 'kode-sidebar-app-icon')
+  const wordmark = markEl.children[1]
+  const mark = wordmark.type(wordmark.props)
   assert.equal(mark.type, 'span')
   assert.ok(mark.props.className.includes('kode-brand-mark'))
-  assert.deepEqual({ ...mark.props.style, '--kode-brand-ink': undefined }, { width: 63, height: 26, '--kode-brand-ink': undefined })
+  assert.deepEqual({ ...mark.props.style, '--kode-brand-ink': undefined }, { width: 58, height: 24, '--kode-brand-ink': undefined })
   assert.equal(mark.props.style['--kode-brand-ink'], 'url("/api/kode/avatars/media?type=brand-ink&state=idle")')
   assert.equal(mark.children[1].props.src, '/api/kode/avatars/media?type=brand-red&state=idle')
   const heroEntry = c.ctx.slots.entries('conversation.hero.brand.mark').find(row => row.options.name === 'conversation.hero.brand.mark')
@@ -882,7 +887,7 @@ test('Kode sidebar brand registers the Kode mark and name inside desktop embed',
   assert.ok(nameEl.props.className.includes('kode-brand-name'))
   assert.equal(visibleText(nameEl).trim(), 'Harness')
   assert.doesNotMatch(JSON.stringify(nameEl), /Kode|Powered by dsh/)
-  assert.match(source, /\[class\*="brandIdentity"\]:has\(\.kode-brand-name\),\[class\*="brandName"\]:has\(>\.kode-brand-name\)\{height:26px\}/)
+  assert.match(source, /kode-sidebar-brand-mark\{[^}]*gap:8px;margin-inline-start:4px/)
   assert.doesNotMatch(source, /logoRow"\]:has\(\.kode-brand-name\)/)
 })
 
@@ -2389,6 +2394,19 @@ test('MCP login read-back merges a partial row and status reads cannot overwrite
 test('plugin switches drop the duplicate state label and Remove uses the native danger outline', () => {
   assert.doesNotMatch(source, /enabled \? '已启用' : '已停用'/)
   assert.match(source, /!key && h\('span', null, '需更新服务'\)/)
-  assert.match(source, /\.kode-source-remove\{color:var\(--dsw-alias-state-error-primary\);--dsh-button-outline-color:color-mix\(in srgb,var\(--dsw-alias-state-error-primary\) 30%,transparent\);--dsw-alias-interactive-bg-hover:color-mix\(in srgb,var\(--dsw-alias-state-error-primary\) 8%,transparent\)\}/)
+  assert.match(source,/\.kode-source-remove\{--dsw-alias-button-primary-fill:var\(--dsw-alias-state-error-primary\)/)
   assert.doesNotMatch(source, /kode-mcp-manual/)
+})
+
+test('current host requests and replies render as communication cards when they wake a turn', async () => {
+  const { relayInput } = await import('../src/message-pages.js')
+  const c = client(), render = c.entry('conversation.chat.node', 'turn-trigger')
+  for (const replyTo of [undefined, 'original']) {
+    const input = relayInput({ id: 'sent', source: { node_id: 'worker', session_id: 'peer' },
+      content: 'body', title: 'Review v1.2', in_reply_to: replyTo }, 'in')
+    const result = render({ node: { data: input }, slots: c.ctx.slots, sessions: c.ctx.sessions })
+    assert.equal(result.props.relay.title, 'Review v1.2')
+    assert.equal(result.props.relay.content, 'body')
+    assert.equal(result.props.relay.replyTo, replyTo)
+  }
 })

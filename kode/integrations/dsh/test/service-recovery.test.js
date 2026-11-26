@@ -8,7 +8,7 @@ import { once } from 'node:events'
 import { createServer } from 'node:net'
 import { Readable } from 'node:stream'
 import vm from 'node:vm'
-import { hasActiveSharedSessions, hasPendingSessions, localRecoverySupported, backendArguments, prepareLocalRecovery, processCommand } from '../src/service-recovery.js'
+import { hasPendingSessions, localRecoverySupported, backendArguments, prepareLocalRecovery, processCommand } from '../src/service-recovery.js'
 import { ProjectHosts } from '../src/project-hosts.js'
 import { registerIntegrationApi } from '../src/integration-api.js'
 import { readAgentClientSource } from '../scripts/build-agent-client.js'
@@ -122,7 +122,7 @@ test('only an idle CLI Web Host can prepare recovery; backend launch arguments r
   } finally { process.argv = argv }
 })
 
-test('Desktop can only restart a configured standalone service and respects active shared sessions', async () => {
+test('Desktop verifies the standalone listener and ignores externally owned sessions', async () => {
   const argv = ['/opt/electron', '/opt/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/index.js'], versions = { electron: '1' }
   const ctx = { get: name => name === 'sessionController' ? { list: async () => ({ items: [] }) } : undefined }
   const config = { url: 'http://127.0.0.1:47870', serverCommand: '/opt/kode-session-server', serverConfig: '/srv/config.json', tokenFile: '/srv/token', backendClient: { call: async path => {
@@ -133,10 +133,42 @@ test('Desktop can only restart a configured standalone service and respects acti
   assert.equal(localRecoverySupported(ctx, argv, { ...config, serverCommand: '/opt/Kode' }, versions), false)
   assert.equal(localRecoverySupported(ctx, argv, config, {}), false)
   assert.equal(localRecoverySupported(ctx, argv, { ...config, url: 'https://server.example' }, versions), false)
-  assert.equal(hasActiveSharedSessions([{ status: 'starting' }, { status: 'idle' }]), true)
-  assert.equal(hasActiveSharedSessions([{ status: 'busy', owner_alive: false }, { status: 'idle' }]), false)
-  await assert.rejects(prepareLocalRecovery(ctx, config, { argv, versions }), /有客户端正在使用共享 Kode 服务/)
-  await assert.rejects(prepareLocalRecovery(ctx, { ...config, backendClient: { call: async () => null } }, { argv, versions }), /无法检查其他客户端/)
+  // The nonexistent listener fails identity verification. Neither client
+  // directory may be consulted along this backend-only path.
+  const unreachable = { ...config, url: 'http://127.0.0.1:1', backendClient: { call: () => assert.fail('read shared sessions') } }
+  await assert.rejects(prepareLocalRecovery({ get: key => key === 'appExit' ? undefined : assert.fail('read local sessions') }, unreachable, { argv, versions }), /进程身份/)
+
+})
+
+test('Web Host interruption requires confirmation scoped to the currently affected sessions', async () => {
+  const argv = ['/opt/node', '/opt/node_modules/@deepseek-ai/dsh/lib/bin.js', 'web']
+  const rows = [{ sessionId: 'a', title: 'Build', running: true }, { sessionId: 'b', title: 'Debug', running: true }]
+  const ctx = { get: key => key === 'appExit' ? () => {} : { list: async () => ({ items: rows }) } }
+  await assert.rejects(prepareLocalRecovery(ctx, {}, { argv, confirmedSessions: ['a'] }), error => {
+    assert.deepEqual(error.affectedSessions, [{ id: 'a', title: 'Build' }, { id: 'b', title: 'Debug' }])
+    return true
+  })
+})
+
+test('confirmation lists the sessions; Cancel leaves the service untouched and confirm retries explicitly', async () => {
+  const sent = []
+  const panel = recoveryPanel('local', { localRecoverySupported: true }, async (_url, options) => {
+    const body = JSON.parse(options.body)
+    sent.push(body)
+    return Response.json(body.confirmedSessions ? { status: 'restarting' } : { status: 'confirmation-required', sessions: [{ id: 'a', title: 'Build' }] })
+  })
+  const click = async label => {
+    const tree = panel.render(), modal = descendants(tree).find(x => x.type === 'Modal')
+    const candidates = [...descendants(tree), ...descendants(modal?.props.footer)]
+    const target = candidates.find(x => x.type === 'Button' && textOf(x) === label)
+    assert.ok(target, label); target.props.onClick(); await new Promise(resolve => setImmediate(resolve))
+  }
+  await click('重启服务')
+  assert.match(textOf(panel.render()), /Build/)
+  await click('取消')
+  assert.equal(sent.length, 1)
+  await click('重启服务'); await click('中断并重启')
+  assert.deepEqual(sent.at(-1).confirmedSessions, ['a'])
 })
 
 test('Desktop restart status is readable while the shared backend is down', async () => {
