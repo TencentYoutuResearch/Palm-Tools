@@ -8230,7 +8230,9 @@ const icon = (0, react_jsx_runtime.jsxs)("svg", { width: 18, height: 18, viewBox
 				anchorSeq,
 				location: options.location ?? contextLocation(context),
 				visibility: options.visibility ?? "visible",
-				groupTree: options.groupTree,
+				groupTree: (kind === "context" || kind === "turn-trigger") && data.source?.kind === "agent-message" && data.source?.senderSessionId?.startsWith("kode:") && data.source?.form === "relay"
+                    ? "input" : kind === "tool-call" && ["kode_sessions_send", "ask_user_question"].includes((data.root?.call ?? data.root)?.name)
+                    ? "turn" : options.groupTree,
 				data
 			};
 		}

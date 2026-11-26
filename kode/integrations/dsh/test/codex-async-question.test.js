@@ -37,7 +37,7 @@ test('Codex continues; DSH keeps one answerable native card and forwards a late 
     session.append('turn/start',{turn:1})
     session.append('request/header',{header:{config:selection,tools:questionHeaderTools([],profile)},reason:'initial'})
     session.append('step/start',{turn:1,step:1})
-    assert.match(await stream({role:'user',id:'first',source:{kind:'user'},content:[{type:'text',text:'ASYNC_QUESTION'}]}),/fixture: ASYNC_QUESTION/)
+    assert.equal(await stream({role:'user',id:'first',source:{kind:'user'},content:[{type:'text',text:'ASYNC_QUESTION'}]}),'fixture: ASYNC_QUESTION')
     const view=()=>ctx.sessionProjections.stateOf(session,'userQuestions').questions
     const [card]=view().active
     assert.equal(view().active.length,1)

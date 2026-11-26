@@ -261,6 +261,7 @@ fn request(node: &str, target: &str, key: &str) -> SendRequest {
         title: None,
         idempotency_key: key.into(),
         in_reply_to: None,
+        interrupt: true,
         ttl_seconds: 300,
     }
 }
@@ -1651,4 +1652,23 @@ async fn event_wait_is_held_open_until_a_message_arrives() {
     let woke = tokio::time::timeout(std::time::Duration::from_secs(5), waiting).await.expect("woken by the commit").unwrap();
     assert!(!woke["events"].as_array().unwrap().is_empty());
     assert!(sent_at.elapsed() < std::time::Duration::from_secs(2), "the waiter wakes on the commit, not a poll");
+}
+
+#[tokio::test]
+async fn queued_delivery_survives_storage_and_never_reaches_an_unaware_receiver() {
+    let s = server("local", vec![]).await;
+    register(&s, "alice").await;
+    register(&s, "bob").await;
+    let mut req = request("local", "bob", "queue-only");
+    req.interrupt = false;
+    let m = s.hub.send("alice", req.clone()).unwrap();
+    assert!(!s.hub.store.get(&m.id).unwrap().unwrap().interrupt);
+    req.interrupt = true;
+    assert!(s.hub.send("alice", req.clone()).is_err());
+    assert!(s.hub.claim_for_runtime("bob", false).unwrap().is_empty());
+    assert_eq!(s.hub.store.get(&m.id).unwrap().unwrap().status, Status::Rejected);
+    req.interrupt = false;
+    req.idempotency_key = "new-send".into();
+    s.hub.send("alice", req).unwrap();
+    assert!(!s.hub.claim_for_runtime("bob", true).unwrap()[0].interrupt);
 }

@@ -29,6 +29,7 @@ const tools = [
     inputSchema: object({
       node_id: { type: 'string' }, session_id: { type: 'string' }, content: { type: 'string' }, idempotency_key: { type: 'string' },
     }, {
+      ...(capabilities.queued_messages === true ? { interrupt: { type: 'boolean', description: 'Set false to queue until the recipient finishes its current turn. Defaults to true.' } } : {}),
       in_reply_to: { type: 'string' }, ...(capabilities.message_titles === true ? { title: messageTitleParameter } : {}),
     }),
   },
@@ -51,7 +52,8 @@ async function execute(name, args, signal) {
   if (name === 'kode_sessions_list') return searchSessions(await client.call(`${prefix}sessions`, undefined, signal), args.query)
   if (name === 'kode_sessions_send') return client.call(`${prefix}messages`, {
     target: { node_id: args.node_id, session_id: args.session_id }, content: args.content,
-    idempotency_key: args.idempotency_key, in_reply_to: args.in_reply_to ?? null,
+    ...(args.interrupt !== undefined ? { interrupt: args.interrupt } : {}),
+      idempotency_key: args.idempotency_key, in_reply_to: args.in_reply_to ?? null,
     ...(capabilities.message_titles === true && args.title !== undefined ? { title: args.title } : {}),
   }, signal)
   if (name === 'kode_sessions_message_read') return messagePage(await client.call(`${prefix}messages/${encodeURIComponent(args.message_id)}`, undefined, signal), args.offset ?? 0)

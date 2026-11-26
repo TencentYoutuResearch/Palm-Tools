@@ -56,6 +56,8 @@ pub struct Message {
     pub title: Option<String>,
     pub idempotency_key: String,
     pub in_reply_to: Option<String>,
+    #[serde(default = "interrupt_default", skip_serializing_if = "is_interrupt_default")]
+    pub interrupt: bool,
     /// Bounds automatic reply chains across runtimes.
     #[serde(default)]
     pub hop_count: u16,
@@ -75,9 +77,13 @@ pub struct SendRequest {
     pub title: Option<String>,
     pub idempotency_key: String,
     pub in_reply_to: Option<String>,
+    #[serde(default = "interrupt_default", skip_serializing_if = "is_interrupt_default")]
+    pub interrupt: bool,
     #[serde(default = "default_ttl")]
     pub ttl_seconds: u64,
 }
+fn interrupt_default() -> bool { true }
+fn is_interrupt_default(value: &bool) -> bool { *value }
 fn default_ttl() -> u64 {
     86400
 }

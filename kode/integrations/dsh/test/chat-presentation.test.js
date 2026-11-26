@@ -130,3 +130,17 @@ test('the running indicator follows acknowledged and pending steering in an open
   }
   assert.doesNotMatch(source, /turn\?\.status === "open"\) return .*?\(RunningStatus,/)
 })
+
+test('communication stays outside the completed process fold, in both directions', () => {
+  const factory = source.slice(source.indexOf('function chatNode(context,'), source.indexOf('//#endregion', source.indexOf('function chatNode(context,')))
+  const scope = vm.createContext({})
+  vm.runInContext(factory, scope)
+  const node = (kind, data) => scope.chatNode({}, kind, 5, data, { location: {} })
+  for (const kind of ['context', 'turn-trigger']) {
+    assert.equal(node(kind, { source: { kind: 'agent-message', form: 'relay', senderSessionId: 'kode:n:s' } }).groupTree, 'input')
+  }
+  const call = { name: 'kode_sessions_send' }
+  for (const root of [call, { call }]) assert.equal(node('tool-call', { root }).groupTree, 'turn')
+  assert.equal(node('tool-call', { root: { call: { name: 'ask_user_question' } } }).groupTree, 'turn')
+  assert.equal(node('tool-call', { root: { name: 'exec_command' } }).groupTree, undefined)
+})

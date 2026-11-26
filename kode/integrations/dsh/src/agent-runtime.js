@@ -421,7 +421,7 @@ export class AgentRuntimeAdapter {
       for await (const event of runtime.turn(input, { model: options.model, effort: options.reasoningEffort, fast, serviceTier, signal, command, skillNames, observe: options.nativeContinuation })) {
         const { method, params } = event
         if (method === 'turn/started') options.onNativeTurnReady?.()
-        const questions = codex && method === 'item/completed' && asyncQuestion(params.item)
+        const questions = codex && (method === 'item/started' || method === 'item/completed') && asyncQuestion(params.item)
         if (questions && !shownQuestions.has(params.item.id)) {
           yield* closeSegment()
           options.prepareStep?.()
@@ -429,6 +429,13 @@ export class AgentRuntimeAdapter {
           this.logCall(agent,callId,'ask_user_question',{questions})
           this.logResult(agent,callId,[{type:'text',text:JSON.stringify({pending:true,callId})}])
           shownQuestions.add(params.item.id)
+        }
+        // Codex also emits a plaintext copy of a structured async question.
+        // Its durable, answerable DSH tool row is the sole transcript entry.
+        if (questions || (method === 'item/agentMessage/delta' && shownQuestions.has(params.itemId))
+            || (method === 'item/completed' && shownQuestions.has(params.item?.id))) {
+          this.recordNative(agent.session, { ...this.boundary(agent), event })
+          continue
         }
         const messageOutput = method === 'item/agentMessage/delta' && params.delta || method === 'item/completed' && params.item?.type === 'agentMessage' && !streamed.has(params.item.id) && params.item.text
         const thoughtOutput = ['item/reasoning/summaryTextDelta', 'item/reasoning/textDelta'].includes(method) && params.delta && (!reasoningChannels.has(params.itemId ?? 'reasoning') || reasoningChannels.get(params.itemId ?? 'reasoning') === method)

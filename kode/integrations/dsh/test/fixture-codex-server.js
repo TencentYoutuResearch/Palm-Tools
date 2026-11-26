@@ -92,7 +92,9 @@ async function receive(message) {
       notify('turn/completed', { threadId, turn: { id: turnId, status: 'completed' } })
     }
     if (text === 'ASYNC_QUESTION') {
-      const item = {type:'agentMessage',id:'call_q',text:'',delivery:'async',questions:[{title:'选择环境',options:['本机','远端']},{title:'补充说明',options:null}]}
+      const item = {type:'agentMessage',id:'call_q',text:'选择环境\n- 本机\n- 远端',delivery:'async',questions:[{title:'选择环境',options:['本机','远端']},{title:'补充说明',options:null}]}
+      notify('item/started',{threadId,turnId,item})
+      notify('item/agentMessage/delta',{threadId,turnId,itemId:item.id,delta:item.text})
       notify('item/completed',{threadId,turnId,item})
       notify('item/completed',{threadId,turnId,item})
       complete()

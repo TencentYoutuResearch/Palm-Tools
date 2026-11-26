@@ -9,6 +9,10 @@ function replace(from, to) { if (!source.includes(from)) throw new Error(`Pinned
 replace('id: "@deepseek-ai/dsh-client-ui-chat",','id: "@kode/dsh-chat",')
 // Imported relay messages have no live inbox claim, so remain Context nodes.
 replace('node.kind !== "context" || node.data.content.some', 'node.kind !== "context" || (node.data.source?.kind === "agent-message" && node.data.source?.form === "relay") || node.data.content.some')
+// Treat communication as a conversation row on both sides of a delivery.
+replace('groupTree: options.groupTree,', `groupTree: (kind === "context" || kind === "turn-trigger") && data.source?.kind === "agent-message" && data.source?.senderSessionId?.startsWith("kode:") && data.source?.form === "relay"
+                    ? "input" : kind === "tool-call" && ["kode_sessions_send", "ask_user_question"].includes((data.root?.call ?? data.root)?.name)
+                    ? "turn" : options.groupTree,`)
 // Stable user-bubble seat for scene-aware appearance without matching generated classes.
 replace('className: MessageItem_module_css_default.bubble,', 'className: MessageItem_module_css_default.bubble, "data-kode-user-bubble": true,')
 // Keep history editing separate from the generated renderer and preserve its native bubble/actions.

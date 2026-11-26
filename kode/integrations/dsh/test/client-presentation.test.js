@@ -2397,3 +2397,16 @@ test('plugin switches drop the duplicate state label and Remove uses the native 
   assert.match(source,/\.kode-source-remove\{--dsw-alias-button-primary-fill:var\(--dsw-alias-state-error-primary\)/)
   assert.doesNotMatch(source, /kode-mcp-manual/)
 })
+
+test('current host requests and replies render as communication cards when they wake a turn', async () => {
+  const { relayInput } = await import('../src/message-pages.js')
+  const c = client(), render = c.entry('conversation.chat.node', 'turn-trigger')
+  for (const replyTo of [undefined, 'original']) {
+    const input = relayInput({ id: 'sent', source: { node_id: 'worker', session_id: 'peer' },
+      content: 'body', title: 'Review v1.2', in_reply_to: replyTo }, 'in')
+    const result = render({ node: { data: input }, slots: c.ctx.slots, sessions: c.ctx.sessions })
+    assert.equal(result.props.relay.title, 'Review v1.2')
+    assert.equal(result.props.relay.content, 'body')
+    assert.equal(result.props.relay.replyTo, replyTo)
+  }
+})

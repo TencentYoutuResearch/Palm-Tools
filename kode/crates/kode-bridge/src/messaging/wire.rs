@@ -96,6 +96,7 @@ mod tests {
                 title: None,
                 idempotency_key: "key".into(),
                 in_reply_to: None,
+                interrupt: true,
                 hop_count: 2,
                 created_at: 1,
                 expires_at: 2,

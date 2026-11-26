@@ -157,6 +157,7 @@ mod tests {
                 title: None,
                 idempotency_key: "control".into(),
                 in_reply_to: None,
+                interrupt: true,
                 hop_count: 0,
                 created_at: now(),
                 expires_at: now() + 60_000,
