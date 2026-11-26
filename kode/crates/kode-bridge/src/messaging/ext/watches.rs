@@ -1,8 +1,9 @@
-//! Bot watches ("关注"): a bot wakes up on events instead of a timer.
+//! Bot watches ("关注"): a bot wakes up on events or at set times.
 //!
 //! One dispatcher follows the durable extension event log (session turns,
-//! file/Git changes from [`fswatch`], events extensions publish), matches each
-//! event against enabled watches, folds bursts per watch, and runs the bot in
+//! file/Git changes from [`fswatch`], events extensions publish) and a clock
+//! for time triggers ([`schedule`]), matches each event against enabled
+//! watches, folds bursts per watch, and runs the bot in
 //! the watch's own session - in dsh when it is up, else in the GUI runtime.
 //! Later runs of a watch continue that session while it stays open, so one
 //! kind of event keeps one conversation. The run's first completed turn
@@ -11,9 +12,10 @@
 //! watches, a bot's own file edits do not wake it again, and every watch has
 //! an hourly budget.
 use super::{
-    caller, ctx, deliver_initial, fswatch::FsWatch, store::{RunRecord, WatchRecord}, watch_spec::{self, Spec},
+    caller, ctx, deliver_initial, fswatch::FsWatch, schedule::Cron, store::{RunRecord, WatchRecord}, watch_spec::{self, Spec},
     Error, Gateway, Result,
 };
+use chrono::{DateTime, Local, TimeZone};
 use crate::messaging::Hub;
 use axum::{
     extract::{Query, State},
@@ -38,6 +40,10 @@ const SUMMARY_CHARS: usize = 4000;
 const MAX_PUBLISH_BYTES: usize = 16 * 1024;
 /// Extra 30 s waits for a run session to start (about three minutes in all).
 const START_PATIENCE: usize = 5;
+/// A time trigger missed while Kode was off runs once if it is this recent.
+const CATCH_UP_MS: i64 = 12 * 3_600_000;
+/// How often stalled and late tasks, and held notifications, are looked at.
+const TASK_CHECK: Duration = Duration::from_secs(60);
 
 /// Shared between the dispatcher and the API.
 pub struct Signals {
@@ -54,7 +60,7 @@ impl Default for Signals {
     }
 }
 impl Signals {
-    fn changed(&self) {
+    pub(super) fn changed(&self) {
         self.revision.send_modify(|r| *r += 1);
     }
     fn reload(&self) {
@@ -82,6 +88,10 @@ struct Dispatcher {
     pending: HashMap<String, Batch>,
     /// Bot → workspaces its runs are editing (`None` = still running).
     busy: HashMap<String, Vec<(PathBuf, Option<Instant>)>>,
+    /// Time triggers: watch → (cron, next time it fires).
+    clocks: HashMap<String, (String, DateTime<Local>)>,
+    /// When stalled and late tasks were last looked for.
+    checked: Option<Instant>,
 }
 
 pub fn spawn(hub: Arc<Hub>) {
@@ -115,8 +125,15 @@ pub fn spawn(hub: Arc<Hub>) {
             if let Err(e) = follow(&hub, &mut state, &mut cursor).await {
                 tracing::warn!(error=%e, "bot watch dispatch failed");
             }
+            state.tick_clocks(gateway, Local::now());
+            if state.checked.map_or(true, |at| at.elapsed() >= TASK_CHECK) {
+                state.checked = Some(Instant::now());
+                super::tasks::check(&hub, crate::now_ms());
+                super::attention::release_held(&hub);
+            }
             fire(&hub, &mut state).await;
-            let wait = state.pending.values().map(|b| b.due).min().map_or(Duration::from_secs(60), |at| at.saturating_duration_since(Instant::now()));
+            let clock = state.clocks.values().map(|(_, next)| (*next - Local::now()).to_std().unwrap_or_default()).min();
+            let wait = state.pending.values().map(|b| b.due.saturating_duration_since(Instant::now())).chain(clock).min().unwrap_or(Duration::MAX).min(Duration::from_secs(60));
             tokio::select! {
                 changed = latest.changed() => if changed.is_err() { return },
                 _ = tokio::time::sleep(wait) => {}
@@ -148,6 +165,51 @@ impl Dispatcher {
             .map(|p| p.canonicalize().unwrap_or(p))
             .collect();
         fs.sync(roots);
+        self.reload_clocks(gateway, Local::now());
+    }
+
+    /// Next firing time of every time trigger. A slot missed while Kode was
+    /// off runs once now if it is recent; older ones are skipped.
+    fn reload_clocks(&mut self, gateway: &Gateway, now: DateTime<Local>) {
+        let mut clocks = HashMap::new();
+        for watch in &self.watches {
+            let Some(expr) = watch.spec.cron() else { continue };
+            if let Some(kept) = self.clocks.get(&watch.id).filter(|(old, _)| old == expr) {
+                clocks.insert(watch.id.clone(), kept.clone());
+                continue;
+            }
+            let Ok(cron) = Cron::parse(expr) else { continue };
+            let key = format!("schedule:{}", watch.id);
+            let last = gateway.store.state(&key).ok().flatten().and_then(|v| v.as_i64()).and_then(|ms| Local.timestamp_millis_opt(ms).single());
+            if let Some(slot) = last.and_then(|last| cron.next_after(last)).filter(|slot| *slot <= now) {
+                if (now - slot).num_milliseconds() <= CATCH_UP_MS {
+                    let batch = self.pending.entry(watch.id.clone()).or_insert_with(|| Batch { events: vec![], dropped: 0, due: Instant::now() });
+                    batch.events.push(("schedule".into(), json!({"cron":expr,"scheduled_at":slot.timestamp_millis(),"missed":true})));
+                    batch.due = Instant::now();
+                }
+            }
+            if last.is_none() || last.is_some_and(|last| cron.next_after(last).is_some_and(|slot| slot <= now)) {
+                let _ = gateway.store.set_state(&key, &json!(now.timestamp_millis()));
+            }
+            if let Some(next) = cron.next_after(now) {
+                clocks.insert(watch.id.clone(), (expr.to_owned(), next));
+            }
+        }
+        self.clocks = clocks;
+    }
+
+    fn tick_clocks(&mut self, gateway: &Gateway, now: DateTime<Local>) {
+        let Self { clocks, pending, .. } = self;
+        for (id, (expr, next)) in clocks.iter_mut() {
+            if *next > now {
+                continue;
+            }
+            let batch = pending.entry(id.clone()).or_insert_with(|| Batch { events: vec![], dropped: 0, due: Instant::now() });
+            batch.events.push(("schedule".into(), json!({"cron":expr,"scheduled_at":next.timestamp_millis()})));
+            batch.due = Instant::now();
+            let _ = gateway.store.set_state(&format!("schedule:{id}"), &json!(now.timestamp_millis()));
+            *next = Cron::parse(expr).ok().and_then(|cron| cron.next_after(now)).unwrap_or(now + chrono::Duration::days(1));
+        }
     }
 
     /// Is this file event the bot's own run at work?
@@ -213,6 +275,7 @@ fn observe(hub: &Hub, state: &mut Dispatcher, session: u64, topic: &str, payload
     let payload = if session == 0 {
         payload.clone()
     } else {
+        super::tasks::observe(hub, session, topic, payload);
         if let Ok(Some(run)) = gateway.store.run_by_session(session) {
             follow_run(hub, state, &run, topic, payload);
             return;
@@ -323,36 +386,13 @@ fn follow_run(hub: &Hub, state: &mut Dispatcher, run: &RunRecord, topic: &str, p
 /// The conclusion goes to the bot's main conversation as a queued message,
 /// so the bot summarizes and reports what happened directly to the user.
 fn report_to_main(hub: &Hub, run: &RunRecord, watch: &str, summary: &str) {
-    let Some(ctx) = hub.ctx.upgrade() else { return };
-    let Ok((_, roster)) = crate::messaging::bots::roster(hub) else { return };
-    let Some(main) = roster.bots.iter().find(|b| b.id == run.bot).and_then(|b| b.main_session.clone()) else { return };
     let text = format!(
         "【关注 · {watch}】你在独立会话里完成了这次关注任务，原始结论如下。请提炼核心结论、关键改动/发现以及需要用户决定的事项，用简明清晰的话直接汇报给用户（无需重复派发或给子会话发回执）：\n\n{}",
         summary.chars().take(SUMMARY_CHARS).collect::<String>()
     );
-    let rid = format!("watch.{}.main", run.id);
     // The run itself never reports into itself.
-    if let Some(id) = ctx.runtimes.find(&main.runtime, &main.session_id).filter(|id| Some(*id) != run.session_id) {
-        tokio::spawn(async move {
-            if let Err(e) = ctx.runtimes.command(id, "input", json!({"text":text}), &rid).await {
-                tracing::warn!(error=%e, "watch result not posted to the bot's main conversation");
-            }
-        });
-        return;
-    }
-    // If the bot's dsh main session is currently unloaded, deliver via dsh's bot_report command so it wakes cleanly.
-    if main.runtime == "dsh" && ctx.runtimes.available("dsh") && run.session_uuid.as_deref() != Some(main.session_id.as_str()) {
-        let session_id = main.session_id;
-        tokio::spawn(async move {
-            if let Err(e) = ctx
-                .runtimes
-                .request("dsh", None, "bot_report", json!({"session_id": session_id, "text": text}), &rid)
-                .await
-            {
-                tracing::warn!(error=%e, "watch result fallback delivery to unloaded bot main session failed");
-            }
-        });
-    }
+    let except = run.session_id.map(|id| (id, run.session_uuid.clone()));
+    super::attention::post_to_main(hub, &run.bot, text, format!("watch.{}.main", run.id), except);
 }
 
 fn notify(hub: &Hub, run: &RunRecord, status: &str, text: &str, policy: &str) {
@@ -364,16 +404,13 @@ fn notify(hub: &Hub, run: &RunRecord, status: &str, text: &str, policy: &str) {
     if !wanted {
         return;
     }
-    let name = crate::messaging::bots::roster(hub).ok().and_then(|(_, r)| r.bots.into_iter().find(|b| b.id == run.bot)).map_or_else(|| run.bot.clone(), |b| b.name);
+    let name = super::attention::bot_name(hub, &run.bot);
     let (title, severity) = match status {
         "completed" => (format!("{name} 完成了一次关注任务"), "success"),
         "needs_user" => (format!("{name} 在等你处理"), "warning"),
         _ => (format!("{name} 的关注任务没有完成"), "error"),
     };
-    hub.ext.ui.send(json!({
-        "type":"notify","extension":"kode","title":title,"body":text.chars().take(500).collect::<String>(),
-        "severity":severity,"panel":null,"bot":run.bot,"session_id":run.session_id,
-    }));
+    super::attention::notify(hub, &run.bot, title, text, severity, run.session_id);
 }
 
 /// Start runs for batches whose window closed, within each watch's budget.
@@ -406,7 +443,8 @@ async fn fire(hub: &Arc<Hub>, state: &mut Dispatcher) {
 }
 
 fn run_text(spec: &Spec, events: &[(String, Value)], dropped: usize, last: Option<String>) -> String {
-    let mut text = format!("【关注 · {}】这是一次由事件触发的自动运行，没有人在实时看着。\n\n发生了什么：\n", spec.name);
+    let kind = if events.iter().all(|(topic, _)| topic == "schedule") { "定时" } else { "由事件触发的" };
+    let mut text = format!("【关注 · {}】这是一次{kind}自动运行，没有人在实时看着。\n\n发生了什么：\n", spec.name);
     for (topic, payload) in events {
         text.push_str(&format!("- {}\n", watch_spec::describe(topic, payload)));
     }
@@ -417,6 +455,9 @@ fn run_text(spec: &Spec, events: &[(String, Value)], dropped: usize, last: Optio
         text.push_str(&format!("\n上一次运行的结论：\n{}\n", last.chars().take(1500).collect::<String>()));
     }
     text.push_str(&format!("\n你要做的：\n{}\n\n完成后用几句话写清结论；需要人来决定的事单独列出来。", spec.instructions.trim()));
+    if let Some(chat) = &spec.policy.post_to_wecom {
+        text.push_str(&format!("\n最后用 wecom_message_send 把这份汇报发到企业微信会话 chat_id={chat}（先结论后细节，适合在手机上读）。"));
+    }
     text
 }
 
@@ -638,6 +679,7 @@ fn view(hub: &Hub, bot: Option<&str>) -> anyhow::Result<Value> {
         "revision": *hub.ext.watches.revision.borrow(),
         "watches": watches,
         "runs": store.runs(bot, 50)?,
+        "tasks": super::tasks::view(hub, bot)?,
         "unseen": unseen,
         "topics": watch_spec::BUILTIN_TOPICS,
     }))
@@ -667,6 +709,7 @@ fn enabled() -> bool {
 pub(super) async fn change(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(change): Json<Change>) -> Result<Json<Value>> {
     super::admin(&hub, &h)?;
     let store = &hub.ext.store;
+    let mut saved = None;
     let find = |id: &str| -> Result<WatchRecord> {
         store.watches()?.into_iter().find(|w| w.id == id).ok_or_else(|| Error(StatusCode::NOT_FOUND, "这个关注已不存在".into()))
     };
@@ -690,11 +733,15 @@ pub(super) async fn change(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(chang
                 }
                 None => format!("watch-{}", uuid::Uuid::new_v4().simple()),
             };
-            store.save_watch(&WatchRecord { id, bot, spec: serde_json::to_value(&parsed).map_err(anyhow::Error::from)?, enabled, updated: 0 })?;
+            store.set_state(&format!("schedule:{id}"), &json!(Local::now().timestamp_millis()))?;
+            store.save_watch(&WatchRecord { id: id.clone(), bot, spec: serde_json::to_value(&parsed).map_err(anyhow::Error::from)?, enabled, updated: 0 })?;
+            saved = Some(id);
         }
         Change::Toggle { id, enabled } => {
             let mut watch = find(&id)?;
             watch.enabled = enabled;
+            // Paused time is not caught up after re-enabling.
+            store.set_state(&format!("schedule:{id}"), &json!(Local::now().timestamp_millis()))?;
             store.save_watch(&watch)?;
         }
         Change::Delete { id } => {
@@ -715,5 +762,66 @@ pub(super) async fn change(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(chang
         }
     }
     hub.ext.watches.reload();
-    Ok(Json(view(&hub, None)?))
+    let mut view = view(&hub, None)?;
+    if let Some(id) = saved {
+        view["saved"] = json!(id);
+    }
+    Ok(Json(view))
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+
+    fn dispatcher(cron: &str) -> Dispatcher {
+        let spec: Spec = serde_json::from_value(json!({"name":"站会","on":{"topic":"schedule","match":{"cron":cron}},"do":"写站会"})).unwrap();
+        Dispatcher { watches: vec![Watch { id: "w1".into(), bot: "b1".into(), spec }], ..Default::default() }
+    }
+    fn gateway() -> Gateway {
+        Gateway::with_store(super::super::store::Store::memory(), Duration::from_secs(1))
+    }
+    fn at(h: u32, m: u32) -> DateTime<Local> {
+        Local.with_ymd_and_hms(2026, 11, 27, h, m, 0).earliest().unwrap()
+    }
+
+    #[test]
+    fn a_new_time_trigger_waits_for_its_next_slot() {
+        let (gateway, mut state) = (gateway(), dispatcher("0 9 * * *"));
+        state.reload_clocks(&gateway, at(8, 0));
+        assert!(state.pending.is_empty());
+        assert_eq!(state.clocks["w1"].1, at(9, 0));
+        state.tick_clocks(&gateway, at(8, 59));
+        assert!(state.pending.is_empty());
+        state.tick_clocks(&gateway, at(9, 0));
+        let batch = &state.pending["w1"];
+        assert_eq!(batch.events[0].0, "schedule");
+        assert_eq!(batch.events[0].1["cron"], "0 9 * * *");
+        assert!(state.clocks["w1"].1 > at(9, 0), "the next slot is tomorrow");
+        assert_eq!(gateway.store.state("schedule:w1").unwrap(), Some(json!(at(9, 0).timestamp_millis())));
+    }
+
+    #[test]
+    fn a_recent_missed_slot_runs_once_and_an_old_one_is_skipped() {
+        let (gateway, mut state) = (gateway(), dispatcher("0 9 * * *"));
+        gateway.store.set_state("schedule:w1", &json!(at(8, 0).timestamp_millis())).unwrap();
+        state.reload_clocks(&gateway, at(10, 0));
+        assert_eq!(state.pending["w1"].events[0].1["missed"], true);
+        // Reloading again (another watch changed) does not queue it twice.
+        state.pending.clear();
+        state.reload_clocks(&gateway, at(10, 5));
+        assert!(state.pending.is_empty());
+
+        let (gateway, mut state) = (super::clock_tests::gateway(), dispatcher("0 9 * * *"));
+        gateway.store.set_state("schedule:w1", &json!((at(9, 0) - chrono::Duration::days(2)).timestamp_millis())).unwrap();
+        state.reload_clocks(&gateway, at(8, 0));
+        assert!(state.pending.is_empty(), "yesterday's run is more than 12 hours old");
+    }
+
+    #[test]
+    fn scheduled_runs_say_they_are_scheduled_and_where_to_post() {
+        let mut spec: Spec = serde_json::from_value(json!({"name":"周报","on":{"topic":"schedule","match":{"cron":"0 17 * * 5"}},"do":"写周报"})).unwrap();
+        spec.policy.post_to_wecom = Some("group_1".into());
+        let text = run_text(&spec, &[("schedule".into(), json!({"cron":"0 17 * * 5"}))], 0, None);
+        assert!(text.contains("定时自动运行") && text.contains("每周五 17:00") && text.contains("chat_id=group_1"), "{text}");
+    }
 }

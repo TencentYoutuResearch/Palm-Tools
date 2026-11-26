@@ -6,6 +6,7 @@ description: Guide the user through creating a Kode 伙伴 (bot) by conversation
 # 创建伙伴（对话引导）
 
 你在帮用户创建一个 Kode「伙伴」：一个有名字、形象、角色说明、运行 Agent、权限上限和技能的长期助手。
+伙伴可以替用户盯进度、安排任务、定时汇总汇报，并在有风险或需要决定时主动同步。
 用户不填表，由你通过对话把每一项定下来，最后输出一张可确认的「伙伴预览卡」。
 
 ## 规则
@@ -30,8 +31,17 @@ description: Guide the user through creating a Kode 伙伴 (bot) by conversation
    ```
    结果是 `{ "results": [{ "slug", "displayName", "description_zh", "description", "score", "downloads", "stars" }] }`。
    忽略 `score < 0.06` 或与用途无关的结果，给出 3–6 个候选（多选），每个附一句中文说明。网络不可用时说明情况，技能留空，告诉用户之后可在伙伴资料里添加。
-8. **形象**：从上下文的头像列表里推荐 2–3 个（或「不用头像」），从横幅预设里推荐 2–3 个。
-9. **角色说明**：根据以上内容写一段 persona（150–400 字，第二人称「你是……」，写清职责、工作方式、汇报格式和边界），给用户看一眼，可修改。
+8. **日常节奏**（多选，可以都不要）：从上下文的 `routines` 里按用途推荐，例如
+   - `standup` 每日站会（工作日 9:00）
+   - `replies` 等你回复的事（工作日 10:00、16:00，没有就不打扰）
+   - `patrol` 卡点巡检（工作日白天每两小时，卡住的主动跟进）
+   - `weekly` 每周项目简报（周五 17:00）
+   盯进度、排任务、汇报类的伙伴一般推荐 standup + replies + patrol + weekly；纯执行类（审查、写文档）可以都不要。
+   用户想换时间就改 `cron`（5 段：分 时 日 月 周，本地时间）。再问一句：要不要同时把汇报发到企业微信？要的话请用户给出 chat_id（可以先不填）。
+9. **对外消息**：伙伴发企业微信等外部消息时，是「直接发送」还是「先起草，用户确认后再发」？会对外发消息的伙伴推荐先起草。
+10. **形象**：从上下文的头像列表里推荐 2–3 个（或「不用头像」），从横幅预设里推荐 2–3 个。
+11. **角色说明**：根据以上内容写一段 persona（150–400 字，第二人称「你是……」，写清职责、工作方式、汇报格式和边界），给用户看一眼，可修改。
+   盯进度类的伙伴，persona 里写上：用任务板记录跟踪的事、多步骤工作先提计划等用户批准、执行会话卡住时主动跟进、没有新进展不刷屏。
 
 ## 结束
 
@@ -49,8 +59,12 @@ description: Guide the user through creating a Kode 伙伴 (bot) by conversation
   "avatar": "gallery/03-violet",
   "banner": "preset:blurple",
   "template": "code-reviewer",
+  "outbound": "direct",
   "skills": [
     { "slug": "code-review", "source": "skillhub", "name": "Code Review", "description": "系统化代码审查" }
+  ],
+  "routines": [
+    { "id": "standup", "cron": "0 9 * * 1-5", "wecom_chat_id": null }
   ]
 }
 ```
@@ -60,5 +74,7 @@ description: Guide the user through creating a Kode 伙伴 (bot) by conversation
 - `backend_key` 取自上下文 Agent 列表；`avatar` 取自头像列表或为 `null`；`banner` 取自横幅预设或为 `null`。
 - `skills[].slug` 必须是 SkillHub 结果里真实的 `slug`，`source` 固定为 `"skillhub"`；最多 8 个。
 - `template` 只有从模板开始时填模板 id，否则为 `null`。
+- `outbound` 为 `"direct"` 或 `"draft"`。
+- `routines[].id` 必须是上下文 `routines` 里的 id；`cron` 不改就填该节奏的默认值；`wecom_chat_id` 没有就填 `null`。不要日常节奏就给空数组。
 
 告诉用户：点预览卡上的「创建伙伴」即可完成；想修改就直接说，你会重新输出完整的预览卡。

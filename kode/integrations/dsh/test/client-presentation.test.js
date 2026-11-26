@@ -1866,3 +1866,60 @@ test('the 伙伴 page lists bots as an avatar rail and registers the kode-bot pr
   assert.match(source, /function BotSettingsModal/)
   assert.match(source, /function BotSkillsPanel/)
 })
+
+function watchUiScope(extra = {}) {
+  const scope = { h: (type, props, ...children) => ({ type, props: props ?? {}, children }), ...extra }
+  vm.runInNewContext(source.slice(source.indexOf('  const WATCH_SOURCES = ['), source.indexOf('  function WatchEditor(')), scope)
+  return scope
+}
+
+test('time triggers read naturally and routines become read-only schedule watches', () => {
+  const { cronLabel, routineDraft, watchSpec, watchDraft, watchSummary } = watchUiScope()
+  assert.equal(cronLabel('0 9 * * 1-5'), '每个工作日 09:00')
+  assert.equal(cronLabel('0 17 * * 5'), '每周五 17:00')
+  assert.equal(cronLabel('0 10,16 * * 1-5'), '每个工作日 10:00、16:00')
+  assert.equal(cronLabel('0 11-18/2 * * 1-5'), '每个工作日 11–18 点每 2 小时')
+  assert.equal(cronLabel('0 * * * *'), '每小时第 0 分')
+  assert.equal(cronLabel('0 9 1 * *'), '定时「0 9 1 * *」')
+  const spec = watchSpec(routineDraft({ id: 'standup', name: '每日站会', cron: '0 9 * * 1-5', instructions: '写站会', notify: 'never' }, { post_to_wecom: ' g1 ' }))
+  assert.deepEqual(plain(spec), { name: '每日站会', on: { topic: 'schedule', match: { cron: '0 9 * * 1-5' } }, do: '写站会', policy: { coalesce_secs: 0, max_runs_per_hour: 2, permission: 'plan', workspace: null, carry_last_summary: true, notify: 'never', report_to_main: true, post_to_wecom: 'g1' } })
+  const back = watchDraft({ id: 'w1', enabled: true, spec })
+  assert.equal(back.topic, 'schedule'); assert.equal(back.cron, '0 9 * * 1-5'); assert.equal(back.post_to_wecom, 'g1')
+  assert.equal(watchSummary(spec), '每个工作日 09:00 · 同时发到企微 g1')
+  assert.equal(watchSpec({ ...watchDraft(null), name: 'x', do: 'y' }).policy.post_to_wecom, undefined, 'no WeCom chat unless given')
+})
+
+test('a proposal keeps known routines and draft mode, and creation sets them up', async () => {
+  const catalog = [{ id: 'standup', name: '每日站会', cron: '0 9 * * 1-5', instructions: '写站会', notify: 'never' }, { id: 'weekly', name: '周报', cron: '0 17 * * 5', instructions: '写周报' }]
+  const watches = []
+  const scope = botsUiScope({
+    publishBots: () => {}, publishWatches: () => {}, botsSnapshot: { data: { bots: [] } },
+    botsCall: async body => body.action === 'upsert' ? { bots: [{ id: 'bot_new' }] } : { bots: [{ id: 'bot_new' }] },
+  })
+  Object.assign(scope, watchUiScope(), { publishWatches: () => {}, watchesCall: async body => { watches.push(body); return { watches: [] } } })
+  const parsed = scope.botProposal(JSON.stringify({ name: 'PM', backend_key: 'claude', outbound: 'draft', routines: [{ id: 'standup', cron: '30 8 * * 1-5', wecom_chat_id: 'g1' }, 'weekly', { id: 'nope' }, { id: 'weekly' }] }), [{ backend_key: 'claude' }], catalog)
+  assert.equal(parsed.bot.outbound, 'draft')
+  assert.deepEqual(plain(parsed.routines.map(row => [row.id, row.cron, row.wecom_chat_id ?? null])), [['standup', '30 8 * * 1-5', 'g1'], ['weekly', '0 17 * * 5', null]])
+  assert.equal(scope.botProposal(JSON.stringify({ name: 'x', outbound: 'yolo' }), [{ backend_key: 'claude' }]).bot.outbound, undefined)
+  const result = await scope.createBot(parsed.bot, [], undefined, { routines: parsed.routines })
+  assert.deepEqual(plain(result.failed), [])
+  assert.deepEqual(plain(watches.map(row => [row.action, row.bot, row.enabled, row.spec.on.match.cron, row.spec.policy.post_to_wecom ?? null])), [['watch_upsert', 'bot_new', true, '30 8 * * 1-5', 'g1'], ['watch_upsert', 'bot_new', true, '0 17 * * 5', null]])
+  watches.length = 0
+  await scope.createBot(parsed.bot, [], undefined, { routines: parsed.routines, enableRoutines: false })
+  assert.ok(watches.every(row => row.enabled === false), 'a template used as is starts with routines paused')
+})
+
+test('the inbox gathers plans, drafted messages, tasks and runs that need the user', () => {
+  const scope = { h: (type, props, ...children) => ({ type, props: props ?? {}, children }) }
+  vm.runInNewContext(source.slice(source.indexOf('  /** Everything waiting for you across bots'), source.indexOf('  function BotInboxItem(')), scope)
+  const items = scope.inboxItems({
+    tasks: [
+      { id: 'p', bot: 'b1', kind: 'plan', status: 'needs_user', updated: 3 },
+      { id: 'o', bot: 'b2', kind: 'outbound', status: 'needs_user', updated: 5 },
+      { id: 't', bot: 'b1', kind: 'task', status: 'in_progress', updated: 9 },
+    ],
+    runs: [{ id: 'r', bot: 'b1', status: 'needs_user', started: 4 }, { id: 'r2', bot: 'b1', status: 'completed', started: 8 }],
+  })
+  assert.deepEqual(plain(items.map(item => [item.key, item.kind])), [['o', 'outbound'], ['r', 'run'], ['p', 'plan']])
+  assert.deepEqual(plain(scope.inboxItems(null)), [])
+})

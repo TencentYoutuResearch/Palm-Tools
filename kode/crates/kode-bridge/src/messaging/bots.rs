@@ -38,6 +38,10 @@ pub struct Bot {
     /// Recommended template the bot was made from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
+    /// Messages the bot sends outside Kode (WeCom): `direct` (default) or
+    /// `draft`, which waits for the user to approve each one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outbound: Option<String>,
     /// Agent that runs the bot (a backend key such as `claude`).
     pub backend_key: String,
     #[serde(default)]
@@ -96,6 +100,38 @@ pub struct Roster {
     /// session id → bot id.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub adopted: std::collections::BTreeMap<String, String>,
+    /// Bot notifications in this local-time window wait and arrive as one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quiet_hours: Option<QuietHours>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct QuietHours {
+    /// `HH:MM`; a window may cross midnight (`22:00`–`08:00`).
+    pub start: String,
+    pub end: String,
+}
+
+fn minutes(hhmm: &str) -> Option<u32> {
+    let (h, m) = hhmm.split_once(':')?;
+    let (h, m): (u32, u32) = (h.parse().ok()?, m.parse().ok()?);
+    (h < 24 && m < 60 && hhmm.len() == 5).then_some(h * 60 + m)
+}
+
+impl QuietHours {
+    pub fn validate(&self) -> Result<()> {
+        match (minutes(&self.start), minutes(&self.end)) {
+            (Some(a), Some(b)) if a != b => Ok(()),
+            _ => bail!("免打扰时段要写成 HH:MM，且开始和结束不能相同"),
+        }
+    }
+
+    /// Is `now` (minutes since local midnight) inside the window?
+    pub fn contains(&self, now: u32) -> bool {
+        let (Some(start), Some(end)) = (minutes(&self.start), minutes(&self.end)) else { return false };
+        if start < end { (start..end).contains(&now) } else { now >= start || now < end }
+    }
 }
 
 impl Roster {
@@ -120,6 +156,7 @@ pub enum Change {
     SetRoot { root: Option<String> },
     /// File a dsh session under a bot (`id: None` releases it).
     Adopt { session: String, id: Option<String> },
+    SetQuietHours { quiet_hours: Option<QuietHours> },
 }
 
 impl Bot {
@@ -188,6 +225,9 @@ impl Bot {
         let line = |value: &Option<String>, max: usize| value.as_ref().is_some_and(|v| v.chars().count() > max || v.chars().any(|c| c.is_control()));
         if line(&self.tagline, 120) || line(&self.template, 64) {
             bail!("tagline or template is invalid or too long")
+        }
+        if self.outbound.as_deref().is_some_and(|mode| !["direct", "draft"].contains(&mode)) {
+            bail!("outbound must be direct or draft")
         }
         if self.skills.len() > MAX_SKILLS {
             bail!("at most {MAX_SKILLS} skills")
@@ -309,6 +349,12 @@ fn apply(roster: &mut Roster, change: Change, now: u64) -> Result<()> {
                     roster.adopted.remove(&session);
                 }
             }
+        }
+        Change::SetQuietHours { quiet_hours } => {
+            if let Some(quiet) = &quiet_hours {
+                quiet.validate()?;
+            }
+            roster.quiet_hours = quiet_hours;
         }
         Change::SetDefault { id } => {
             if id.as_ref().is_some_and(|id| !roster.bots.iter().any(|b| &b.id == id)) {
@@ -457,6 +503,25 @@ mod tests {
         let mut long = kit;
         long.tagline = Some("x".repeat(121));
         assert!(apply(&mut Roster::default(), Change::Upsert { bot: long }, 1).is_err());
+    }
+
+    #[test]
+    fn quiet_hours_cross_midnight_and_outbound_is_checked() {
+        let night = QuietHours { start: "22:00".into(), end: "08:00".into() };
+        assert!(night.contains(23 * 60) && night.contains(7 * 60 + 59) && !night.contains(8 * 60) && !night.contains(12 * 60));
+        let lunch = QuietHours { start: "12:00".into(), end: "13:30".into() };
+        assert!(lunch.contains(12 * 60 + 30) && !lunch.contains(13 * 60 + 30));
+        let mut roster = Roster::default();
+        apply(&mut roster, Change::SetQuietHours { quiet_hours: Some(night.clone()) }, 1).unwrap();
+        assert_eq!(roster.quiet_hours, Some(night));
+        for bad in [("9:00", "10:00"), ("22:00", "22:00"), ("24:00", "08:00")] {
+            assert!(apply(&mut roster, Change::SetQuietHours { quiet_hours: Some(QuietHours { start: bad.0.into(), end: bad.1.into() }) }, 2).is_err(), "{bad:?}");
+        }
+        let mut kit = bot("Kit");
+        kit.outbound = Some("draft".into());
+        apply(&mut roster, Change::Upsert { bot: kit.clone() }, 3).unwrap();
+        kit.outbound = Some("yolo".into());
+        assert!(apply(&mut Roster::default(), Change::Upsert { bot: kit }, 3).is_err());
     }
 
     #[test]

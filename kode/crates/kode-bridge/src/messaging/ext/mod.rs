@@ -8,6 +8,10 @@ mod store;
 mod tools;
 mod fswatch;
 mod ui;
+mod attention;
+mod progress;
+mod schedule;
+mod tasks;
 mod watch_spec;
 mod watches;
 #[cfg(test)]
@@ -63,6 +67,8 @@ const FEATURES: &[&str] = &[
     "agent_tools",
     "events.publish",
     "bot_watches",
+    "bot_tasks",
+    "bot_schedules",
 ];
 const MAX_LABELS: usize = 16;
 const MAX_META_BYTES: usize = 16 * 1024;
@@ -230,6 +236,8 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
         .route("/api/ext/v1/events/stream", get(stream))
         .route("/api/ext/v1/events/publish", post(watches::publish))
         .route("/api/v1/messaging/workbench/watches", get(watches::list).post(watches::change))
+        .route("/api/v1/messaging/workbench/bot-tasks", get(tasks::list).post(tasks::change))
+        .route("/api/v1/messaging/workbench/progress", get(progress::progress))
         .route("/api/v1/messaging/workbench/events", post(watches::workbench_publish))
         .with_state(hub)
 }

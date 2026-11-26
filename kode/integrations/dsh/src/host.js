@@ -21,6 +21,7 @@ import { registerSessionNotifications, registerNotificationSettings } from './se
 import { registerModelUsageApi } from './model-usage-api.js'
 import { installSessionCreator, sessionNamingPolicy } from './session-create.js'
 import { WeComBridge, registerWeComApi, wecomTools, runWeComTool } from './wecom-bridge.js'
+import { botTools, draftOutbound, taskAssignment } from './bot-tools.js'
 
 export const name = 'kode'
 export const inject = ['agents', 'tools', 'sessions']
@@ -89,7 +90,7 @@ export async function apply(ctx, config = {}) {
     webCtx.effect(() => registerSharedSessionApi(webCtx, admin), 'kode.shared-session-api')
     installSessionCreator(webCtx, admin, node.node_id)
     const { registerBotsApi } = await import('./bots-api.js')
-    webCtx.effect(() => registerBotsApi(webCtx, admin), 'kode.bots-api')
+    webCtx.effect(() => registerBotsApi(webCtx, admin, { wecom }), 'kode.bots-api')
     if (wecom) webCtx.effect(() => registerWeComApi(webCtx, wecom), 'kode.wecom-api')
     const { registerProjectHosts } = await import('./project-hosts.js')
     await registerProjectHosts(webCtx, { ...runtimeConfig, backendClient: admin })
@@ -154,6 +155,7 @@ export async function apply(ctx, config = {}) {
       workspace: { type: 'string', description: 'Workspace name or path returned for the selected execution Host by kode_sessions_list. Required when more than one target workspace exists.' },
       workspace_id: { type: 'string', description: 'Exact workspace identity returned for the selected Host; never copy one from a different Host.' },
       cwd: { type: 'string', description: 'Existing registered Kode workspace path on the selected Host. Does not create a workspace.' }, idempotency_key: { type: 'string', required: true },
+      task_id: { type: 'string', description: 'A task on your bot task board that this conversation will do (local Host only); Kode then follows it for you.' },
     }, async (args, signal) => {
       const hosts = ctx.get?.('kodeProjectHosts')
       let created
@@ -170,8 +172,10 @@ export async function apply(ctx, config = {}) {
         if (!creator) throw new Error('Session creation service is unavailable')
         created = await creator.create(args, agent)
       }
+      const linked = Boolean(args.task_id) && created.address.node_id === node.node_id
+      if (linked) await admin.call(`${PREFIX}workbench/bot-tasks`, { action: 'upsert', task: { id: args.task_id, session: { runtime: 'dsh', session_id: created.address.session_id } } }, signal)
       const assignment = await client.call(`${PREFIX}messages`, {
-        target: created.address, content: args.task, in_reply_to: null,
+        target: created.address, content: linked ? taskAssignment(args.task, args.task_id) : args.task, in_reply_to: null,
         idempotency_key: `create:${createHash('sha256').update(args.idempotency_key).digest('hex')}`,
         ...(node.message_titles === true ? { title: sessionAssignmentTitle(created.title) } : {}),
       }, signal)
@@ -249,8 +253,12 @@ export async function apply(ctx, config = {}) {
     })
     for (const tool of memoryTools) add(tool.name, tool.description, tool.parameters, (args, signal) => client.call(`${PREFIX}memory/tool`, { name: tool.name, arguments: args }, signal))
     if (wecom) {
-      for (const tool of wecomTools) add(tool.name, tool.description, tool.parameters, (args, signal) => runWeComTool(wecom, tool.name, args, signal))
+      for (const tool of wecomTools) add(tool.name, tool.description, tool.parameters, async (args, signal) => {
+        if (tool.name === 'wecom_message_send') { const draft = await draftOutbound(admin, agent, args, signal); if (draft) return draft }
+        return runWeComTool(wecom, tool.name, args, signal)
+      })
     }
+    for (const [name, description, parameters, execute] of botTools(admin, agent)) add(name, description, parameters, execute)
     entry.task = pump(entry)
     entry.controlTask = entry.inputCancellation ? pumpCancellation(entry) : Promise.resolve()
   }
