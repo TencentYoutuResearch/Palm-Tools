@@ -91,6 +91,13 @@ async function receive(message) {
       notify('item/completed', { threadId, turnId, item: { type: 'agentMessage', id: 'answer', text: `${process.env.KODE_FIXTURE_AGENT_LABEL ?? 'fixture'}: ${text}` } })
       notify('turn/completed', { threadId, turn: { id: turnId, status: 'completed' } })
     }
+    if (text === 'ASYNC_QUESTION') {
+      const item = {type:'agentMessage',id:'call_q',text:'',delivery:'async',questions:[{title:'选择环境',options:['本机','远端']},{title:'补充说明',options:null}]}
+      notify('item/completed',{threadId,turnId,item})
+      notify('item/completed',{threadId,turnId,item})
+      complete()
+      return
+    }
     if (text.includes('NATIVE_SUBAGENTS')) {
       const item = { type: 'collabAgentToolCall', id: 'spawn-child', tool: 'spawnAgent', senderThreadId: threadId, receiverThreadIds: ['codex-child'], prompt: 'Verify native children', status: 'completed', agentsStates: { 'codex-child': { status: 'running' } } }
       notify('item/started', { threadId, turnId, item })
