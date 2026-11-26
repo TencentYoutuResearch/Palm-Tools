@@ -23,10 +23,6 @@ function localRecoveryMode(ctx, argv, config, versions) {
 export function localRecoverySupported(ctx, argv = process.argv, config, versions = process.versions) {
   return localRecoveryMode(ctx, argv, config, versions) !== undefined
 }
-const activeStates = new Set(['busy', 'running', 'starting', 'queued', 'waiting', 'awaiting', 'attention', 'needs_attention'])
-export function hasActiveSharedSessions(items) {
-  return items.some(row => row.owner_alive !== false && row.runtime_online !== false && activeStates.has(row.status))
-}
 export function backendArguments(config) {
   const url = new URL(config.url)
   if (url.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) || !config.serverConfig || !config.tokenFile || !config.serverCommand) throw new Error('此后端没有可验证的本机启动配置，请手动更新并重启 Kode 服务。')
@@ -52,29 +48,36 @@ async function backendCwd(pid) {
   return cwd
 }
 
-export async function prepareLocalRecovery(ctx, config, { argv = process.argv, versions = process.versions } = {}) {
+export async function prepareLocalRecovery(ctx, config, { argv = process.argv, versions = process.versions, confirmedSessions = [] } = {}) {
   const mode = localRecoveryMode(ctx, argv, config, versions)
   if (!mode) throw new Error('此启动方式不支持自动重启，请从管理此服务的应用或启动器重启 Kode 服务。')
-  const controller = ctx.get?.('sessionController')
-  if (!controller?.list) throw new Error('无法检查运行中的会话，未执行重启。')
-  const checkIdle = async () => {
-    const { items } = await controller.list({})
-    if (!Array.isArray(items) || hasPendingSessions(items)) throw new Error('此计算机有运行中或排队的会话，请在其结束后重试。')
-    if (mode === 'desktop') {
-      let sessions
-      try { ({ sessions } = await config.backendClient.call('/api/v1/messaging/runtime/sessions')) } catch { /* cannot establish that the shared service is idle */ }
-      if (!Array.isArray(sessions)) throw new Error('无法检查其他客户端的运行状态，未执行重启。')
-      if (hasActiveSharedSessions(sessions)) throw new Error('有客户端正在使用共享 Kode 服务运行会话，请在任务结束后重试。')
-    }
+  // Desktop replaces only the standalone service. DSH and GUI own their
+  // Agent processes and reconnect, so their published status is irrelevant.
+  const backendOnly = mode === 'desktop'
+  const controller = backendOnly ? undefined : ctx.get?.('sessionController')
+  const affectedSessions = async () => {
+    if (backendOnly) return []
+    const result = await controller?.list({})
+    if (!Array.isArray(result?.items)) throw new Error('无法检查本机 Web Host 的会话，未执行重启。')
+    return result.items.filter(row => hasPendingSessions([row]))
   }
-  await checkIdle()
+  const checkImpact = async () => {
+    const rows = await affectedSessions()
+    if (rows.some(row => !row.sessionId || !confirmedSessions.includes(row.sessionId))) {
+      const error = new Error('重启 Web Host 会中断本机运行中或排队的会话。')
+      error.affectedSessions = rows.map(row => ({ id: row.sessionId, title: row.title || row.sessionId }))
+      throw error
+    }
+    return rows
+  }
+  await checkImpact()
   const args = backendArguments(config)
   let backend, cwd
   try {
     backend = await backendProcess(config, args)
     // A manually deployed backend is allowed to resolve its database relative
     // to its own working directory. Keep that directory when restarting.
-    cwd = mode === 'desktop' ? await backendCwd(backend.pid) : process.cwd()
+    cwd = backendOnly ? await backendCwd(backend.pid) : process.cwd()
   }
   catch { throw new Error('无法确认本机 Kode 服务的进程身份，未执行重启。请手动更新并重启该服务。') }
   const command = mode === 'web' && basename(config.serverCommand) === 'kode-session-server' ? await resolveBundledServer() ?? config.serverCommand : config.serverCommand
@@ -83,7 +86,7 @@ export async function prepareLocalRecovery(ctx, config, { argv = process.argv, v
   const planFile = join(root, 'plan.json')
   let child
   try {
-    await writeFile(planFile, JSON.stringify({ backendOnly: mode === 'desktop', parent: process.pid, backend, command, args, tokenFile: resolve(cwd, config.tokenFile), url: config.url, executable: process.execPath, argv: [...process.execArgv, ...process.argv.slice(1)], cwd, env: process.env }), { mode: 0o600 })
+    await writeFile(planFile, JSON.stringify({ backendOnly, parent: process.pid, backend, command, args, tokenFile: resolve(cwd, config.tokenFile), url: config.url, executable: process.execPath, argv: [...process.execArgv, ...process.argv.slice(1)], cwd, env: process.env }), { mode: 0o600 })
     child = spawn(process.execPath, [fileURLToPath(new URL('./service-recovery-worker.js', import.meta.url)), planFile], { detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'], shell: false, env: mode === 'desktop' ? { ...process.env, ELECTRON_RUN_AS_NODE: '1' } : process.env })
     await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('重启准备超时，服务未停止。')), 5000)
@@ -93,11 +96,11 @@ export async function prepareLocalRecovery(ctx, config, { argv = process.argv, v
       child.once('message', finish(message => message.ready ? resolve() : reject(new Error('重启准备失败，服务未停止。'))))
     })
     // Recheck immediately before arming the worker; preparation must not stop a new turn.
-    await checkIdle()
+    const affected = await checkImpact()
     return {
-      backendOnly: mode === 'desktop',
+      backendOnly,
       commit() {
-        if (mode === 'desktop') return new Promise(resolve => {
+        if (backendOnly) return new Promise(resolve => {
           const failed = { status: 'failed', error: 'Kode 服务重启失败，请重新连接后重试。' }
           if (!child.connected) { void rm(root, { recursive: true, force: true }); resolve(failed); return }
           child.once('message', message => resolve(message.result ?? failed))
@@ -105,6 +108,10 @@ export async function prepareLocalRecovery(ctx, config, { argv = process.argv, v
           child.send({ commit: true }, error => { if (error) { child.kill('SIGTERM'); void rm(root, { recursive: true, force: true }); resolve(failed) } })
         })
         if (!child.connected) { void rm(root, { recursive: true, force: true }); return }
+        for (const row of affected) {
+          const agent = ctx.get?.('agents')?.get(row.sessionId)
+          if (agent?.status === 'running') agent.cancel({ kind: 'user' }, { keepInbox: true })
+        }
         child.send({ commit: true }, error => {
           if (error) { child.kill('SIGTERM'); void rm(root, { recursive: true, force: true }); return }
           child.disconnect(); child.unref(); ctx.get('appExit')(0)
