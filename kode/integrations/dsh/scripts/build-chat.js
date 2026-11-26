@@ -94,15 +94,12 @@ replace('function activity(name) {', 'function activity(name) {\n if (name === "
 replace('const alwaysOpen = liveProcess || interleavedInput || turnProcessAlwaysOpen(routedNode);', 'const alwaysOpen = liveProcess || turnProcessAlwaysOpen(routedNode);')
 replace('hasContent: !interleavedInput && (processPresentation?.hasExternalProcess === true || processSpec.inlineReasoning),', 'hasContent: processPresentation?.hasExternalProcess === true || processSpec.inlineReasoning,')
 replace('presentation?.turnClosed === false || presentation?.hasInterleavedInput === true || reason', 'presentation?.turnClosed === false || reason')
-// The existing Turn control anchors the running timer above this reply.
-replace('if (turn?.status !== "closed") return null;', 'if (turn?.status === "open") return (0, react_jsx_runtime.jsx)(RunningStatus, { startTime: turn.start?.time, t }); if (turn?.status !== "closed") return null;')
-replace('...running ? [(0, react_jsx_runtime.jsx)(RunningStatus, {', '...running && !entries.some(entry => entry.kind === "node" && nodeStore.get(entry.key)?.kind === "turn-process" && nodeStore.get(entry.key)?.location?.turn?.status === "open") ? [(0, react_jsx_runtime.jsx)(RunningStatus, {')
 replace('t("chat.deepDivingFor", { duration: formatRunDuration(Math.max(1e3, now - startTime), t).map((part) => part.text).join("") })', 't("chat.processedFor", { minutes: Math.floor(Math.max(0, now - startTime) / 60000), seconds: Math.floor(Math.max(0, now - startTime) / 1000) % 60 })')
 replace('"chat.deepDiving": "深度求索中",', '"chat.processedFor": "已处理 {minutes} 分钟 {seconds} 秒",\n "chat.deepDiving": "处理中",')
 replace('"chat.deepDiving": "Deep diving",', '"chat.processedFor": "Working for {minutes} min {seconds} sec",\n "chat.deepDiving": "Working",')
 // A focused tool disclosure would otherwise reopen the entire process during
 // the native focus-protection pass. Hand focus to its surviving Turn control.
-replace('if (turn?.status === "open") return (0, react_jsx_runtime.jsx)(RunningStatus,', `const controlRef = (0, react.useRef)(null);
+replace('if (turn?.status !== "closed") return null;', `const controlRef = (0, react.useRef)(null);
 const previousStatus = (0, react.useRef)(turn?.status);
 (0, react.useLayoutEffect)(() => {
   if (previousStatus.current === "open" && turn?.status === "closed" && turn.end?.data.reason.kind === "completed") {
@@ -112,7 +109,7 @@ const previousStatus = (0, react.useRef)(turn?.status);
   }
   previousStatus.current = turn?.status;
 }, [turn?.status, node.data.turn, turnProcess.setOpen]);
-if (turn?.status === "open") return (0, react_jsx_runtime.jsx)(RunningStatus,`)
+if (turn?.status !== "closed") return null;`)
 replace('className: TurnProcessNodeView_module_css_default.root,', 'className: TurnProcessNodeView_module_css_default.root, ref: controlRef,')
 const contextSource = await readFile(new URL('../src/context-usage.js', import.meta.url), 'utf8')
 const contextParser = contextSource.slice(contextSource.indexOf('export function nativeContextUsage'), contextSource.indexOf('const schema')).replace('export function', 'function')

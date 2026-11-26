@@ -6165,7 +6165,7 @@ function UserStyleBubble({ content, loadImage, renderFactorySlot, actions, pendi
 			return [
 				...rows,
 				...pendingRows,
-				...running && !entries.some(entry => entry.kind === "node" && nodeStore.get(entry.key)?.kind === "turn-process" && nodeStore.get(entry.key)?.location?.turn?.status === "open") ? [(0, react_jsx_runtime.jsx)(RunningStatus, {
+				...running ? [(0, react_jsx_runtime.jsx)(RunningStatus, {
 					startTime: runningStartTime,
 					t
 				}, "running")] : []
@@ -7133,7 +7133,7 @@ const previousStatus = (0, react.useRef)(turn?.status);
   }
   previousStatus.current = turn?.status;
 }, [turn?.status, node.data.turn, turnProcess.setOpen]);
-if (turn?.status === "open") return (0, react_jsx_runtime.jsx)(RunningStatus, { startTime: turn.start?.time, t }); if (turn?.status !== "closed") return null;
+if (turn?.status !== "closed") return null;
 			const canCollapse = turnProcess.foldable && turnProcess.hasContent && !turnProcessAlwaysOpen(node);
 			const reason = turn.end?.data.reason.kind;
 			const stopped = reason === "aborted" || reason === "interrupted";
