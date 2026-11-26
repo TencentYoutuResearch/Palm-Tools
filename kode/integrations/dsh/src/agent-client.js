@@ -933,8 +933,15 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     'not-required': '无需授权', manual: '需手动配置', unknown: '状态未知',
   }
   // Guards live outside the component so re-renders and repeated clicks cannot start a second login for the same pair.
-  const mcpLoginsInFlight = new Set(), mcpAuthorizeRuns = new Set()
+  const mcpLoginsInFlight = new Set(), mcpAuthorizeRuns = new Set(), MCP_STATUS_TIMEOUT = 60000
   const mcpStatusKey = (sourceId, profileId) => `${sourceId}\0${profileId}`
+  // Newer services re-read only the MCP just logged in ({partial:true}); older ones still answer with every row.
+  function mergeMcpLoginRows(rows = [], result) {
+    if (!result?.partial) return result?.rows ?? rows
+    const same = (a, b) => a.packageKey === b.packageKey && a.name === b.name
+    const fresh = result.rows ?? []
+    return [...rows.map(row => fresh.find(item => same(item, row)) ?? row), ...fresh.filter(item => !rows.some(row => same(item, row)))]
+  }
   const mcpBulkKey = (sourceId, packageKey) => `${sourceId}\0${packageKey ?? ''}`
   const mcpRowKey = (sourceId, profileId, row) => `${sourceId}\0${profileId}\0${row.packageKey}\0${row.name}`
   // Services advertising packageToggle key path-only records by their relative path inside the source.
@@ -978,16 +985,34 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     const preferred = [activeId, agents?.configuredDefaultProfileId, agents?.selectedProfileId]
       .map(id => sourceProfileTarget(choices.find(profile => profile.id === id), data)).find(Boolean)
     const sources = data?.sources ?? []
+    // Only the newest read of a source × Agent may publish, and every read settles: an aborted or
+    // superseded request can neither overwrite fresher rows nor leave the tag spinning.
+    const mcpReads = useRef(new Map())
     const readMcpStatus = async (source, profileId, signal) => {
-      const key = mcpStatusKey(source.id, profileId)
+      const key = mcpStatusKey(source.id, profileId), ticket = {}
+      const stop = new AbortController(), abort = () => stop.abort()
+      let timedOut = false
+      signal?.addEventListener('abort', abort, { once: true })
+      const timer = setTimeout(() => { timedOut = true; stop.abort() }, MCP_STATUS_TIMEOUT)
+      mcpReads.current.get(key)?.stop.abort()
+      mcpReads.current.set(key, { ticket, stop })
+      const latest = () => mcpReads.current.get(key)?.ticket === ticket
+      const settle = patch => { if (latest()) setMcpStatuses(current => ({ ...current, [key]: { ...current[key], busy: false, ...patch } })) }
       setMcpStatuses(current => ({ ...current, [key]: { ...current[key], busy: true, error: '' } }))
       try {
-        const result = await hubCall({ action: 'mcp-status', id: source.id, profileId }, host, undefined, signal)
-        if (!signal?.aborted) setMcpStatuses(current => ({ ...current, [key]: { ...current[key], rows: result.rows ?? [], busy: false, error: '' } }))
-        return result
+        // Some transports ignore the signal; the race still settles the tag when the read is abandoned.
+        const abandoned = new Promise((_, reject) => stop.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }))
+        abandoned.catch(() => {})
+        const result = await Promise.race([hubCall({ action: 'mcp-status', id: source.id, profileId }, host, undefined, stop.signal), abandoned])
+        if (stop.signal.aborted) throw new Error('aborted')
+        settle({ rows: result.rows ?? [], error: '' })
+        return latest() ? result : undefined
       } catch (error) {
-        if (!signal?.aborted) setMcpStatuses(current => ({ ...current, [key]: { ...current[key], busy: false, error: error.message } }))
+        settle(timedOut ? { error: `读取超时：CLI 未在 ${MCP_STATUS_TIMEOUT / 1000} 秒内返回 MCP 状态` } : stop.signal.aborted ? {} : { error: error.message })
         return undefined
+      } finally {
+        clearTimeout(timer); signal?.removeEventListener('abort', abort)
+        if (latest()) mcpReads.current.delete(key)
       }
     }
     const loginMcp = async (source, profileId, row) => {
@@ -997,8 +1022,8 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       setMcpPending(current => ({ ...current, [rowKey]: true }))
       setMcpErrors(current => { const next = { ...current }; delete next[rowKey]; return next })
       try {
-        const result = await hubCall({ action: 'mcp-login', id: source.id, profileId, packageKey: row.packageKey, name: row.name }, host)
-        setMcpStatuses(current => ({ ...current, [statusKey]: { ...current[statusKey], rows: result.rows ?? [], busy: false, error: '' } }))
+        const result = await hubCall({ action: 'mcp-login', id: source.id, profileId, packageKey: row.packageKey, name: row.name, partial: true }, host)
+        setMcpStatuses(current => ({ ...current, [statusKey]: { ...current[statusKey], rows: mergeMcpLoginRows(current[statusKey]?.rows, result), error: '' } }))
         return true
       } catch (error) {
         setMcpErrors(current => ({ ...current, [rowKey]: error.message }))
@@ -1043,12 +1068,17 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       } catch (error) { setError(error.message); return false }
       finally { setBusy(false) }
     }
+    // The hub list is polled every 5 seconds; re-read MCP status only when what it depends on changes,
+    // so a slow CLI (TClaude starts every server) is not cancelled and restarted on each poll.
+    const mcpPlan = data && agents ? sources.flatMap(source => sourceMcpProfiles(source, data, choices).map(({ profile }) => [source.id, profile.id,
+      source.updatedAt, (source.packages ?? []).map(pkg => [pkg.key ?? pkg.path, pkg.enabled, (pkg.mcp ?? []).map(item => item.name)])])) : null
+    const mcpPlanKey = mcpPlan && JSON.stringify(mcpPlan)
     useEffect(() => {
-      if (!data || !agents) return
+      if (!mcpPlanKey) return
       const stop = new AbortController()
-      for (const source of sources) for (const { profile } of sourceMcpProfiles(source, data, choices)) void readMcpStatus(source, profile.id, stop.signal)
+      for (const [sourceId, profileId] of JSON.parse(mcpPlanKey)) void readMcpStatus({ id: sourceId }, profileId, stop.signal)
       return () => stop.abort()
-    }, [host, data, agents])
+    }, [host, mcpPlanKey])
     const field = (label, key, placeholder) => h('label', { className: `kode-field kode-source-field-${key}` }, label,
       h('input', { required: key !== 'subdir', readOnly: key === 'id' && draft.editing, value: draft[key], placeholder,
         onChange: event => setDraft({ ...draft, [key]: event.target.value }) }))
@@ -1187,7 +1217,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     return row.status === 'not-required' || row.status === 'manual' ? row.status : 'unknown'
   }
   const MCP_TAG_ACTIONS = { reading: '读取中…', unreported: '未报告', 'not-required': '无需授权', manual: '需手动配置', unknown: '状态未知' }
-  function McpAgentTag({ source, profile, row, tag, state, failure, pending, onRefreshMcp, onRetryMcp }) {
+  function McpAgentTag({ source, profile, row, tag, state, failure, pending, host, hostName, onRefreshMcp, onRetryMcp }) {
     const name = profile.name, base = { className: 'kode-source-target-option kode-mcp-agent', 'data-status': tag }
     if (tag === 'ok') return h('span', { ...base, title: `${name}：${MCP_STATUS_LABELS[row.status]}` },
       h(IconCheckOutlineRegular, { size: 14, 'aria-hidden': true }), name, h('span', { className: 'kode-sr-only' }, `：${MCP_STATUS_LABELS[row.status]}`))
@@ -1201,7 +1231,16 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     }
     if (tag === 'read-failed') return h('button', { ...base, type: 'button', title: state.error, 'aria-label': `${name}：状态读取失败，重试读取`, onClick: () => void onRefreshMcp(source, profile.id) },
       h(IconWarningOutlineRegular, { size: 14, 'aria-hidden': true }), name, h('span', { className: 'kode-mcp-agent-action' }, '重试读取'))
-    const icon = tag === 'reading' ? h(IconLoadingOutlineRegular, { size: 14, className: 'kode-spin', 'aria-hidden': true }) : tag === 'manual' ? h(IconWarningOutlineRegular, { size: 14, 'aria-hidden': true }) : null
+    // Manual and unrecognised states are fixed outside Kode, so the tag itself re-reads the CLI afterwards.
+    if (tag === 'manual' || tag === 'unknown') {
+      const reading = Boolean(state?.busy), where = `${hostName ?? host ?? '本机'} 的 ${name}`
+      const hint = tag === 'manual' ? `请在 ${where} 配置中完成 ${row.name} 授权${host && host !== 'local' ? '（浏览器不会跨主机自动登录）' : ''}，完成后点击刷新状态` : `${where} 报告了未识别的 ${row.name} 状态，点击刷新状态`
+      return h('button', { ...base, type: 'button', disabled: reading, 'aria-busy': reading || undefined, title: hint,
+        'aria-label': `${name}：${row.name} ${MCP_TAG_ACTIONS[tag]}，${reading ? '正在刷新状态' : hint}`, onClick: () => void onRefreshMcp(source, profile.id) },
+      reading ? h(IconLoadingOutlineRegular, { size: 14, className: 'kode-spin', 'aria-hidden': true }) : tag === 'manual' ? h(IconWarningOutlineRegular, { size: 14, 'aria-hidden': true }) : null,
+      name, h('span', { className: 'kode-mcp-agent-action' }, reading ? '刷新中…' : MCP_TAG_ACTIONS[tag]))
+    }
+    const icon = tag === 'reading' ? h(IconLoadingOutlineRegular, { size: 14, className: 'kode-spin', 'aria-hidden': true }) : null
     return h('span', base, icon, name, h('span', { className: 'kode-mcp-agent-action' }, MCP_TAG_ACTIONS[tag]))
   }
   function mcpBulkSummary(results) {
@@ -1225,7 +1264,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     })) : []
     const loginable = pairs.filter(pair => pair.tag === 'login' && !pair.pending)
     const bulk = mcpBulk[mcpBulkKey(source.id, packageKey)]
-    const tagProps = { source, onRefreshMcp, onRetryMcp }
+    const tagProps = { source, host, hostName: mcpHostName, onRefreshMcp, onRetryMcp }
     return h('section', { className: 'kode-source-preview-section kode-mcp-authorization' },
       h('div', { className: 'kode-mcp-head' },
         h('h3', null, 'MCP', h('span', null, names.length)),
@@ -1239,18 +1278,12 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
         const spec = declared.find(item => item.name === name), own = pairs.filter(pair => pair.name === name)
         const failures = own.filter(pair => pair.tag === 'login' && pair.failure)
         const readErrors = own.filter(pair => pair.tag === 'read-failed')
-        const manual = own.filter(pair => pair.tag === 'manual')
         return h('li', { key: name, className: 'kode-mcp-item' },
           h('div', { className: 'kode-mcp-item-head' }, h('strong', null, name), (spec?.description || spec?.type) && h('span', null, spec.description || spec.type)),
           own.length > 0 && h('div', { className: 'kode-mcp-agents', role: 'group', 'aria-label': `${name} 在各 Agent 的授权状态` },
             ...own.map(pair => h(McpAgentTag, { key: pair.profile.id, ...tagProps, ...pair }))),
           ...failures.map(pair => h('p', { key: 'login-' + pair.profile.id, className: 'kode-mcp-status-detail', 'data-failed': true }, `${pair.profile.name} 登录失败：${pair.failure}`)),
-          ...readErrors.map(pair => h('p', { key: 'read-' + pair.profile.id, className: 'kode-mcp-status-detail', 'data-failed': true }, `${pair.profile.name} 状态读取失败：${pair.state.error}`)),
-          manual.length > 0 && h('details', { className: 'kode-mcp-manual' },
-            h('summary', null, '手动配置'),
-            ...manual.map(pair => h('div', { key: pair.profile.id, className: 'kode-mcp-manual-row' },
-              h('p', null, `请在 ${mcpHostName ?? host} 的 ${pair.profile.name} 配置中完成 ${name} 授权。${host !== 'local' ? '浏览器不会跨主机自动登录。' : ''}`),
-              h(Button, { size: 'sm', variant: 'outline', 'aria-label': `刷新 ${pair.profile.name} 状态`, onClick: () => void onRefreshMcp(source, pair.profile.id) }, '刷新状态')))))
+          ...readErrors.map(pair => h('p', { key: 'read-' + pair.profile.id, className: 'kode-mcp-status-detail', 'data-failed': true }, `${pair.profile.name} 状态读取失败：${pair.state.error}`)))
       })))
   }
   function SourcePreview({ source, packagePath, onPackageChange, host, targetOptions, busy = false, packageToggle = false, onTogglePackage = () => {}, onUpdateService = () => {}, ...mcp }) {
@@ -1293,7 +1326,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
               h('strong', null, name),
               (pkg.description || pkg.path) && h('span', null, pkg.description || pkg.path)),
             h('label', { className: 'kode-package-toggle' },
-              h('span', null, key ? (enabled ? '已启用' : '已停用') : '需更新服务'),
+              !key && h('span', null, '需更新服务'),
               h('input', { type: 'checkbox', role: 'switch', checked: enabled, disabled: busy || !key,
                 'aria-label': `${enabled ? '停用' : '启用'} ${name}`, title: key ? undefined : '更新此主机的 Kode 服务后可启停',
                 onChange: event => onTogglePackage(source, pkg, event.target.checked) })))
@@ -2996,27 +3029,69 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     }, [])
     return request && h(HandoffDialog, { key: `${request.host}:${request.sessionId}`, ...request, sessions, close: () => setRequest(null) })
   }
+  // The target Agent's own configuration store lists the models it publishes and its default selection.
+  // Model and effort start from that default; a choice survives only while the target still offers it.
+  function handoffModelChoice(data, picked = {}) {
+    const models = data?.models ?? [], fallback = data?.defaultModelSelection
+    const model = models.find(row => row.id === picked.model) ?? models.find(row => row.id === fallback?.model) ?? models[0]
+    const efforts = model?.reasoningEfforts ?? []
+    const effortIds = efforts.map(row => row.id)
+    const inherited = model?.id === fallback?.model ? fallback?.reasoningEffort : undefined
+    const effort = [picked.model === model?.id ? picked.reasoningEffort : undefined, inherited, model?.defaultReasoningEffort].find(id => id && effortIds.includes(id))
+    return { models, model, efforts, effort }
+  }
   function HandoffDialog({ sessionId, sessions, host, close }) {
     const { data, error: directoryError } = useDirectory(sessionId, sessions, host)
-    const [target, setTarget] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState('')
+    const [target, setTarget] = useState(''), [picked, setPicked] = useState({}), [busy, setBusy] = useState(false), [error, setError] = useState('')
     const requestId = useRef(null)
     const current = data?.currentProfile?.id ?? data?.selectedProfileId
     const profiles = (data?.profiles ?? []).filter(profile => profile.id !== current && data?.supportedTypes?.includes(profile.type))
+    const store = target ? directory(undefined, host, true, target) : null
+    const empty = React.useMemo(() => ({ data: undefined, busy: false, error: '' }), [])
+    const subscribe = React.useCallback(fn => store?.subscribe(fn) ?? (() => {}), [store])
+    const targetState = useSyncExternalStore(subscribe, () => store?.getSnapshot() ?? empty)
+    useEffect(() => { if (store) void store.load() }, [store])
+    // The store is keyed by profile, but a fast switch can still render the previous target for a frame.
+    const targetData = targetState.data && (targetState.data.selectedProfileId ?? target) === target ? targetState.data : undefined
+    const { models, model, efforts, effort } = handoffModelChoice(targetData, picked)
+    const loadingModels = Boolean(target && !targetData && !targetState.error)
+    const choose = patch => { setPicked(previous => ({ ...previous, ...patch })); requestId.current = null }
+    const submit = async () => {
+      setBusy(true); setError('')
+      const onScreen = transport?.current ?? 'local'
+      try {
+        requestId.current ??= crypto.randomUUID()
+        const result = await hubCall({ action: 'handoff-skill', sessionId, profileId: target, requestId: requestId.current,
+          ...(model ? { model: model.id } : {}), ...(model && effort ? { reasoningEffort: effort } : {}) }, host)
+        // If the person moved to another host while the handoff ran, leave them there.
+        if ((transport?.current ?? 'local') !== onScreen) throw new Error('交接已完成，请切回原主机查看目标会话。')
+        // Otherwise open the target on the host that ran the handoff through the transport's cold-session
+        // navigation chain, which reconnects when needed and admits sessions the local catalog has not seen.
+        showShared(null)
+        if (transport) await switchHost(host, { sessionId: result.sessionId })
+        else { await sessions.refresh(); await avatarContext.get('uiWorkspace').openSession(result.sessionId) }
+        close()
+      } catch (error) { setError(error.message) } finally { setBusy(false) }
+    }
     return h(Modal, { open: true, title: '用其他 Agent 继续', className: 'kode-handoff-dialog', closeLabel: '关闭', onClose: () => { if (!busy) close() },
         description: '当前 Agent 会用交接技能整理目标、进度和待办，目标 Agent 将在同一工作区根据交接稿继续。',
-        footer: h(React.Fragment, null, h(Button, { variant: 'outline', disabled: busy, onClick: close }, '取消'), h(Button, { disabled: busy || !target, variant: 'primary', onClick: async () => {
-          setBusy(true); setError('')
-          try {
-            requestId.current ??= crypto.randomUUID()
-            const result = await hubCall({ action: 'handoff-skill', sessionId, profileId: target, requestId: requestId.current }, host)
-            if ((transport?.current ?? 'local') !== host) throw new Error('交接已完成，请切回原主机查看目标会话。')
-            await sessions.refresh(); showShared(null); await avatarContext.get('uiWorkspace').openSession(result.sessionId); close()
-          } catch (error) { setError(error.message) } finally { setBusy(false) }
-        } }, busy ? h(React.Fragment, null, h(StateDot, { state: 'ongoing', size: 16, className: 'kode-status-dot' }), '正在交接…') : '开始交接')) },
+        footer: h(React.Fragment, null, h(Button, { variant: 'outline', disabled: busy, onClick: close }, '取消'),
+          h(Button, { disabled: busy || !target || loadingModels, variant: 'primary', onClick: () => void submit() },
+            busy ? h(React.Fragment, null, h(StateDot, { state: 'ongoing', size: 16, className: 'kode-status-dot' }), '正在交接…') : '开始交接')) },
         h('div', { className: 'kode-handoff-body', 'aria-busy': busy },
-          h(SelectField, { label: '目标 Agent', value: target, disabled: busy || !profiles.length, options: [{ value: '', label: profiles.length ? '选择 Agent' : data ? '暂无可交接的 Agent' : '正在读取 Agent…' }, ...profiles.map(profile => ({ value: profile.id, label: profile.name }))], onChange: value => { setTarget(value); requestId.current = null } }),
-          h(Failure, { text: error || directoryError })))
+          h(SelectField, { label: '目标 Agent', value: target, disabled: busy || !profiles.length, options: [{ value: '', label: profiles.length ? '选择 Agent' : data ? '暂无可交接的 Agent' : '正在读取 Agent…' }, ...profiles.map(profile => ({ value: profile.id, label: profile.name }))],
+            onChange: value => { if (value === target) return; setTarget(value); setPicked({}); requestId.current = null } }),
+          target && (loadingModels
+            ? h('p', { className: 'kode-config-note', role: 'status' }, '正在读取此 Agent 的模型…')
+            : models.length > 0 && h('div', { className: 'kode-handoff-model' },
+              h(SelectField, { label: '模型', value: model?.id ?? '', disabled: busy, options: models.map(row => ({ value: row.id, label: (row.name ?? row.id) + (row.id === targetData?.defaultModelSelection?.model ? '（默认）' : '') })),
+                onChange: id => choose({ model: id, reasoningEffort: undefined }) }),
+              efforts.length > 0 && h(SelectField, { label: '推理强度', value: effort ?? '', disabled: busy || efforts.length < 2, options: efforts.map(row => ({ value: row.id, label: row.name ?? row.id })),
+                onChange: id => choose({ model: model.id, reasoningEffort: id }) }))),
+          target && !loadingModels && !models.length && !targetState.error && h('p', { className: 'kode-config-note' }, '此 Agent 未公布可选模型，将使用它的默认模型。'),
+          h(Failure, { text: error || directoryError || (target && (targetState.error || targetData?.modelError)) })))
   }
+
 
   function InterfaceSettingsBody() {
     const service = avatarContext?.get('kodeInterface')
@@ -5751,7 +5826,7 @@ html[data-kode-embed] .kode-token-notch{display:none}
 .kode-package-select{display:flex;flex:1;flex-direction:column;gap:3px;min-width:0;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
 .kode-package-select>strong{font-size:13px;font-weight:600;line-height:20px;overflow-wrap:anywhere}
 .kode-package-select>span{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;overflow-wrap:anywhere}
-.kode-package-select:focus-visible,.kode-mcp-manual summary:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:3px}
+.kode-package-select:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:3px}
 .kode-package-toggle{display:flex;align-items:center;gap:8px;flex:none;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
 .kode-package-sync-note{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px 12px;margin-bottom:10px}.kode-package-sync-note>.kode-config-note{flex:1 1 280px;margin:0}
 .kode-mcp-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 8px}.kode-mcp-head>h3{margin:0}
@@ -5767,23 +5842,20 @@ button.kode-mcp-agent[data-status=login][data-failed=true],.kode-mcp-agent[data-
 .kode-mcp-agent[data-status=not-required]{color:var(--dsw-alias-label-secondary)}
 .kode-mcp-agent[data-status=manual]>svg,.kode-mcp-agent[data-status=manual] .kode-mcp-agent-action{color:var(--dsw-alias-state-warn-primary,#f59e0b)}
 .kode-mcp-agent:is([data-status=unknown],[data-status=unreported],[data-status=reading]){border-style:dashed;color:var(--dsw-alias-label-secondary)}
-.kode-mcp-manual-row{display:flex;align-items:center;flex-wrap:wrap;gap:4px 10px}.kode-mcp-manual-row>p{flex:1 1 220px}
 .kode-mcp-status-detail{display:block;margin:6px 0 0}
 .kode-mcp-item-head{display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 10px;min-width:0}
 .kode-mcp-item-head>span{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}
 .kode-mcp-status-detail{flex:1 1 160px;min-width:0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
 .kode-mcp-status-detail[data-failed=true]{color:var(--dsw-alias-state-error-primary)}
-.kode-mcp-manual{flex:1 1 100%;padding-top:4px}
-.kode-mcp-manual>summary{width:fit-content;color:var(--dsw-alias-label-primary);font-size:12px;cursor:pointer}
-.kode-mcp-manual>p{margin:8px 0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}
 .kode-source-about dl{margin:0}
 .kode-source-about dl>div{display:grid;grid-template-columns:110px minmax(0,1fr);gap:12px;padding:9px 0;border-bottom:.5px solid var(--dsw-alias-border-l2)}
 .kode-source-about dl>div:last-child{border-bottom:0}
 .kode-source-about dt{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}
 .kode-source-about dd{margin:0;font-size:13px;line-height:20px;white-space:pre-wrap;overflow-wrap:anywhere}
 .kode-source-actions>button{width:auto;min-width:0}
-.kode-source-remove{color:var(--dsw-alias-state-error-primary)}
-.kode-source-remove:hover:not(:disabled),.kode-delete:hover:not(:disabled){background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 10%,transparent)}
+/* Same tokens as dsh's plugin manager uninstall button (outline + .danger): red label, red outline, red-tinted hover. */
+.kode-source-remove{color:var(--dsw-alias-state-error-primary);--dsh-button-outline-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 30%,transparent);--dsw-alias-interactive-bg-hover:color-mix(in srgb,var(--dsw-alias-state-error-primary) 8%,transparent)}
+.kode-delete:hover:not(:disabled){background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 10%,transparent)}
 .kode-avatar-editor{display:flex;flex-direction:column;gap:12px;padding:8px 0}
 .kode-avatar-content{display:flex;flex-direction:column;gap:12px}
 .kode-avatar-content>*{flex-shrink:0}
@@ -5871,6 +5943,8 @@ button.kode-mcp-agent[data-status=login][data-failed=true],.kode-mcp-agent[data-
 .kode-settings-card:is(.kode-agent-list-card,.kode-hub-sources-card,.kode-ssh-hosts-card)>.kode-agent-rows>.kode-agent-row+.kode-agent-row{border-top:.5px solid var(--dsw-alias-border-l2)}
 .kode-settings-card>.kode-personalization{height:auto;overflow:visible}
 .kode-handoff-body .kode-field{margin-bottom:12px}
+.kode-handoff-model{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0 12px}.kode-handoff-model>.kode-field:only-child{grid-column:1/-1}
+@media(max-width:480px){.kode-handoff-model{grid-template-columns:minmax(0,1fr)}}
 .kode-handoff-body>.kode-config-note{margin:0}
 .kode-settings-main{height:100%;min-height:0;overflow:auto;box-sizing:border-box;padding:24px clamp(16px,4vw,48px) 32px;width:100%;min-width:0}
 .kode-settings-page .kode-settings-section .kode-agent-settings{width:100%;max-width:none;min-width:0;box-sizing:border-box}
