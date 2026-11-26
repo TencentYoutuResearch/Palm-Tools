@@ -1160,7 +1160,7 @@ esac
     let mut state = agents["value"].clone();
     state["profiles"] = json!([{"id":"fixture","type":"claude","executable":executable,"env":{"PROBE_FILE":root.join("authorized")}}]);
     hub.store.save_document("agents",agents["revision"].as_u64().unwrap(),state).unwrap();
-    hub.extensions.change(hub, json!({"action":"save-source","source":{"id":"sample","kind":"local","location":origin,"targets":["claude"]}})).unwrap();
+    hub.extensions.change(hub, json!({"action":"save-source","source":{"id":"sample","kind":"local","location":origin,"targets":["claude","dsh"]}})).unwrap();
     hub.extensions.change(hub, json!({"action":"sync-source","id":"sample"})).unwrap();
     let mut request = json!({"action":"mcp-status","id":"sample","profileId":"fixture"});
     let expected = |status| json!({"rows":[{"name":"calendar","packageKey":".","status":status}]});
@@ -1172,6 +1172,11 @@ esac
     assert!(!root.join("authorized").exists());
     request["name"] = json!("calendar");
     assert_eq!(super::extension_auth::execute(hub,&request).await.unwrap(), expected("connected"));
+    request["action"] = json!("mcp-status");
+    request["profileId"] = json!("builtin-dsh");
+    assert_eq!(super::extension_auth::execute(hub,&request).await.unwrap(), expected("manual"));
+    request["profileId"] = json!("missing-profile");
+    assert!(super::extension_auth::execute(hub,&request).await.is_err());
 }
 
 #[tokio::test]

@@ -105,9 +105,12 @@ async fn query(hub: &Hub, input: &Value, login: bool) -> Result<Value> {
         .and_then(|s| s.iter().find(|s| s["id"] == input["id"]))
         .context("来源不存在")?;
     let agents = hub.store.document("agents")?;
+    // The desktop exposes its native DSH profile even before any profiles are saved.
+    let native_dsh = json!({"id":"builtin-dsh","type":"dsh"});
     let profile = agents["value"]["profiles"]
         .as_array()
         .and_then(|s| s.iter().find(|p| p["id"] == input["profileId"]))
+        .or_else(|| (input["profileId"] == "builtin-dsh").then_some(&native_dsh))
         .context("Agent 不存在")?;
     let (target, _) = extension_targets::for_profile(profile).context("Agent 未配置同步目标")?;
     let synced = source.get("syncedTargets").unwrap_or(&source["targets"]);
