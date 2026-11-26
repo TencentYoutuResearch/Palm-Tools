@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { agentFor, botsView, botTemplates, registerBotsApi, runBotForWatch } from '../src/bots-api.js'
+import { agentFor, botRoutines, botsView, botTemplates, registerBotsApi, runBotForWatch } from '../src/bots-api.js'
 
 const runtime = {
   hasRuntime: type => type !== 'missing',
@@ -162,14 +162,21 @@ test("each bot lists only its own sessions: main, ones in its folder and its wat
 })
 
 test('templates ship with real skill slugs and valid presets', async () => {
-  const templates = await botTemplates()
+  const templates = await botTemplates(), routines = await botRoutines()
   assert.ok(templates.length >= 6)
+  assert.deepEqual(routines.map(row => row.id), ['standup', 'weekly', 'replies', 'patrol'])
   for (const template of templates) {
     assert.match(template.id, /^[a-z0-9-]+$/)
     assert.match(template.banner, /^preset:(blurple|aurora|cyber|sunset|forest|sakura|ocean|amber)$/)
     assert.ok(['plan', 'default', 'acceptEdits'].includes(template.permission_ceiling))
     assert.ok(template.tagline.length <= 120 && template.persona.length > 20)
     for (const skill of template.skills) assert.ok(/^[A-Za-z0-9_.-]+$/.test(skill.slug) && skill.source === 'skillhub' && skill.name)
+    assert.ok(['direct', 'draft'].includes(template.outbound))
+    for (const id of template.routines) assert.ok(routines.some(row => row.id === id), `${template.id} uses unknown routine ${id}`)
+  }
+  for (const routine of routines) {
+    assert.match(routine.cron, /^\S+( \S+){4}$/)
+    assert.ok(routine.instructions.includes('kode_progress_snapshot') || routine.instructions.includes('bot_tasks_list'), routine.id)
   }
 })
 
@@ -198,6 +205,8 @@ test('a 创建伙伴 conversation starts in the builder folder with the skill an
     assert.match(created[0].task, /"backend_key": "tclaude"/)
     assert.match(created[0].task, /gallery\/03-violet/)
     assert.match(created[0].task, /从模板「代码审查员」开始/)
+    assert.match(created[0].task, /"id": "standup"/, 'the builder knows the routines it may offer')
+    assert.match(created[0].task, /日常节奏/)
     assert.doesNotMatch(created[0].task, /^---/, 'the skill front matter is not sent')
     assert.equal((await post({ action: 'builder', template: 'nope' })).statusCode, 400)
   } finally { await rm(root, { recursive: true, force: true }) }

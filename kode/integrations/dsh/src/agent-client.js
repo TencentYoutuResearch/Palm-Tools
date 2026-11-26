@@ -1438,10 +1438,10 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     const collapsed = useBotsCollapsed()
     const { data } = useBots()
     const watches = useWatches().data
-    const totalUnseen = Object.values(watches?.unseen ?? {}).reduce((sum, n) => sum + (Number(n) || 0), 0)
+    const totalUnseen = Object.values(watches?.unseen ?? {}).reduce((sum, n) => sum + (Number(n) || 0), 0) + inboxItems(watches).length
     const count = data?.bots?.length ?? 0
     return h('span', { className: 'kode-bots-trailing' },
-      collapsed && totalUnseen > 0 && h('span', { className: 'kode-bot-badge', title: `${totalUnseen} 条新关注动态` }, totalUnseen > 99 ? '99+' : String(totalUnseen)),
+      collapsed && totalUnseen > 0 && h('span', { className: 'kode-bot-badge', title: `${totalUnseen} 条新动态或待你处理的事` }, totalUnseen > 99 ? '99+' : String(totalUnseen)),
       h('span', {
         role: 'button',
         tabIndex: 0,
@@ -1555,7 +1555,10 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
             h('span', { className: 'kode-bot-name' }, bot.name),
             (bot.tagline || bot.agent || !main) && h('span', { className: 'kode-bot-sub' }, bot.tagline || (!main ? '点击开始对话' : bot.agent))),
           data.default_bot === bot.id && h('span', { className: 'kode-bot-tag' }, '默认'),
-          watches?.unseen?.[bot.id] > 0 && h('span', { className: 'kode-bot-badge', title: '有新的关注动态', onClick: event => { event.stopPropagation(); requestedBotWatches = bot.id; openBotsPage?.(); window.dispatchEvent(new CustomEvent('kode-bot-watches')) } }, watches.unseen[bot.id]),
+          (() => {
+            const waiting = inboxItems(watches).filter(item => item.bot === bot.id).length, count = (watches?.unseen?.[bot.id] ?? 0) + waiting
+            return count > 0 && h('span', { className: 'kode-bot-badge', title: waiting ? `${waiting} 件事等你处理` : '有新的关注动态', onClick: event => { event.stopPropagation(); if (!waiting) requestedBotWatches = bot.id; openBotsPage?.(); if (!waiting) window.dispatchEvent(new CustomEvent('kode-bot-watches')) } }, count)
+          })(),
           isBusy && h('span', { className: 'kode-bot-busy', title: '正在处理关注的事' })),
           others.length > 0 && h('button', { type: 'button', className: 'kode-bot-more', 'aria-expanded': open, title: open ? '收起子任务与其他会话' : `子任务与会话 ${others.length} 个`, onClick: () => setExpanded({ ...expanded, [bot.id]: !open }) }, open ? '−' : others.length)),
           ...(open ? others.slice(0, 8).map(row => h('button', { key: `${bot.id}:${row.id}`, type: 'button', className: 'kode-bot-row kode-bot-session', title: row.title, onClick: () => openSession(row.id) },
@@ -1660,13 +1663,110 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       notice && h('p', { className: 'kode-config-note', role: 'status' }, notice),
       h(Failure, { text: error }))
   }
-  const BOT_SETTINGS_TABS = [['profile', '资料'], ['persona', '角色说明'], ['run', '运行方式'], ['skills', '技能'], ['watches', '关注'], ['advanced', '高级']]
+  const TASK_COLUMNS = [['needs_user', '待你处理'], ['in_progress', '进行中'], ['waiting', '等待中'], ['planned', '计划中'], ['done', '最近完成']]
+  const TASK_STATUS_OPTIONS = [{ value: 'planned', label: '计划中' }, { value: 'in_progress', label: '进行中' }, { value: 'waiting', label: '等待中' }, { value: 'needs_user', label: '待你处理' }, { value: 'done', label: '已完成' }, { value: 'cancelled', label: '取消' }]
+  const shortTime = ms => new Date(ms).toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+  async function taskAct(body) { return botsCall(body) }
+  // A bot's task board: what it tracks for you, grouped by status.
+  function BotTaskBoard({ bot, ui }) {
+    const { data, error: loadError } = useWatches()
+    const [title, setTitle] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState('')
+    const act = async body => { setBusy(true); setError(''); try { await taskAct(body); return true } catch (failure) { setError(failure.message); return false } finally { setBusy(false) } }
+    if (!data) return h('div', null, h('p', { className: 'kode-secondary', role: 'status' }, '正在读取任务…'), h(Failure, { text: loadError }))
+    if (!data.tasks) return h('p', { className: 'kode-config-note' }, 'Kode 服务版本较旧，更新后才能使用任务板。')
+    const tasks = data.tasks.filter(task => task.bot === bot.id && task.kind === 'task')
+    const add = async event => { event.preventDefault(); if (title.trim() && await act({ action: 'task_upsert', task: { bot: bot.id, title: title.trim() } })) setTitle('') }
+    const card = task => h('li', { key: task.id, className: 'kode-task-card', 'data-status': task.status },
+      h('div', { className: 'kode-task-head' },
+        h('span', { className: 'kode-agent-name' }, task.title),
+        h('button', { type: 'button', className: 'kode-task-remove', title: '删除任务', disabled: busy, onClick: () => { if (confirm(`删除任务「${task.title}」？`)) void act({ action: 'task_delete', id: task.id }) } }, '×')),
+      task.reason && h('span', { className: 'kode-secondary kode-task-reason' }, task.reason),
+      h('div', { className: 'kode-task-meta' },
+        h(SelectField, { label: '状态', showLabel: false, value: task.status, options: TASK_STATUS_OPTIONS, disabled: busy, onChange: value => void act({ action: 'task_upsert', task: { id: task.id, status: value } }) }),
+        task.due && h('span', { className: `kode-agent-tag${task.due < Date.now() && !task.closed ? ' is-late' : ''}` }, `截止 ${shortTime(task.due)}`),
+        task.session_uuid && h(Button, { size: 'sm', variant: 'ghost', onClick: () => void ui()?.openSession(task.session_uuid) }, '打开会话'),
+        h('span', { className: 'kode-secondary' }, `更新于 ${shortTime(task.updated)}`)))
+    return h('div', { className: 'kode-task-board' },
+      h('p', { className: 'kode-secondary' }, '伙伴自己维护这块任务板；关联了执行会话的任务，会话完成、提问、卡住或到期时 Kode 会提醒它跟进。你也可以在这里加任务或改状态。'),
+      h('form', { className: 'kode-skill-search', onSubmit: add }, h(IconPlusOutlineRegular, { size: 16 }), h('input', { 'aria-label': '新任务', placeholder: `给 ${bot.name} 加一个要跟踪的任务`, value: title, disabled: busy, onChange: event => setTitle(event.target.value) }), h(Button, { type: 'submit', size: 'sm', variant: 'outline', disabled: busy || !title.trim() }, '添加')),
+      tasks.length ? h('div', { className: 'kode-task-columns' }, ...TASK_COLUMNS.map(([status, label]) => {
+        const rows = tasks.filter(task => status === 'done' ? task.status === 'done' : task.status === status)
+        return rows.length > 0 && h('section', { key: status, className: 'kode-task-column' }, h('h4', null, `${label} · ${rows.length}`), h('ul', { className: 'kode-skill-list' }, ...rows.map(card)))
+      })) : h('p', { className: 'kode-secondary' }, '任务板还是空的。让伙伴「帮我盯着 …」，或者在上面加一个。'),
+      h(Failure, { text: error }))
+  }
+  /** Everything waiting for you across bots: plans, drafted messages, tasks
+   *  and runs that need you. */
+  function inboxItems(watches) {
+    if (!watches) return []
+    const tasks = (watches.tasks ?? []).filter(task => task.status === 'needs_user').map(task => ({ key: task.id, kind: task.kind, bot: task.bot, time: task.updated, task }))
+    const runs = (watches.runs ?? []).filter(run => run.status === 'needs_user').map(run => ({ key: run.id, kind: 'run', bot: run.bot, time: run.started, run }))
+    return [...tasks, ...runs].sort((a, b) => b.time - a.time)
+  }
+  function BotInboxItem({ item, bot, watch, ui }) {
+    const [note, setNote] = useState(''), [content, setContent] = useState(item.task?.payload?.content ?? ''), [busy, setBusy] = useState(false), [error, setError] = useState('')
+    const act = async body => { setBusy(true); setError(''); try { await taskAct(body) } catch (failure) { setError(failure.message) } finally { setBusy(false) } }
+    const who = h('span', { className: 'kode-inbox-who' }, bot ? h(BotAvatar, { bot, size: 24 }) : null, h('span', null, bot?.name ?? '伙伴'), h('span', { className: 'kode-secondary' }, shortTime(item.time)))
+    const { task, run } = item
+    if (item.kind === 'plan') return h('li', { className: 'kode-inbox-item' }, who,
+      h('span', { className: 'kode-agent-tag' }, '计划待批准'), h('strong', null, task.title),
+      task.detail && h('p', { className: 'kode-secondary kode-inbox-text' }, task.detail),
+      h('ol', { className: 'kode-inbox-steps' }, ...(task.payload?.steps ?? []).map((step, index) => h('li', { key: index }, step.title, step.detail ? h('span', { className: 'kode-secondary' }, ` · ${step.detail}`) : null))),
+      h('input', { className: 'kode-inbox-note', placeholder: '意见（可选），例如：先做第 2 步', value: note, disabled: busy, onChange: event => setNote(event.target.value) }),
+      h('div', { className: 'kode-bot-actions' }, h(Button, { variant: 'primary', disabled: busy, onClick: () => void act({ action: 'task_approve', id: task.id, note }) }, '批准并开始'), h(Button, { disabled: busy, onClick: () => void act({ action: 'task_reject', id: task.id, note }) }, '不同意')),
+      h(Failure, { text: error }))
+    if (item.kind === 'outbound') return h('li', { className: 'kode-inbox-item' }, who,
+      h('span', { className: 'kode-agent-tag' }, `待发送 · 企业微信 ${task.payload?.chat_id ?? ''}`),
+      h('textarea', { className: 'kode-inbox-draft', rows: Math.min(10, Math.max(3, content.split('\n').length)), value: content, disabled: busy, onChange: event => setContent(event.target.value) }),
+      h('div', { className: 'kode-bot-actions' }, h(Button, { variant: 'primary', disabled: busy || !content.trim(), onClick: () => void act({ action: 'outbox_send', id: task.id, content }) }, busy ? '发送中…' : '发送'), h(Button, { disabled: busy, onClick: () => void act({ action: 'task_reject', id: task.id, note: content !== task.payload?.content ? '用户改过内容但决定不发' : '' }) }, '不发')),
+      h(Failure, { text: error }))
+    if (item.kind === 'run') return h('li', { className: 'kode-inbox-item' }, who,
+      h('span', { className: 'kode-agent-tag' }, '关注任务在等你'), h('strong', null, watch?.spec.name ?? '关注任务'),
+      run.summary && h('p', { className: 'kode-secondary kode-inbox-text' }, run.summary),
+      run.session_uuid && h('div', { className: 'kode-bot-actions' }, h(Button, { variant: 'primary', onClick: () => void ui()?.openSession(run.session_uuid) }, '去处理')))
+    return h('li', { className: 'kode-inbox-item' }, who,
+      h('span', { className: 'kode-agent-tag' }, '待你处理'), h('strong', null, task.title),
+      (task.reason || task.detail) && h('p', { className: 'kode-secondary kode-inbox-text' }, task.reason || task.detail),
+      h('div', { className: 'kode-bot-actions' },
+        task.session_uuid && h(Button, { variant: 'primary', onClick: () => void ui()?.openSession(task.session_uuid) }, '打开会话'),
+        h(Button, { disabled: busy, onClick: () => void act({ action: 'task_upsert', task: { id: task.id, status: 'in_progress', reason: '' } }) }, '我处理好了，让伙伴继续'),
+        h(Button, { variant: 'ghost', disabled: busy, onClick: () => void act({ action: 'task_upsert', task: { id: task.id, status: 'done' } }) }, '标为完成')),
+      h(Failure, { text: error }))
+  }
+  function BotInbox({ data, ui }) {
+    const watches = useWatches().data
+    const items = inboxItems(watches)
+    if (!items.length) return null
+    return h('section', { className: 'kode-bots-section kode-bot-inbox' },
+      h('h3', { className: 'kode-bots-section-title' }, `待你处理 · ${items.length}`),
+      h('ul', { className: 'kode-inbox-list' }, ...items.map(item => h(BotInboxItem, { key: item.key, item, ui, bot: data.bots.find(bot => bot.id === item.bot), watch: item.run && watches.watches.find(row => row.id === item.run.watch_id) }))))
+  }
+  // Bot notifications in this window wait and arrive together afterwards.
+  function BotQuietHours({ data }) {
+    const current = data.quiet_hours
+    const [draft, setDraft] = useState(() => current ?? { start: '22:00', end: '08:00' }), [enabled, setEnabled] = useState(Boolean(current)), [busy, setBusy] = useState(false), [error, setError] = useState(''), [saved, setSaved] = useState(false)
+    const save = async () => {
+      setBusy(true); setError(''); setSaved(false)
+      try { publishBots({ data: await botsCall({ action: 'set_quiet_hours', quiet_hours: enabled ? draft : null }), error: '' }); setSaved(true) } catch (failure) { setError(failure.message) } finally { setBusy(false) }
+    }
+    return h('div', { className: 'kode-agent-row kode-bot-quiet' },
+      h('div', { className: 'kode-agent-row-head' }, h('span', { className: 'kode-agent-name' }, '免打扰时段'), h(FastSwitch, { checked: enabled, disabled: busy, label: '免打扰', onChange: setEnabled })),
+      h('p', { className: 'kode-secondary' }, '这段时间里伙伴的提醒先攒着，结束后合成一条发给你。定时任务照常运行。'),
+      enabled && h('div', { className: 'kode-watch-grid' },
+        h('label', { className: 'kode-field' }, h('span', null, '开始'), h('input', { type: 'time', value: draft.start, disabled: busy, onChange: event => setDraft({ ...draft, start: event.target.value }) })),
+        h('label', { className: 'kode-field' }, h('span', null, '结束'), h('input', { type: 'time', value: draft.end, disabled: busy, onChange: event => setDraft({ ...draft, end: event.target.value }) }))),
+      h('div', { className: 'kode-settings-footer' }, saved && h('span', { className: 'kode-secondary', role: 'status' }, '已保存'), h(Button, { variant: 'primary', disabled: busy, onClick: () => void save() }, '保存')),
+      h(Failure, { text: error }))
+  }
+  const BOT_SETTINGS_TABS = [['profile', '资料'], ['persona', '角色说明'], ['run', '运行方式'], ['tasks', '任务'], ['skills', '技能'], ['watches', '关注与定时'], ['advanced', '高级']]
+  const BOT_OUTBOUND = [{ value: 'direct', label: '直接发送' }, { value: 'draft', label: '先起草，我确认后再发' }]
   // A bot's settings, laid out like a profile editor: sections on the left.
   function BotSettingsModal({ bot, data, initialTab = 'profile', ui, onClose, onDeleted }) {
     const [tab, setTab] = useState(initialTab), [draft, setDraft] = useState(() => ({ ...bot })), [busy, setBusy] = useState(false), [error, setError] = useState('')
     useEffect(() => { setDraft({ ...bot }); setTab(initialTab) }, [bot.id])
     const editable = ['profile', 'persona', 'run'].includes(tab)
-    const dirty = ['name', 'tagline', 'avatar', 'banner', 'persona', 'backend_key', 'model', 'permission_ceiling', 'default_cwd'].some(key => (draft[key] ?? null) !== (bot[key] ?? null))
+    const openTasks = (useWatches().data?.tasks ?? []).filter(task => task.bot === bot.id && task.kind === 'task' && !task.closed).length
+    const dirty = ['name', 'tagline', 'avatar', 'banner', 'persona', 'backend_key', 'model', 'permission_ceiling', 'default_cwd', 'outbound'].some(key => (draft[key] ?? null) !== (bot[key] ?? null))
     const run = async (body, close = false) => {
       setBusy(true); setError('')
       try { const value = await botsCall(body); if (Array.isArray(value.bots)) publishBots({ data: value, error: '' }); if (close) onClose(); return value }
@@ -1689,9 +1789,12 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
         h(SelectField, { label: 'Agent', value: draft.backend_key, options: agents, disabled: busy, onChange: value => set({ backend_key: value, model: null }) }),
         h(BotModelPicker, { profileId: data.agents.find(agent => agent.backend_key === draft.backend_key)?.profile_id, model: draft.model, disabled: busy, onChange: value => set({ model: value || null }) }),
         h(SelectField, { label: '权限上限', value: draft.permission_ceiling, options: BOT_CEILINGS, disabled: busy, onChange: value => set({ permission_ceiling: value }) }),
-        h(SelectField, { label: '默认工作区', value: draft.default_cwd ?? '', options: places, disabled: busy, onChange: value => set({ default_cwd: value || null }) }))
+        h(SelectField, { label: '默认工作区', value: draft.default_cwd ?? '', options: places, disabled: busy, onChange: value => set({ default_cwd: value || null }) }),
+        h(SelectField, { label: '对外消息（企业微信等）', value: draft.outbound ?? 'direct', options: BOT_OUTBOUND, disabled: busy, onChange: value => set({ outbound: value === 'direct' ? null : value }) }),
+        h('span', { className: 'kode-config-note' }, '选「先起草」时，伙伴要发出去的消息会先放进伙伴页的「待你处理」，你改好、点发送才会发出。'))
+      : tab === 'tasks' ? h(BotTaskBoard, { bot, ui })
       : tab === 'skills' ? h(BotSkillsPanel, { bot })
-      : tab === 'watches' ? h(BotWatches, { bot, workspaces: data.workspaces, ui })
+      : tab === 'watches' ? h(BotWatches, { bot, workspaces: data.workspaces, ui, routines: data.routines ?? [] })
       : h('div', { className: 'kode-bot-advanced' },
         h('p', { className: 'kode-secondary' }, `记忆范围 bot:${bot.id}`),
         h('p', { className: 'kode-secondary' }, `伙伴空间 ${bot.home ?? '—'}`),
@@ -1704,7 +1807,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     return h(Modal, { open: true, title: `${bot.name} · 伙伴设置`, className: 'kode-bot-settings', closeLabel: '关闭', onClose: () => { if (!dirty || confirm('有未保存的修改，确定关闭？')) onClose() },
       footer: editable ? h(React.Fragment, null, h(Button, { variant: 'outline', disabled: busy, onClick: () => setDraft({ ...bot }) }, '撤销修改'), h(Button, { variant: 'primary', disabled: busy || !dirty || !draft.name?.trim() || !draft.backend_key, onClick: () => void save() }, busy ? '保存中…' : '保存')) : undefined },
       h('div', { className: 'kode-bot-settings-body' },
-        h('nav', { className: 'kode-bot-settings-nav', 'aria-label': '设置分类' }, ...BOT_SETTINGS_TABS.map(([id, label]) => h('button', { key: id, type: 'button', 'aria-current': tab === id ? 'page' : undefined, onClick: () => setTab(id) }, label, id === 'skills' && bot.skills?.length ? h('span', { className: 'kode-bot-nav-count' }, bot.skills.length) : null))),
+        h('nav', { className: 'kode-bot-settings-nav', 'aria-label': '设置分类' }, ...BOT_SETTINGS_TABS.map(([id, label]) => h('button', { key: id, type: 'button', 'aria-current': tab === id ? 'page' : undefined, onClick: () => setTab(id) }, label, id === 'skills' && bot.skills?.length ? h('span', { className: 'kode-bot-nav-count' }, bot.skills.length) : id === 'tasks' && openTasks ? h('span', { className: 'kode-bot-nav-count' }, openTasks) : null))),
         h('div', { className: 'kode-bot-settings-pane' }, body, h(Failure, { text: error }))))
   }
   // Where bots without a chosen workspace keep their own folder.
@@ -1726,6 +1829,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   // 关注: events that wake a bot into its own run (no timers). Kode matches
   // events and starts the runs; this is where they are set up and reviewed.
   const WATCH_SOURCES = [
+    { topic: 'schedule', label: '按时间（定时）', schedule: true },
     { topic: 'session.turn_completed', label: '会话完成一轮', scope: 'cwd' },
     { topic: 'session.awaiting', label: '会话在等人处理', scope: 'cwd' },
     { topic: 'session.exited', label: '会话结束', scope: 'cwd' },
@@ -1772,10 +1876,34 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   function useWatches() { return useSyncExternalStore(watchesStore.subscribe, watchesStore.getSnapshot) }
   async function watchAct(body) { const data = await watchesCall(body); publishWatches({ data, error: '' }); return data }
   function watchSource(topic) { return WATCH_SOURCES.find(row => row.topic === topic) ?? WATCH_SOURCES.at(-1) }
+  const SCHEDULE_PRESETS = [
+    { value: '0 9 * * 1-5', label: '每个工作日 09:00' }, { value: '0 9 * * *', label: '每天 09:00' }, { value: '0 18 * * 1-5', label: '每个工作日 18:00' },
+    { value: '0 9 * * 1', label: '每周一 09:00' }, { value: '0 17 * * 5', label: '每周五 17:00' }, { value: '0 * * * *', label: '每小时' }, { value: '', label: '自定义（cron）' },
+  ]
+  /** A readable line for a five-field cron (minute hour day month weekday). */
+  function cronLabel(expr) {
+    const parts = String(expr ?? '').trim().split(/\s+/)
+    if (parts.length !== 5) return `定时「${expr ?? ''}」`
+    const [minute, hour, day, month, weekday] = parts
+    const raw = `定时「${parts.join(' ')}」`
+    if (day !== '*' || month !== '*' || !/^\d+$/.test(minute)) return raw
+    const names = ['日', '一', '二', '三', '四', '五', '六', '日']
+    const days = weekday === '*' ? '每天' : weekday === '1-5' ? '每个工作日' : /^[0-7](,[0-7])*$/.test(weekday) ? `每周${weekday.split(',').map(d => names[d]).join('、')}` : null
+    if (!days) return raw
+    if (hour === '*') return weekday === '*' ? `每小时第 ${minute} 分` : `${days}每小时第 ${minute} 分`
+    if (/^\d+$/.test(hour)) return `${days} ${hour.padStart(2, '0')}:${minute.padStart(2, '0')}`
+    if (/^\d+(,\d+)+$/.test(hour)) return `${days} ${hour.split(',').map(h => `${h.padStart(2, '0')}:${minute.padStart(2, '0')}`).join('、')}`
+    const step = /^(\d+)-(\d+)\/(\d+)$/.exec(hour)
+    return step ? `${days} ${step[1]}–${step[2]} 点每 ${step[3]} 小时` : raw
+  }
+  /** A routine template (站会、周报 …) as a watch draft. */
+  function routineDraft(routine, extra = {}) {
+    return { ...watchDraft(null), name: routine.name, topic: 'schedule', cron: routine.cron, do: routine.instructions, notify: routine.notify ?? 'attention', permission: 'plan', coalesce_secs: 0, max_runs_per_hour: 2, ...extra }
+  }
   function watchDraft(watch) {
-    if (!watch) return { name: '', topic: 'session.turn_completed', custom: '', where: '', paths: '', branch: '', room: '', chat_id: '', do: '', coalesce_secs: 30, max_runs_per_hour: 6, permission: 'plan', notify: 'attention', report_to_main: true, enabled: true }
+    if (!watch) return { name: '', topic: 'session.turn_completed', custom: '', where: '', paths: '', branch: '', room: '', chat_id: '', cron: '0 9 * * 1-5', post_to_wecom: '', do: '', coalesce_secs: 30, max_runs_per_hour: 6, permission: 'plan', notify: 'attention', report_to_main: true, enabled: true }
     const { spec } = watch, match = spec.on.match ?? {}, source = watchSource(spec.on.topic)
-    return { id: watch.id, enabled: watch.enabled, name: spec.name, topic: source.topic, custom: source.custom ? spec.on.topic : '', where: match.workspace ?? match.cwd ?? '', paths: match.paths ?? '', branch: match.branch ?? '', room: match.room ?? '', chat_id: match.chat_id ?? '', do: spec.do, ...spec.policy }
+    return { id: watch.id, enabled: watch.enabled, name: spec.name, topic: source.topic, custom: source.custom ? spec.on.topic : '', where: match.workspace ?? match.cwd ?? '', paths: match.paths ?? '', branch: match.branch ?? '', room: match.room ?? '', chat_id: match.chat_id ?? '', cron: match.cron ?? '0 9 * * 1-5', do: spec.do, ...spec.policy, post_to_wecom: spec.policy?.post_to_wecom ?? '' }
   }
   function watchSpec(draft) {
     const source = watchSource(draft.topic), match = {}
@@ -1784,10 +1912,12 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     if (source.branch && draft.branch.trim()) match.branch = draft.branch.trim()
     if (source.room && draft.room.trim()) match.room = draft.room.trim()
     if (source.wecom && draft.chat_id?.trim()) match.chat_id = draft.chat_id.trim()
-    return { name: draft.name.trim(), on: { topic: source.custom ? draft.custom.trim() : source.topic, match }, do: draft.do, policy: { coalesce_secs: Number(draft.coalesce_secs) || 0, max_runs_per_hour: Number(draft.max_runs_per_hour) || 1, permission: draft.permission, workspace: null, carry_last_summary: true, notify: draft.notify, report_to_main: draft.report_to_main !== false } }
+    if (source.schedule) match.cron = draft.cron.trim()
+    return { name: draft.name.trim(), on: { topic: source.custom ? draft.custom.trim() : source.topic, match }, do: draft.do, policy: { coalesce_secs: source.schedule ? 0 : Number(draft.coalesce_secs) || 0, max_runs_per_hour: Number(draft.max_runs_per_hour) || 1, permission: draft.permission, workspace: null, carry_last_summary: true, notify: draft.notify, report_to_main: draft.report_to_main !== false, ...(draft.post_to_wecom?.trim() ? { post_to_wecom: draft.post_to_wecom.trim() } : {}) } }
   }
   function watchSummary(spec) {
     const source = watchSource(spec.on.topic), match = spec.on.match ?? {}
+    if (source.schedule) return [cronLabel(match.cron), spec.policy?.post_to_wecom && `同时发到企微 ${spec.policy.post_to_wecom}`].filter(Boolean).join(' · ')
     const parts = [source.custom ? spec.on.topic : source.label]
     if (match.workspace || match.cwd) parts.push(`在 ${match.workspace ?? match.cwd}`)
     if (match.paths) parts.push(`文件 ${match.paths}`)
@@ -1805,20 +1935,24 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       input('名字', 'name', { maxLength: 80, required: true, placeholder: source.wecom ? '例如：响应企业微信研发群消息' : '例如：提交后做代码审查' }),
       h(SelectField, { label: '当这件事发生', value: draft.topic, options: WATCH_SOURCES.map(row => ({ value: row.topic, label: row.label })), disabled: busy, onChange: value => onChange({ ...draft, topic: value, where: watchSource(value).scope === 'workspace' && !draft.where ? workspaces[0]?.path ?? '' : draft.where }) }),
       source.custom && input('事件名（插件 id/事件）', 'custom', { required: true, placeholder: 'some.extension/event' }),
+      source.schedule && h(SelectField, { label: '什么时候', value: SCHEDULE_PRESETS.some(row => row.value && row.value === draft.cron) ? draft.cron : '', options: SCHEDULE_PRESETS, disabled: busy, onChange: value => set('cron', value || draft.cron) }),
+      source.schedule && input('时间（cron：分 时 日 月 周）', 'cron', { required: true, placeholder: '0 9 * * 1-5' }),
+      source.schedule && h('span', { className: 'kode-config-note' }, `${cronLabel(draft.cron)}。Kode 关着时错过的时间点，重新打开后 12 小时内会补跑一次。`),
       source.scope && h(SelectField, { label: source.scope === 'cwd' ? '哪里的会话' : '关注哪个工作区', value: draft.where, options: places, disabled: busy, onChange: value => set('where', value) }),
       source.scope && input('或者填写路径', 'where', { placeholder: '/绝对路径' }),
       source.paths && input('只看这些文件（可选）', 'paths', { placeholder: 'src/**  或  docs/*.md' }),
       source.branch && input('只看这个分支（可选）', 'branch', { placeholder: 'main' }),
+      input('同时把结论发到企业微信会话（chat_id，可选）', 'post_to_wecom', { placeholder: '例如：wr_xxxx；伙伴设为「先起草」时会先给你确认' }),
       source.room && input('只看这个频道（可选）', 'room', { placeholder: 'general' }),
       source.wecom && input('只看这个企微会话 chat_id（可选，留空监听全部已配置会话）', 'chat_id', { placeholder: '例如：wr_xxxx 或成员 userid' }),
       input('伙伴每次要做什么', 'do', { rows: 4, required: true, placeholder: source.wecom ? '阅读企业微信消息，必要时调用 wecom_messages_list 补充上下文、用 wecom_message_send 回复对方，并把结论整理汇报给我。' : '看一下这次改动有没有明显问题，有的话列出来；没有就说“没问题”。' }),
-      h('div', { className: 'kode-watch-grid' },
+      !source.schedule && h('div', { className: 'kode-watch-grid' },
         input('合并多少秒内的事件', 'coalesce_secs', { type: 'number', min: 0, max: 3600 }),
         input('每小时最多运行', 'max_runs_per_hour', { type: 'number', min: 1, max: 60 })),
       h(SelectField, { label: '运行时的权限（不超过伙伴的上限）', value: draft.permission, options: WATCH_PERMISSIONS, disabled: busy, onChange: value => set('permission', value) }),
       h(SelectField, { label: '通知', value: draft.notify, options: WATCH_NOTIFY, disabled: busy, onChange: value => set('notify', value) }),
       h('label', { className: 'kode-avatar-background-toggle' }, h('input', { type: 'checkbox', checked: draft.report_to_main !== false, disabled: busy, onChange: event => set('report_to_main', event.target.checked) }), '完成后把结论发到伙伴的主对话里'),
-      h('div', { className: 'kode-settings-footer' }, h(Button, { type: 'button', variant: 'outline', disabled: busy, onClick: onCancel }, '取消'), h(Button, { type: 'submit', variant: 'primary', disabled: busy || !draft.name.trim() || !draft.do.trim() }, '保存')))
+      h('div', { className: 'kode-settings-footer' }, h(Button, { type: 'button', variant: 'outline', disabled: busy, onClick: onCancel }, '取消'), h(Button, { type: 'submit', variant: 'primary', disabled: busy || !draft.name.trim() || !draft.do.trim() || (source.schedule && !draft.cron?.trim()) }, '保存')))
   }
   function RunRow({ run, watch, ui }) {
     const [open, setOpen] = useState(false)
@@ -1836,7 +1970,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
         run.error && h(Failure, { text: run.error })),
       run.session_uuid && h(Button, { className: 'kode-run-open', onClick: () => void ui()?.openSession(run.session_uuid) }, '打开会话'))
   }
-  function BotWatches({ bot, workspaces, ui }) {
+  function BotWatches({ bot, workspaces, ui, routines = [] }) {
     const { data, error: loadError } = useWatches()
     const [draft, setDraft] = useState(null), [busy, setBusy] = useState(false), [error, setError] = useState('')
     const act = async body => {
@@ -1849,8 +1983,11 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     const watches = data.watches.filter(row => row.bot === bot.id), runs = data.runs.filter(row => row.bot === bot.id).slice(0, 12)
     const save = async () => { if (await act({ action: 'watch_upsert', id: draft.id, bot: bot.id, enabled: draft.enabled, spec: watchSpec(draft) })) setDraft(null) }
     return h('div', { className: 'kode-bot-watches' },
-      h('h3', { className: 'kode-settings-group-title' }, '关注'),
-      h('p', { className: 'kode-secondary' }, '发生这些事时，伙伴会自己开一个会话去处理，结果记在下面的动态里。'),
+      h('h3', { className: 'kode-settings-group-title' }, '关注与定时'),
+      h('p', { className: 'kode-secondary' }, '到点或发生这些事时，伙伴会自己开一个会话去处理，结论发到它的主对话，也记在下面的动态里。'),
+      routines.length > 0 && !draft && h('div', { className: 'kode-bot-routine-picks' },
+        h('span', { className: 'kode-secondary' }, '常用节奏：'),
+        ...routines.map(routine => h('button', { key: routine.id, type: 'button', className: 'kode-banner-chip', title: `${routine.when} · ${routine.summary}`, disabled: busy, onClick: () => setDraft(routineDraft(routine)) }, routine.name))),
       watches.length ? h('ul', { className: 'kode-watch-list' }, ...watches.map(watch => draft?.id === watch.id
         ? h('li', { key: watch.id }, h(WatchEditor, { draft, workspaces, busy, onChange: setDraft, onSave: save, onCancel: () => setDraft(null) }))
         : h('li', { key: watch.id, className: 'kode-watch-row', 'data-enabled': watch.enabled },
@@ -1867,7 +2004,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   }
   const BOT_SLUG = /^[A-Za-z0-9_.-]{1,128}$/
   /** A proposal from the 创建伙伴 conversation, reduced to what a bot may store. */
-  function botProposal(code, agents) {
+  function botProposal(code, agents, catalog = []) {
     let raw
     try { raw = JSON.parse(code) } catch { throw new Error('预览数据不是有效的 JSON，请让对话重新输出伙伴预览卡。') }
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('预览数据不完整，请让对话重新输出伙伴预览卡。')
@@ -1886,15 +2023,24 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
         permission_ceiling: BOT_CEILINGS.some(row => row.value === raw.permission_ceiling) ? raw.permission_ceiling : 'default',
         default_cwd: typeof raw.default_cwd === 'string' && raw.default_cwd.startsWith('/') ? raw.default_cwd : null,
         avatar: typeof raw.avatar === 'string' && /^gallery\/[^/\\\x00]+$/.test(raw.avatar) && !raw.avatar.includes('..') ? raw.avatar : null,
-        banner, template: text(raw.template, 64),
+        banner, template: text(raw.template, 64), ...(raw.outbound === 'draft' ? { outbound: 'draft' } : {}),
       },
       skills,
+      // Routines name a catalog entry; the time and WeCom chat may differ.
+      routines: (Array.isArray(raw.routines) ? raw.routines : []).flatMap(row => {
+        const routine = catalog.find(item => item.id === (typeof row === 'string' ? row : row?.id))
+        if (!routine) return []
+        const cron = typeof row?.cron === 'string' && /^\S+( \S+){4}$/.test(row.cron.trim()) ? row.cron.trim() : routine.cron
+        const chat = typeof row?.wecom_chat_id === 'string' && row.wecom_chat_id.trim() ? row.wecom_chat_id.trim().slice(0, 128) : null
+        return [{ ...routine, cron, ...(chat ? { wecom_chat_id: chat } : {}) }]
+      }).filter((row, index, rows) => rows.findIndex(other => other.id === row.id) === index).slice(0, 6),
       agentMissing: Boolean(raw.backend_key) && backend?.backend_key !== raw.backend_key,
     }
   }
-  /** Create a bot, then install its skills one by one. A skill that fails
-   *  leaves the bot in place; it can be added again from its settings. */
-  async function createBot(bot, skills, onProgress) {
+  /** Create a bot, then install its skills and set up its routines one by
+   *  one. A step that fails leaves the bot in place; it can be redone from
+   *  its settings. Routines start paused unless `enableRoutines`. */
+  async function createBot(bot, skills, onProgress, { routines = [], enableRoutines = true } = {}) {
     if (!bot.backend_key) throw new Error('这台电脑的 dsh 里还没有可用的 Agent')
     const before = new Set((botsSnapshot.data?.bots ?? (await botsCall()).bots).map(row => row.id))
     const view = await botsCall({ action: 'upsert', bot })
@@ -1906,6 +2052,11 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       onProgress?.(`正在安装技能 ${index + 1}/${skills.length}：${skill.name}`)
       try { publishBots({ data: await botsCall({ action: 'skill_install', id: created.id, source: 'skillhub', slug: skill.slug, name: skill.name, description: skill.description }), error: '' }) }
       catch (failure) { failed.push(`${skill.name}（${failure.message}）`) }
+    }
+    for (const [index, routine] of routines.entries()) {
+      onProgress?.(`正在设置日常节奏 ${index + 1}/${routines.length}：${routine.name}`)
+      try { publishWatches({ data: await watchesCall({ action: 'watch_upsert', bot: created.id, enabled: enableRoutines, spec: watchSpec(routineDraft(routine, { post_to_wecom: routine.wecom_chat_id ?? '' })) }), error: '' }) }
+      catch (failure) { failed.push(`${routine.name}（${failure.message}）`) }
     }
     return { bot: created, failed }
   }
@@ -1923,31 +2074,31 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     if (streaming) return h('div', { className: 'kode-bot-proposal is-loading', role: 'status' }, h(IconLoadingOutlineRegular, { size: 16 }), '正在生成伙伴预览…')
     if (!data) return h('div', { className: 'kode-bot-proposal is-loading', role: 'status' }, '正在读取伙伴…')
     let proposal
-    try { proposal = botProposal(code, data.agents) } catch (failure) { return h('div', { className: 'kode-bot-proposal' }, h(Failure, { text: failure.message })) }
-    const { bot, skills } = proposal
+    try { proposal = botProposal(code, data.agents, data.routines ?? []) } catch (failure) { return h('div', { className: 'kode-bot-proposal' }, h(Failure, { text: failure.message })) }
+    const { bot, skills, routines } = proposal
     const agent = data.agents.find(row => row.backend_key === bot.backend_key)
     const create = () => {
       if (proposalRuns.has(code)) return
       const run = { state: { phase: 'working', note: '正在创建伙伴…' }, listeners: new Set([setState]) }
       const publish = next => { run.state = next; for (const listener of run.listeners) listener(next) }
       proposalRuns.set(code, run); publish(run.state)
-      createBot(bot, skills, note => publish({ phase: 'working', note }))
+      createBot(bot, skills, note => publish({ phase: 'working', note }), { routines })
         .then(result => publish({ phase: 'done', id: result.bot.id, failed: result.failed }))
         .catch(failure => { proposalRuns.delete(code); publish({ phase: 'idle', error: failure.message }) })
     }
     const open = () => { requestedBotProfile = state.id; openBotsPage?.(); window.dispatchEvent(new CustomEvent('kode-bot-profile')) }
     return h('div', { className: 'kode-bot-proposal' },
-      h(BotNameplate, { bot: { ...bot, skills, agent_type: agent?.type }, library, agentName: agent?.name ?? bot.backend_key }),
+      h(BotNameplate, { bot: { ...bot, skills, agent_type: agent?.type }, library, agentName: agent?.name ?? bot.backend_key, routines }),
       proposal.agentMissing && h('p', { className: 'kode-config-note' }, `对话里选的 Agent 在这台电脑不可用，改用 ${agent?.name ?? '默认 Agent'}。`),
       state.phase === 'done'
-        ? h('div', { className: 'kode-bot-proposal-actions' }, h(Button, { variant: 'primary', onClick: open }, '已创建 · 打开伙伴'), state.failed?.length > 0 && h(Failure, { text: `这些技能没装上，可以在伙伴设置里重试：${state.failed.join('、')}` }))
+        ? h('div', { className: 'kode-bot-proposal-actions' }, h(Button, { variant: 'primary', onClick: open }, '已创建 · 打开伙伴'), state.failed?.length > 0 && h(Failure, { text: `这些没设置成功，可以在伙伴设置里重试：${state.failed.join('、')}` }))
         : h('div', { className: 'kode-bot-proposal-actions' },
           h(Button, { variant: 'primary', disabled: state.phase === 'working' || !bot.backend_key, onClick: create }, state.phase === 'working' ? state.note : '创建伙伴'),
           state.phase !== 'working' && h('span', { className: 'kode-secondary' }, '想改哪里直接告诉我，会重新生成预览。')),
       h(Failure, { text: state.error }))
   }
   // Profile card body shared by the roster popover and proposals.
-  function BotNameplate({ bot, library, agentName, live = false, children }) {
+  function BotNameplate({ bot, library, agentName, live = false, routines, children }) {
     const [display] = useBackgroundPreference()
     const banner = display !== 'off' ? botBannerStyle(library, bot) : botBannerStyle(library, { ...bot, avatar: null })
     return h('div', { className: `kode-bot-nameplate${banner ? ' has-banner' : ''}`, style: botBannerVars(banner) },
@@ -1959,9 +2110,11 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
         h('div', { className: 'kode-bot-nameplate-tags' },
           h('span', { className: 'kode-agent-tag' }, agentName ?? bot.agent ?? `${bot.backend_key} 不可用`),
           bot.model && h('span', { className: 'kode-agent-tag' }, bot.model),
-          h('span', { className: 'kode-agent-tag' }, ceilingLabel(bot.permission_ceiling))),
+          h('span', { className: 'kode-agent-tag' }, ceilingLabel(bot.permission_ceiling)),
+          bot.outbound === 'draft' && h('span', { className: 'kode-agent-tag' }, '对外消息先起草')),
         bot.persona && h('section', null, h('h4', null, '关于'), h('p', { className: 'kode-bot-nameplate-about' }, bot.persona)),
         h('section', null, h('h4', null, '技能'), h(BotSkillChips, { skills: bot.skills })),
+        routines?.length > 0 && h('section', null, h('h4', null, '日常节奏'), h('ul', { className: 'kode-bot-routine-list' }, ...routines.map(routine => h('li', { key: routine.id }, h('strong', null, routine.name), h('span', { className: 'kode-secondary' }, ` ${cronLabel(routine.cron)}${routine.wecom_chat_id ? ` · 同步到企微 ${routine.wecom_chat_id}` : ''}`))))),
         children))
   }
   // The roster as a row of avatars; the selected one shows its profile card.
@@ -1985,16 +2138,18 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       document.addEventListener('mousedown', away); document.addEventListener('keydown', key)
       return () => { document.removeEventListener('mousedown', away); document.removeEventListener('keydown', key) }
     }, [onClose])
-    const watches = useWatches().data?.watches.filter(row => row.bot === bot.id && row.enabled).length ?? 0
+    const watchData = useWatches().data
+    const watches = watchData?.watches.filter(row => row.bot === bot.id && row.enabled).length ?? 0
+    const open = watchData?.tasks?.filter(task => task.bot === bot.id && task.kind === 'task' && !task.closed).length ?? 0
     return h('div', { ref, className: 'kode-bot-popover', role: 'dialog', 'aria-label': `${bot.name} 的资料`, style: { '--kode-bot-anchor': `${anchor ?? 48}px` } },
       h('div', { role: 'button', tabIndex: 0, className: 'kode-bot-popover-edit', title: '点击编辑资料', onClick: onEdit, onKeyDown: event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onEdit() } } },
         h(BotNameplate, { bot, library, live: true },
-          h('p', { className: 'kode-secondary' }, `${data.default_bot === bot.id ? '默认伙伴 · ' : ''}${watches ? `关注 ${watches} 项 · ` : ''}${bot.sessions?.length ?? 0} 个会话`))),
+          h('p', { className: 'kode-secondary' }, `${data.default_bot === bot.id ? '默认伙伴 · ' : ''}${open ? `跟踪 ${open} 个任务 · ` : ''}${watches ? `关注与定时 ${watches} 项 · ` : ''}${bot.sessions?.length ?? 0} 个会话`))),
       h('div', { className: 'kode-bot-popover-actions' },
         h(Button, { variant: 'primary', disabled: busy || !bot.agent, onClick: onMessage }, bot.main_session_id ? '继续对话' : '发消息'),
         h(Button, { variant: 'outline', disabled: busy, onClick: onEdit }, h(IconEditOutlineRegular, { size: 14 }), '编辑资料')))
   }
-  function BotTemplates({ templates, busy, onBuild, onUse }) {
+  function BotTemplates({ templates, routines = [], busy, onBuild, onUse }) {
     if (!templates?.length) return null
     return h('section', { className: 'kode-bots-section' },
       h('h3', { className: 'kode-bots-section-title' }, '推荐伙伴'),
@@ -2007,7 +2162,8 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
           h('div', { className: 'kode-bot-template-body' },
             h('span', { className: 'kode-agent-name' }, template.name),
             h('span', { className: 'kode-secondary kode-bot-template-tagline' }, template.tagline),
-            h(BotSkillChips, { skills: template.skills, empty: '' })),
+            h(BotSkillChips, { skills: template.skills, empty: '' }),
+            template.routines?.length > 0 && h('span', { className: 'kode-secondary kode-bot-template-routines' }, `日常节奏：${template.routines.map(id => routines.find(row => row.id === id)?.name).filter(Boolean).join('、')}`)),
           h('div', { className: 'kode-bot-template-actions' },
             h(Button, { size: 'sm', variant: 'primary', disabled: busy, onClick: () => onBuild(template) }, '对话定制'),
             h(Button, { size: 'sm', variant: 'ghost', disabled: busy, onClick: () => onUse(template) }, '直接使用')))
@@ -2017,7 +2173,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     const { data, error: loadError } = useBots(), watchState = useWatches()
     const openSession = async id => { leave?.(); await ui()?.openSession(id) }
     const [selected, setSelected] = useState(null), [anchor, setAnchor] = useState(null), [settings, setSettings] = useState(null)
-    const [starting, setStarting] = useState(null), [busy, setBusy] = useState(''), [error, setError] = useState('')
+    const [starting, setStarting] = useState(null), [busy, setBusy] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState('')
     const createRef = React.useRef(null)
     const bot = id => data?.bots.find(row => row.id === id)
     // Requests from elsewhere: a session header opens a bot's settings, the
@@ -2063,26 +2219,30 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       await openSession(result.sessionId)
     })
     const use = template => task('template', async () => {
-      const { id, glyph, skills, ...fields } = template
-      const result = await createBot({ ...fields, template: id, backend_key: data.agents[0]?.backend_key ?? '', model: null, default_cwd: null, avatar: null }, skills ?? [], note => setBusy(note))
+      const { id, glyph, skills, routines: wanted = [], outbound, ...fields } = template
+      const routines = wanted.map(key => (data.routines ?? []).find(row => row.id === key)).filter(Boolean)
+      // Used as is, a template's routines wait until the user turns them on.
+      const result = await createBot({ ...fields, template: id, backend_key: data.agents[0]?.backend_key ?? '', model: null, default_cwd: null, avatar: null, ...(outbound === 'draft' ? { outbound } : {}) }, skills ?? [], note => setBusy(note), { routines, enableRoutines: false })
       setSelected(result.bot.id); setAnchor(null)
-      if (result.failed.length) setError(`伙伴已创建，这些技能没装上，可以在伙伴设置 → 技能里重试：${result.failed.join('、')}`)
+      if (result.failed.length) setError(`伙伴已创建，这些没设置成功，可以在伙伴设置里重试：${result.failed.join('、')}`)
+      else if (routines.length) setNotice(`伙伴已创建。${routines.map(row => row.name).join('、')} 已建好但先暂停，到伙伴设置 → 关注与定时里打开。`)
     })
     const selectedBot = bot(selected), settingsBot = settings && bot(settings.id)
     return h('div', { className: 'kode-agent-settings kode-bots-page' },
       h('header', { className: 'kode-bots-hero' },
         h('h2', null, '伙伴'),
         h('p', { className: 'kode-agent-intro' }, '有名字、角色、技能和自己记忆的长期助手。点头像看资料，点资料卡编辑。')),
+      h(BotInbox, { data, ui: () => ({ openSession }) }),
       h('section', { className: 'kode-bots-section kode-bots-roster' },
         h('h3', { className: 'kode-bots-section-title' }, `我的伙伴${data.bots.length ? ` · ${data.bots.length}` : ''}`),
-        h(BotsRail, { bots: data.bots, selected, defaultBot: data.default_bot, unseen: watchState.data?.unseen, onSelect: (id, element) => { setSelected(id); setStarting(null); setAnchor(element ? element.offsetLeft + element.offsetWidth / 2 : null) }, onCreate: () => void build(null) }),
+        h(BotsRail, { bots: data.bots, selected, defaultBot: data.default_bot, unseen: Object.fromEntries(data.bots.map(bot => [bot.id, (watchState.data?.unseen?.[bot.id] ?? 0) + inboxItems(watchState.data).filter(item => item.bot === bot.id).length])), onSelect: (id, element) => { setSelected(id); setStarting(null); setAnchor(element ? element.offsetLeft + element.offsetWidth / 2 : null) }, onCreate: () => void build(null) }),
         !data.bots.length && h('p', { className: 'kode-secondary' }, '还没有伙伴。从下面的模板开始，或者点「创建伙伴」用对话定制一个。'),
         selectedBot && h(BotProfilePopover, { bot: selectedBot, data, anchor, busy: Boolean(busy), onClose: () => setSelected(null), onMessage: () => void message(selectedBot), onEdit: () => setSettings({ id: selectedBot.id, tab: 'profile' }) }),
         starting && h('form', { className: 'kode-agent-editor kode-bot-start', onSubmit: event => { event.preventDefault(); void start() } },
           h(SelectField, { label: '工作区', value: starting.workspace, options: [{ value: starting.bot.workspace, label: starting.bot.default_cwd ? data.workspaces.find(row => row.path === starting.bot.workspace)?.title ?? starting.bot.workspace : `伙伴自己的空间（${starting.bot.workspace}）` }, ...data.workspaces.filter(row => row.path !== starting.bot.workspace).map(row => ({ value: row.path, label: row.title }))], disabled: Boolean(busy), onChange: value => setStarting({ ...starting, workspace: value }) }),
           h('label', { className: 'kode-field' }, h('span', null, `对 ${starting.bot.name} 说`), h('textarea', { rows: 3, required: true, autoFocus: true, value: starting.message, disabled: Boolean(busy), onChange: event => setStarting({ ...starting, message: event.target.value }) })),
           h('div', { className: 'kode-settings-footer' }, h(Button, { type: 'button', disabled: Boolean(busy), onClick: () => setStarting(null) }, '取消'), h(Button, { type: 'submit', variant: 'primary', disabled: Boolean(busy) || !starting.message.trim() || !starting.workspace }, '发送')))),
-      h(BotTemplates, { templates: data.templates, busy: Boolean(busy) || !data.agents.length, onBuild: template => void build(template), onUse: template => void use(template) }),
+      h(BotTemplates, { templates: data.templates, routines: data.routines ?? [], busy: Boolean(busy) || !data.agents.length, onBuild: template => void build(template), onUse: template => void use(template) }),
       h('section', { ref: createRef, className: 'kode-bots-section kode-bot-create' },
         h('span', { className: 'kode-bot-create-icon', 'aria-hidden': true }, h(IconPlusOutlineRegular, { size: 28 })),
         h('div', { className: 'kode-bot-create-text' },
@@ -2091,8 +2251,9 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
         h(Button, { variant: 'primary', disabled: Boolean(busy) || !data.agents.length, onClick: () => void build(null) }, busy === 'builder' ? '正在打开…' : '开始对话')),
       !data.agents.length && h('p', { className: 'kode-config-note' }, '这台电脑的 dsh 里还没有可用的 Agent。'),
       busy && !['builder', 'start'].includes(busy) && h('p', { className: 'kode-config-note', role: 'status' }, busy === 'template' ? '正在创建伙伴…' : busy),
+      notice && h('p', { className: 'kode-config-note', role: 'status' }, notice),
       h(Failure, { text: error }),
-      h(AdvancedSection, { title: '伙伴设置' }, h(WeComBridgeCard), h(BotsRoot, { data, busy: Boolean(busy), act: async body => { const value = await task('root', () => botsCall(body)); if (value) publishBots({ data: value, error: '' }); return value } })),
+      h(AdvancedSection, { title: '伙伴设置' }, h(BotQuietHours, { data }), h(WeComBridgeCard), h(BotsRoot, { data, busy: Boolean(busy), act: async body => { const value = await task('root', () => botsCall(body)); if (value) publishBots({ data: value, error: '' }); return value } })),
       settingsBot && h(BotSettingsModal, { bot: settingsBot, data, initialTab: settings.tab, ui: () => ({ openSession: id => { setSettings(null); return openSession(id) } }), onClose: () => setSettings(null), onDeleted: () => setSelected(null) }))
   }
   async function wecomCall(body = null) {
@@ -5270,6 +5431,9 @@ button:has(.kode-plugins-marker)>span[aria-hidden="true"]::before{mask-image:url
 .kode-bot-settings{width:min(860px,100%);max-height:calc(100dvh - 48px)}.kode-bot-settings-body{display:flex;gap:20px;min-height:min(520px,calc(100dvh - 200px))}.kode-bot-settings-nav{display:flex;flex-direction:column;gap:2px;width:148px;flex-shrink:0}.kode-bot-settings-nav>button{display:flex;align-items:center;justify-content:space-between;padding:6px 10px;border:0;border-radius:6px;background:none;color:var(--dsw-alias-label-secondary);font:inherit;font-size:14px;text-align:left;cursor:pointer}.kode-bot-settings-nav>button:hover{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary)}.kode-bot-settings-nav>button[aria-current=page]{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary);font-weight:600}.kode-bot-nav-count{font-size:11px;color:var(--dsw-alias-label-secondary)}.kode-bot-settings-pane{flex:1;min-width:0;display:flex;flex-direction:column;gap:12px;overflow-y:auto;overscroll-behavior:contain;padding-right:4px}.kode-bot-settings-pane textarea{min-height:280px}.kode-bot-advanced{display:flex;flex-direction:column;gap:10px}.kode-bot-danger{display:flex;align-items:center;gap:12px;margin-top:12px;padding:12px;border:1px solid color-mix(in srgb,#f23f43 50%,transparent);border-radius:8px}.kode-bot-danger>span{flex:1;display:flex;flex-direction:column;gap:2px}
 .kode-segmented{display:inline-flex;gap:2px;padding:2px;border-radius:8px;background:var(--dsw-alias-bg-module-platform);align-self:flex-start}.kode-segmented>button{padding:4px 12px;border:0;border-radius:6px;background:none;color:var(--dsw-alias-label-secondary);font:inherit;font-size:13px;cursor:pointer}.kode-segmented>button[aria-selected=true]{background:var(--dsw-alias-bg-surface-l1,var(--dsw-alias-bg-module-platform));color:var(--dsw-alias-label-primary);box-shadow:0 1px 2px rgba(0,0,0,.2)}.kode-skill-search{display:flex;align-items:center;gap:8px;padding:4px 4px 4px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px}.kode-skill-search input{flex:1;min-width:0;border:0;background:none;color:inherit;font:inherit;outline:none}.kode-skill-categories{flex-wrap:wrap}.kode-skill-list{display:flex;flex-direction:column;gap:8px;margin:0;padding:0;list-style:none}.kode-skill-card{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border-radius:8px;background:var(--dsw-alias-bg-module-platform)}.kode-skill-icon{display:grid;place-items:center;width:32px;height:32px;border-radius:8px;background:color-mix(in srgb,var(--dsw-alias-state-business-primary,#5865f2) 24%,transparent);font-weight:700;flex-shrink:0}.kode-skill-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}.kode-skill-desc{display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-size:12px}.kode-skill-stats{font-size:11px;color:var(--dsw-alias-label-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .kode-bot-proposal{max-width:380px;margin:8px 0;border-radius:12px;overflow:hidden;background:var(--dsw-alias-bg-module-platform);box-shadow:0 0 0 .5px var(--dsw-alias-border-l3)}.kode-bot-proposal.is-loading{display:flex;align-items:center;gap:8px;padding:14px 16px;color:var(--dsw-alias-label-secondary)}.kode-bot-proposal>.kode-config-note,.kode-bot-proposal>.kode-error{margin:0 16px 12px}.kode-bot-proposal-actions{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:0 16px 16px}
+.kode-bot-inbox{padding:14px 16px;border-radius:12px;background:color-mix(in srgb,#f0b232 10%,var(--dsw-alias-bg-module-platform));box-shadow:0 0 0 .5px color-mix(in srgb,#f0b232 40%,transparent)}.kode-inbox-list{display:flex;flex-direction:column;gap:10px;margin:0;padding:0;list-style:none}.kode-inbox-item{display:flex;flex-direction:column;align-items:flex-start;gap:6px;padding:10px 12px;border-radius:8px;background:var(--dsw-alias-bg-surface-l1,var(--dsw-alias-bg-module-platform))}.kode-inbox-who{display:flex;align-items:center;gap:6px;font-size:12px}.kode-inbox-text{margin:0;white-space:pre-wrap;display:-webkit-box;-webkit-line-clamp:6;line-clamp:6;-webkit-box-orient:vertical;overflow:hidden}.kode-inbox-steps{margin:0;padding-left:20px;font-size:13px}.kode-inbox-note,.kode-inbox-draft{width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:6px;background:none;color:inherit;font:inherit}.kode-inbox-draft{resize:vertical}
+.kode-task-board{display:flex;flex-direction:column;gap:12px}.kode-task-columns{display:flex;flex-direction:column;gap:14px}.kode-task-column h4{margin:0 0 6px;font-size:12px;font-weight:700;color:var(--dsw-alias-label-secondary)}.kode-task-card{display:flex;flex-direction:column;gap:4px;padding:8px 10px;border-radius:8px;background:var(--dsw-alias-bg-module-platform);border-left:3px solid var(--dsw-alias-border-l2)}.kode-task-card[data-status=needs_user]{border-left-color:#f0b232}.kode-task-card[data-status=in_progress]{border-left-color:var(--dsw-alias-state-business-primary,#5865f2)}.kode-task-card[data-status=waiting]{border-left-color:#949ba4}.kode-task-card[data-status=done]{border-left-color:#23a55a;opacity:.75}.kode-task-head{display:flex;align-items:flex-start;gap:8px}.kode-task-head>.kode-agent-name{flex:1}.kode-task-remove{border:0;background:none;color:var(--dsw-alias-label-secondary);cursor:pointer;font-size:16px;line-height:16px}.kode-task-reason{font-size:12px}.kode-task-meta{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.kode-task-meta .kode-field{margin:0;min-width:110px}.kode-agent-tag.is-late{color:#f23f43;border-color:#f23f43}
+.kode-bot-routine-picks{display:flex;flex-wrap:wrap;align-items:center;gap:6px}.kode-bot-routine-list{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:2px;font-size:13px}.kode-bot-template-routines{font-size:12px}.kode-bot-quiet{display:flex;flex-direction:column;gap:8px}
 @media (max-width:640px){.kode-bot-settings-body{flex-direction:column}.kode-bot-settings-nav{flex-direction:row;width:auto;overflow-x:auto}.kode-bot-create{flex-direction:column;align-items:flex-start}}
 .kode-memory-settings-link{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:0 0 14px}.kode-memory-settings-link>.kode-config-note{margin:0;flex:1 1 200px}
 .kode-memory-header-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}.kode-memory-host-picker{min-width:150px;margin-right:auto}.kode-memory-host-picker .kode-field{margin:0}

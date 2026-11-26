@@ -764,3 +764,96 @@ async fn file_changes_wake_a_bot_but_its_own_edits_do_not() {
     let view = until(&s, "runs", |_| true).await;
     assert_eq!(view["runs"].as_array().unwrap().len(), 1, "{}", view["runs"]);
 }
+
+async fn tasks(s: &Server, change: Value) -> (reqwest::StatusCode, Value) {
+    let response = reqwest::Client::new().post(format!("{}/api/v1/messaging/workbench/bot-tasks", s.url)).bearer_auth(ADMIN).json(&change).send().await.unwrap();
+    (response.status(), response.json().await.unwrap())
+}
+
+async fn inputs_containing(recorded: &Arc<Mutex<Recorded>>, needle: &str) -> String {
+    for _ in 0..100 {
+        if let Some(found) = recorded.lock().inputs.iter().find(|t| t.contains(needle)).cloned() {
+            return found;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("no input contains {needle}: {:?}", recorded.lock().inputs);
+}
+
+#[tokio::test]
+async fn a_bot_follows_the_conversation_doing_its_task_and_plans_wait_for_approval() {
+    let s = server().await;
+    let recorded = Arc::new(Mutex::new(Recorded::default()));
+    let _host = host(s.ctx.clone(), recorded.clone());
+    let kit = bots(&s, json!({"action":"upsert","bot":{"name":"Kit","backend_key":"claude"}})).await;
+    let kit_id = kit["default_bot"].as_str().unwrap().to_owned();
+    publish_as(&s.ctx, "gui:main", "claude", "idle", json!([]));
+    bots(&s, json!({"action":"set_main_session","id":kit_id,"session":{"runtime":"gui","session_id":"gui:main"}})).await;
+    publish_as(&s.ctx, "gui:worker", "claude", "idle", json!([]));
+
+    let (status, body) = tasks(&s, json!({"action":"upsert","task":{"bot":kit_id,"title":""}})).await;
+    assert_eq!(status, 400, "{body}");
+    let (status, body) = tasks(&s, json!({"action":"upsert","task":{"bot":kit_id,"title":"Fix login","session":{"runtime":"gui","session_id":"gui:worker"}}})).await;
+    assert!(status.is_success(), "{body}");
+    let task = body["task"].clone();
+    assert_eq!(task["status"], "in_progress", "linking a conversation starts the task");
+    let id = task["id"].as_str().unwrap().to_owned();
+
+    publish_as(&s.ctx, "gui:worker", "claude", "idle", json!([
+        {"key":"w1","kind":"session.status","payload":{"status":"busy"}},
+        {"key":"w2","kind":"message","payload":{"id":"w2","role":"assistant","text":"Login fixed, tests pass."}},
+        {"key":"w3","kind":"session.status","payload":{"status":"idle"}},
+    ]));
+    let posted = inputs_containing(&recorded, "【任务 · Fix login】").await;
+    assert!(posted.contains("Login fixed, tests pass.") && posted.contains("bot_task_update"), "{posted}");
+
+    let (_, done) = tasks(&s, json!({"action":"upsert","task":{"id":id,"status":"done"}})).await;
+    assert!(done["task"]["closed"].is_u64());
+    let view = until(&s, "the task in the watch view", |v| v["tasks"].as_array().is_some_and(|t| t.iter().any(|t| t["status"] == "done"))).await;
+    assert_eq!(view["tasks"][0]["title"], "Fix login");
+
+    let (_, plan) = tasks(&s, json!({"action":"upsert","task":{"bot":kit_id,"kind":"plan","title":"Ship v2","status":"needs_user","payload":{"steps":[{"title":"Write migration"},{"title":"Update docs","detail":"README"}]}}})).await;
+    let plan_id = plan["task"]["id"].as_str().unwrap().to_owned();
+    let (status, _) = tasks(&s, json!({"action":"approve","id":id})).await;
+    assert_eq!(status, 400, "a finished task is not approvable");
+    let (status, body) = tasks(&s, json!({"action":"approve","id":plan_id,"note":"先做迁移"})).await;
+    assert!(status.is_success(), "{body}");
+    let started = inputs_containing(&recorded, "【计划已批准 · Ship v2】").await;
+    assert!(started.contains("先做迁移") && started.contains("Write migration") && started.contains("task_id="), "{started}");
+    let view = until(&s, "the plan's steps", |v| v["tasks"].as_array().unwrap().iter().filter(|t| t["status"] == "planned").count() == 2).await;
+    assert!(view["tasks"].as_array().unwrap().iter().any(|t| t["title"] == "Update docs" && t["detail"] == "README"));
+
+    let (_, draft) = tasks(&s, json!({"action":"upsert","task":{"bot":kit_id,"kind":"outbound","title":"发给研发群","status":"needs_user","payload":{"channel":"wecom","chat_id":"g1","content":"hi"}}})).await;
+    let (status, _) = tasks(&s, json!({"action":"approve","id":draft["task"]["id"]})).await;
+    assert_eq!(status, 400, "drafted messages are sent by the front end, not approved here");
+    tasks(&s, json!({"action":"reject","id":draft["task"]["id"],"note":"语气太硬"})).await;
+    let told = inputs_containing(&recorded, "你起草的消息没有发送").await;
+    assert!(told.contains("语气太硬"), "{told}");
+
+    let progress: Value = reqwest::Client::new().get(format!("{}/api/v1/messaging/workbench/progress?bot={kit_id}", s.url)).bearer_auth(ADMIN).send().await.unwrap().json().await.unwrap();
+    let worker = progress["sessions"].as_array().unwrap().iter().find(|row| row["title"] == "Fixture" && row["turns"] == 1).cloned();
+    assert_eq!(worker.map(|w| w["last_said"].clone()), Some(json!("Login fixed, tests pass.")), "{progress}");
+    assert_eq!(progress["tasks"].as_array().unwrap().len(), 3, "{progress}");
+}
+
+#[tokio::test]
+async fn quiet_hours_hold_bot_notifications_and_release_them_as_one() {
+    let s = server().await;
+    let kit = bots(&s, json!({"action":"upsert","bot":{"name":"Kit","backend_key":"claude"}})).await;
+    let kit_id = kit["default_bot"].as_str().unwrap().to_owned();
+    use chrono::Timelike;
+    let now = chrono::Local::now();
+    let start = format!("{:02}:{:02}", (now.hour() + 23) % 24, now.minute());
+    let end = format!("{:02}:{:02}", (now.hour() + 1) % 24, now.minute());
+    bots(&s, json!({"action":"set_quiet_hours","quiet_hours":{"start":start,"end":end}})).await;
+    let mut feed = s.hub.ext.ui.subscribe();
+    super::attention::notify(&s.hub, &kit_id, "Kit 在等你处理".into(), "x", "warning", None);
+    super::attention::notify(&s.hub, &kit_id, "Kit 完成了".into(), "y", "success", None);
+    assert!(feed.try_recv().is_err(), "nothing shows during quiet hours");
+    bots(&s, json!({"action":"set_quiet_hours","quiet_hours":null})).await;
+    super::attention::release_held(&s.hub);
+    let digest = feed.try_recv().expect("one digest after quiet hours");
+    assert!(digest["title"].as_str().unwrap().contains("2 条"), "{digest}");
+    assert!(digest["body"].as_str().unwrap().contains("Kit 在等你处理"), "{digest}");
+    assert!(feed.try_recv().is_err());
+}

@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 /// Built-in topics; extensions publish `<extension-id>/<name>`.
-pub const BUILTIN_TOPICS: &[&str] = &["session.turn_completed", "session.awaiting", "session.exited", "fs.changed", "git.commit", "git.branch"];
+/// `schedule` is a time trigger: `match.cron` is a cron expression in local time.
+pub const BUILTIN_TOPICS: &[&str] = &["session.turn_completed", "session.awaiting", "session.exited", "fs.changed", "git.commit", "git.branch", "schedule"];
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -43,11 +44,15 @@ pub struct Policy {
     pub notify: String,
     /// Also post the conclusion into the bot's main conversation.
     pub report_to_main: bool,
+    /// Also send the report to this WeCom chat (through the bot's WeCom tool,
+    /// so a bot that drafts outbound messages drafts this one too).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_to_wecom: Option<String>,
 }
 
 impl Default for Policy {
     fn default() -> Self {
-        Self { coalesce_secs: 30, max_runs_per_hour: 6, permission: "plan".into(), workspace: None, carry_last_summary: true, notify: "attention".into(), report_to_main: true }
+        Self { coalesce_secs: 30, max_runs_per_hour: 6, permission: "plan".into(), workspace: None, carry_last_summary: true, notify: "attention".into(), report_to_main: true, post_to_wecom: None }
     }
 }
 
@@ -70,6 +75,13 @@ impl Spec {
                 _ => bail!("文件和 Git 事件需要指定要关注的工作区（绝对路径）"),
             }
         }
+        if topic == "schedule" {
+            let cron = self.on.conditions.get("cron").and_then(Value::as_str).ok_or_else(|| anyhow::anyhow!("定时关注需要填写时间（cron）"))?;
+            super::schedule::Cron::parse(cron)?;
+        }
+        if self.policy.post_to_wecom.as_deref().is_some_and(|chat| chat.trim().is_empty() || chat.len() > 128 || chat.chars().any(char::is_control)) {
+            bail!("企业微信会话 chat_id 无效")
+        }
         if !matches!(self.policy.permission.as_str(), "plan" | "default" | "acceptEdits") {
             bail!("事件触发的运行最高到「可以改文件」")
         }
@@ -85,8 +97,14 @@ impl Spec {
         Ok(())
     }
 
+    /// The cron of a time trigger.
+    pub fn cron(&self) -> Option<&str> {
+        (self.on.topic == "schedule").then(|| self.on.conditions.get("cron").and_then(Value::as_str)).flatten()
+    }
+
     pub fn matches(&self, topic: &str, payload: &Value) -> bool {
-        self.on.topic == topic && self.on.conditions.iter().all(|(key, expected)| condition(lookup(payload, key), expected))
+        // Time triggers are fired by the dispatcher's clock, never by events.
+        self.on.topic != "schedule" && self.on.topic == topic && self.on.conditions.iter().all(|(key, expected)| condition(lookup(payload, key), expected))
     }
 }
 
@@ -146,6 +164,14 @@ pub fn describe(topic: &str, payload: &Value) -> String {
             format!("企业微信「{chat}」（chat_id={}）收到 {sender} 的消息：{content}", field("chat_id"))
         }
         "manual" => "你在伙伴页里手动运行了这个关注".into(),
+        "schedule" => {
+            let when = super::schedule::describe(payload["cron"].as_str().unwrap_or_default());
+            if payload["missed"] == true {
+                format!("定时任务（{when}）到点时 Kode 没有在运行，现在补跑一次")
+            } else {
+                format!("定时任务到点：{when}")
+            }
+        }
         _ => format!("{topic}：{}", payload.to_string().chars().take(800).collect::<String>()),
     };
     text.chars().take(1200).collect()
@@ -199,6 +225,13 @@ mod tests {
         assert!(full.validate().is_err(), "a watch never runs with full access");
         assert!(spec(json!({"topic":"kode.team/mention"})).validate().is_ok());
         assert!(spec(json!({"topic":"wecom/message"})).validate().is_ok());
+        assert!(spec(json!({"topic":"schedule"})).validate().is_err(), "a time trigger needs a cron");
+        assert!(spec(json!({"topic":"schedule","match":{"cron":"0 25 * * *"}})).validate().is_err());
+        let daily = spec(json!({"topic":"schedule","match":{"cron":"0 9 * * 1-5"}}));
+        assert!(daily.validate().is_ok());
+        assert_eq!(daily.cron(), Some("0 9 * * 1-5"));
+        assert!(!daily.matches("schedule", &json!({"cron":"0 9 * * 1-5"})), "only the clock fires a schedule");
+        assert!(describe("schedule", &json!({"cron":"0 9 * * 1-5","missed":true})).contains("补跑"));
     }
 
     #[test]
