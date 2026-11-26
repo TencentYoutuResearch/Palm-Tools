@@ -1434,6 +1434,14 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     for (const listener of botsCollapseListeners) listener()
   }
   function useBotsCollapsed() { return useSyncExternalStore(botsCollapseStore.subscribe, botsCollapseStore.getSnapshot) }
+  /** Everything waiting for you across bots: plans, drafted messages, tasks
+   *  and runs that need you. */
+  function inboxItems(watches) {
+    if (!watches) return []
+    const tasks = (watches.tasks ?? []).filter(task => task.status === 'needs_user').map(task => ({ key: task.id, kind: task.kind, bot: task.bot, time: task.updated, task }))
+    const runs = (watches.runs ?? []).filter(run => run.status === 'needs_user').map(run => ({ key: run.id, kind: 'run', bot: run.bot, time: run.started, run }))
+    return [...tasks, ...runs].sort((a, b) => b.time - a.time)
+  }
   function BotsNavTrailing() {
     const collapsed = useBotsCollapsed()
     const { data } = useBots()
@@ -1696,14 +1704,6 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
         return rows.length > 0 && h('section', { key: status, className: 'kode-task-column' }, h('h4', null, `${label} · ${rows.length}`), h('ul', { className: 'kode-skill-list' }, ...rows.map(card)))
       })) : h('p', { className: 'kode-secondary' }, '任务板还是空的。让伙伴「帮我盯着 …」，或者在上面加一个。'),
       h(Failure, { text: error }))
-  }
-  /** Everything waiting for you across bots: plans, drafted messages, tasks
-   *  and runs that need you. */
-  function inboxItems(watches) {
-    if (!watches) return []
-    const tasks = (watches.tasks ?? []).filter(task => task.status === 'needs_user').map(task => ({ key: task.id, kind: task.kind, bot: task.bot, time: task.updated, task }))
-    const runs = (watches.runs ?? []).filter(run => run.status === 'needs_user').map(run => ({ key: run.id, kind: 'run', bot: run.bot, time: run.started, run }))
-    return [...tasks, ...runs].sort((a, b) => b.time - a.time)
   }
   function BotInboxItem({ item, bot, watch, ui }) {
     const [note, setNote] = useState(''), [content, setContent] = useState(item.task?.payload?.content ?? ''), [busy, setBusy] = useState(false), [error, setError] = useState('')
