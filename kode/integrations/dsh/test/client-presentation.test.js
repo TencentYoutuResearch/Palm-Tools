@@ -515,7 +515,7 @@ test('Plugin and Skills sources stay a multi-item list with an on-demand editor 
  const preview=render(),dialog=findNode(preview,node=>node.type==='modal'&&node.props.open);assert.ok(dialog)
  const details=visibleText(dialog);assert.match(details,/Agent 同步/);assert.match(details,/DeepSeek Harness/);assert.match(details,/Skills 已同步/);assert.match(details,/example-skill/);assert.match(details,/Skill summary/);assert.match(details,/Subagents/);assert.match(details,/reviewer/);assert.match(details,/Reviews changes/);assert.match(details,/PreToolUse/);assert.match(details,/Hook summary/);assert.match(details,/\/build/);assert.match(details,/discipline/);assert.match(details,/Rule summary/);assert.match(details,/remote-mcp/);assert.match(details,/Long remote summary/);assert.match(details,/https:\/\/example.test\/remote/)
  const previewNode=findNode(dialog,node=>node.type===scope.SourcePreview),previewTree=previewNode.type(previewNode.props)
- const syncSection=findNode(previewTree,node=>node.type===scope.SourcePreviewSection&&node.props.title==='Agent 同步');const syncTree=syncSection.type(syncSection.props);assert.ok(findNode(syncTree,node=>node.type==='check'&&node.props.className==='kode-source-sync-icon'))
+ const syncSection=findNode(previewTree,node=>node.type===scope.SourcePreviewSection&&node.props.title==='Agent 同步（来源）');const syncTree=syncSection.type(syncSection.props);assert.ok(findNode(syncTree,node=>node.type==='check'&&node.props.className==='kode-source-sync-icon'))
  assert.match(source,/\.kode-source-dialog\{[^}]*max-height:min\(640px,calc\(100dvh - 64px\)\)/);assert.match(source,/\.kode-source-dialog :has\(>\.kode-source-preview\)\{[^}]*overflow-y:auto/)
  dialog.props.onClose();assert.equal(findNode(render(),node=>node.type==='modal').props.open,false)
  findNode(closed,node=>node.type==='button'&&node.children.includes('添加来源')).props.onClick()
@@ -554,18 +554,122 @@ test('Plugin and Skills sources stay a multi-item list with an on-demand editor 
 })
 
 test('plugin detail selection follows a stable package path when polling reorders packages',()=>{
- const scope={React:{Fragment:'fragment'},SelectField:'select',transport:null,h:(type,props,...children)=>({type,props,children})}
+ const scope={React:{Fragment:'fragment'},Button:'button',SelectField:'select',transport:null,h:(type,props,...children)=>({type,props,children})}
  vm.runInNewContext(source.slice(source.indexOf('  const hubTargetNames'),source.indexOf('  function GoalSidebar')),scope)
  const multi={id:'multi',skills:[],targets:['codex','claude'],nativeStatus:{codex:'installed',claude:'ready'},packages:[{name:'one',path:'plugins/one',displayName:'One',logo:'one.png',skills:[{name:'one-skill'}]},{name:'two',path:'plugins/two',displayName:'Two',logo:'two.png',skills:[{name:'two-skill'}]}]}
  let tree=scope.SourcePreview({source:multi,packagePath:'plugins/two',onPackageChange:()=>{},host:'local'})
- assert.equal(findNode(tree,node=>node.type==='select').props.value,'plugins/two')
+ const selectedPackage = tree => findNode(tree,node=>node.props?.className==='kode-package-select'&&node.props['aria-pressed'])
+ assert.match(visibleText(selectedPackage(tree)),/Two/)
  assert.equal(findNode(tree,node=>node.type===scope.SourcePreviewSection&&node.props.title==='Skills').props.items[0].name,'two-skill')
- assert.deepEqual(Array.from(findNode(tree,node=>node.type===scope.SourcePreviewSection&&node.props.title==='Agent 同步').props.items,item=>item.description),['已安装并完成同步','已同步，下次启动会话时加载'])
+ assert.deepEqual(Array.from(findNode(tree,node=>node.type===scope.SourcePreviewSection&&node.props.title==='Agent 同步（来源）').props.items,item=>item.description),['已安装并完成同步','已同步，下次启动会话时加载'])
  multi.packages.reverse();tree=scope.SourcePreview({source:multi,packagePath:'plugins/two',onPackageChange:()=>{},host:'local'})
- assert.equal(findNode(tree,node=>node.type==='select').props.value,'plugins/two')
+ assert.match(visibleText(selectedPackage(tree)),/Two/)
  assert.equal(findNode(tree,node=>node.type===scope.SourcePreviewSection&&node.props.title==='Skills').props.items[0].name,'two-skill')
  const logoNode=findNode(tree,node=>node.type===scope.SourceLogo),logo=findNode(logoNode.type(logoNode.props),node=>node.type==='img')
  assert.match(logo.props.src,/logo=multi&package=0/)
+ let synced
+ tree=scope.SourcePreview({source:multi,packagePath:'plugins/two',onPackageChange:()=>{},onSyncSource:value=>{synced=value},host:'local'})
+ findNode(tree,node=>node.type==='button'&&node.children.includes('更新并同步')).props.onClick()
+ assert.equal(synced,multi)
+})
+
+test('plugin toggles preserve source boundaries and sequence MCP login with retry', async () => {
+  const slots = [], requests = []
+  let index = 0, firstFailed = false, firstAuthorized = false
+  const codex = { id: 'codex', name: 'Codex', type: 'codex', origin: 'builtin' }
+  const agents = { profiles: [codex], configuredDefaultProfileId: 'codex' }
+  const sessions = { list: { getSnapshot: () => ({ byId: {} }) } }
+  const scope = {
+    directory: () => ({ getSnapshot: () => ({ data: agents }) }), useSyncExternalStore: (_, get) => get(),
+    hubCall: async body => {
+      requests.push(body)
+      if (body.action === 'set-package-enabled') {
+        const source = slots[0].sources[0]
+        return { ...slots[0], sources: [{ ...source, release: body.enabled ? 'r3' : 'r2', packages: source.packages.map(pkg => pkg.key === body.packageKey ? { ...pkg, enabled: body.enabled } : pkg) }] }
+      }
+      if (body.action === 'mcp-status') return { rows: [
+        { packageKey: 'plugins/two', name: 'two-mcp', status: 'login-required' },
+        { packageKey: 'plugins/two', name: 'second-mcp', status: 'login-required' },
+        { packageKey: 'plugins/one', name: 'one-mcp', status: 'connected' },
+      ] }
+      if (body.action === 'mcp-login') {
+        if (body.name === 'two-mcp' && !firstFailed) { firstFailed = true; throw new Error('OAuth expired') }
+        if (body.name === 'two-mcp') firstAuthorized = true
+        return { rows: [
+          { packageKey: 'plugins/two', name: 'two-mcp', status: firstAuthorized ? 'connected' : 'login-required' },
+          { packageKey: 'plugins/two', name: 'second-mcp', status: 'connected' },
+          { packageKey: 'plugins/one', name: 'one-mcp', status: 'connected' },
+        ] }
+      }
+      throw new Error(`Unexpected action: ${body.action}`)
+    },
+    React: { Fragment: 'fragment' }, Button: 'button', Modal: 'modal', Failure: 'failure', SelectField: 'select',
+    IconPlusOutlineRegular: 'plus', IconChevronDownOutlineRegular: 'chevron', IconCheckOutlineRegular: 'check', IconClockOutlineRegular: 'clock',
+    transport: null, h: (type, props, ...children) => ({ type, props, children }), useEffect() {},
+    useState(initial) { const at = index++; if (slots[at] === undefined) slots[at] = initial; return [slots[at], value => { slots[at] = typeof value === 'function' ? value(slots[at]) : value }] },
+  }
+  vm.runInNewContext(source.slice(source.indexOf('  const hubTargetNames'), source.indexOf('  function GoalBar')), scope)
+  const render = () => { index = 0; return scope.HubSettings({ host: 'local', sessions }) }
+  render()
+  slots[0] = {
+    sources: [{ id: 'team', kind: 'git', location: 'https://example.test/team', targets: ['codex'], syncedTargets: ['codex'], nativeStatus: { codex: 'installed' }, updatedAt: 1, release: 'r1', packages: [
+      { key: 'plugins/one', path: 'plugins/one', name: 'one', displayName: 'One', enabled: true, mcp: [{ name: 'one-mcp', type: 'http' }] },
+      { key: 'plugins/two', path: 'plugins/two', name: 'two', displayName: 'Two', enabled: true, mcp: [{ name: 'two-mcp', type: 'http' }, { name: 'second-mcp', type: 'http' }] },
+      { path: 'plugins/legacy', name: 'legacy', displayName: 'Legacy', skills: [] },
+    ] }],
+    targets: { codex: '.codex/skills' }, profileTargets: { codex: 'codex' },
+  }
+  let tree = render()
+  findNode(tree, node => node.props?.className === 'kode-source-summary').props.onClick()
+  tree = render()
+  const previewTree = root => { const node = findNode(root, item => item.type === scope.SourcePreview); return node.type(node.props) }
+  const authorizationTree = root => { const node = findNode(previewTree(root), item => item.type === scope.McpAuthorization); return node.type(node.props) }
+  const toggle = (root, label) => findNode(previewTree(root), node => node.type === 'input' && node.props['aria-label'] === label)
+  assert.equal(toggle(tree, '停用 Legacy').props.disabled, true)
+
+  toggle(tree, '停用 Two').props.onChange({ target: { checked: false } })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(requests.map(row => ({ ...row })), [{ action: 'set-package-enabled', id: 'team', packageKey: 'plugins/two', enabled: false, release: 'r1' }])
+  tree = render()
+  assert.equal(toggle(tree, '停用 One').props.checked, true)
+  assert.equal(toggle(tree, '启用 Two').props.checked, false)
+
+  toggle(tree, '启用 Two').props.onChange({ target: { checked: true } })
+  await new Promise(resolve => setImmediate(resolve))
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(requests.slice(1).map(row => row.action), ['set-package-enabled', 'mcp-status', 'mcp-login', 'mcp-login'])
+  assert.deepEqual({ ...requests[1] }, { action: 'set-package-enabled', id: 'team', packageKey: 'plugins/two', enabled: true, release: 'r2' })
+  assert.deepEqual({ ...requests[2] }, { action: 'mcp-status', id: 'team', profileId: 'codex' })
+  assert.deepEqual({ ...requests[3] }, { action: 'mcp-login', id: 'team', profileId: 'codex', packageKey: 'plugins/two', name: 'two-mcp' })
+  assert.deepEqual({ ...requests[4] }, { action: 'mcp-login', id: 'team', profileId: 'codex', packageKey: 'plugins/two', name: 'second-mcp' })
+  tree = render()
+  findNode(previewTree(tree), node => node.props?.className === 'kode-package-select' && /Two/.test(visibleText(node))).props.onClick()
+  tree = render()
+  assert.match(visibleText(tree), /OAuth expired/)
+  assert.match(visibleText(tree), /重试登录/)
+  assert.match(visibleText(tree), /已连接/)
+
+  findNode(authorizationTree(tree), node => node.type === 'button' && node.children.includes('重试登录')).props.onClick()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(requests.at(-1).action, 'mcp-login')
+  assert.equal(requests.at(-1).name, 'two-mcp')
+  tree = render()
+  assert.doesNotMatch(visibleText(tree), /OAuth expired|重试登录/)
+  assert.match(visibleText(tree), /Codex · two-mcp/)
+
+  let manualRefresh
+  const remote = scope.McpAuthorization({
+    source: slots[0].sources[0], current: slots[0].sources[0].packages[1], host: 'ssh', mcpHostName: 'Build host',
+    mcpProfiles: [{ profile: codex, target: 'codex' }],
+    mcpStatuses: { ['team\0codex']: { rows: [{ packageKey: 'plugins/two', name: 'two-mcp', status: 'login-required' }] } },
+    mcpErrors: {}, mcpPending: {},
+    onRefreshMcp: (...args) => { manualRefresh = args }, onRetryMcp: () => assert.fail('remote rows must not auto-login'),
+  })
+  assert.match(visibleText(remote), /手动配置/)
+  assert.match(visibleText(remote), /浏览器不会跨主机自动登录/)
+  assert.doesNotMatch(visibleText(remote), /重试登录/)
+  findNode(remote, node => node.type === 'button' && node.children.includes('刷新状态')).props.onClick()
+  assert.equal(manualRefresh[1], 'codex')
 })
 
 test('Kode settings use the native settings section and a pinnable sidebar panel', () => {
@@ -602,10 +706,16 @@ test('Kode sidebar brand registers the Kode mark and name inside desktop embed',
   const markEntry = c.ctx.slots.entries('sidebar.brand.mark').find(row => row.options.name === 'sidebar.brand.mark')
   assert.ok(markEntry, 'sidebar.brand.mark must be registered when embedded in Kode')
   const markEl = markEntry.component({ size: 24 })
-  assert.equal(markEl.type, 'svg')
-  assert.equal(markEl.props.width, 24)
-  assert.equal(markEl.props.viewBox, '0 0 24 24')
-  assert.ok(markEl.props.className.includes('kode-brand-mark-svg'))
+  assert.equal(markEl.type, 'img')
+  assert.equal(markEl.props.width, 55)
+  assert.equal(markEl.props.height, 24)
+  assert.equal(markEl.props.src, '/api/kode/avatars/media?type=brand&state=idle')
+  assert.ok(markEl.props.className.includes('kode-brand-logo'))
+  const heroEntry = c.ctx.slots.entries('conversation.hero.brand.mark').find(row => row.options.name === 'conversation.hero.brand.mark')
+  const heroEl = heroEntry.component({ size: 34, className: 'native-hero-mark' })
+  assert.equal(heroEl.props.src, markEl.props.src)
+  assert.equal(heroEl.props.width, 78)
+  assert.ok(heroEl.props.className.includes('native-hero-mark'))
 
   const nameEntry = c.ctx.slots.entries('sidebar.brand.name').find(row => row.options.name === 'sidebar.brand.name')
   assert.ok(nameEntry, 'sidebar.brand.name must be registered when embedded in Kode')
@@ -790,6 +900,51 @@ test('host-qualified session rename opens the DSH dialog and writes only to the 
   nativeDialog.props.settleSessionRename()
   await nativeDialog.props.renameSession('local', 'Local title')
   assert.deepEqual(calls.slice(1), ['closed', ['local', 'Local title']])
+})
+
+test('local-owner imports replace the shared composer with the native conversation', async () => {
+  const session = { id: 'session', title: 'Owned locally', nativeThreadId: 'native-id' }
+  const directory = { current: 'local', hosts: [{ id: 'local', sessions: [session], pinnedSessionIds: ['session'], workspaces: [] }] }
+  const imports = [
+    { sharedSession: { id: 'shared-runtime', session_uuid: 'shared-runtime', runtime: 'dsh', title: 'Shared runtime' } },
+    { sessionId: 'local-owner' },
+  ]
+  const selected = [], calls = []
+  const transport = {
+    current: 'local', subscribe: () => () => {},
+    fetch: async (url, options) => {
+      calls.push({ url: String(url), body: options?.body })
+      return String(url).includes('/api/kode/native-sessions')
+        ? { ok: true, json: async () => imports.shift() }
+        : { ok: true, json: async () => directory }
+    },
+    select: async (host, target) => selected.push([host, target.sessionId]),
+  }
+  const c = client(directory, {}, { kodeTransport: transport }, { URLSearchParams, setTimeout: () => 0, clearTimeout() {} })
+  const sidebar = c.workspaceShell.component({
+    useSessions: select => select({ ids: [], byId: {} }),
+    useWorkspaces: select => select({ items: [], pinnedSessionIds: [], archivedSessionIds: [] }),
+  })
+  sidebar.type(sidebar.props)
+  await new Promise(resolve => setImmediate(resolve))
+  const nativeSidebar = findNode(sidebar.type(sidebar.props), node => node.type === c.native && node.props.useSessions)
+  const open = nativeSidebar.props.open
+  const wrapped = c.chatShell.component({ openFile: async () => {} })
+  const conversation = () => wrapped.type(wrapped.props)
+
+  open('session')
+  await new Promise(resolve => setImmediate(resolve))
+  await new Promise(resolve => setImmediate(resolve))
+  const sharedView = conversation()
+  assert.match(visibleText(sharedView), /发送消息/)
+  assert.deepEqual(selected, [])
+
+  open('session')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(conversation().type, c.native)
+  assert.doesNotMatch(visibleText(conversation()), /发送消息/)
+  assert.deepEqual(selected, [['local', 'local-owner']])
+  assert.equal(calls.filter(call => call.url.includes('/api/kode/native-sessions')).length, 2)
 })
 
 test('slow native imports load in the conversation and show fallback history in a dismissible DSH toast', async () => {
@@ -1727,8 +1882,40 @@ test('shared memory approval page registers in sidebar panellist, trailing badge
   assert.ok(trailingEntry)
   const mainEntry = c.entry('main', 'kode-memory')
   assert.ok(mainEntry)
-  const page = mainEntry()
+  const wrapper = mainEntry()
+  assert.equal(wrapper.props.className, 'kode-settings-main')
+  const page = wrapper.children[0]
   assert.equal(page.type.name, 'KodeMemoryPage')
+  const tree = page.type(page.props)
+  assert.equal(tree.props.className, 'kode-settings-page kode-agent-settings kode-memory-page')
+  assert.equal(tree.children[0].props.className, 'kode-settings-brand')
+  const layout = tree.children[1]
+  assert.equal(layout.props.className, 'kode-settings-layout')
+  const [nav, section] = layout.children
+  assert.equal(nav.type, 'nav')
+  assert.equal(nav.props.className, 'kode-settings-nav')
+  assert.equal(nav.children.length, 2)
+  assert.equal(nav.children[0].props['aria-current'], 'page')
+  assert.equal(nav.children[0].props['aria-controls'], 'kode-memory-pending')
+  assert.equal(nav.children[1].props['aria-controls'], 'kode-memory-facts')
+  assert.equal(section.type, 'section')
+  assert.equal(section.props.id, 'kode-memory-pending')
+  assert.equal(section.props.className, 'kode-settings-section')
+  assert.ok(findNode(section, node => node.props?.className === 'kode-memory-content'))
+
+  let stateIndex = 0
+  const factsClient = client(undefined, undefined, { layout: { selectPanel() {} } }, {}, {
+    useState(initial) { const at = stateIndex++; return [at === 6 ? 'facts' : initial, () => {}] },
+  })
+  const factsPage = factsClient.entry('main', 'kode-memory')().children[0]
+  stateIndex = 0
+  const factsTree = factsPage.type(factsPage.props)
+  const [factsNav, factsSection] = factsTree.children[1].children
+  assert.equal(factsNav.children[0].props['aria-current'], undefined)
+  assert.equal(factsNav.children[1].props['aria-current'], 'page')
+  assert.equal(factsSection.props.id, 'kode-memory-facts')
+  assert.equal(factsSection.props.className, 'kode-settings-section')
+  assert.ok(findNode(factsSection, node => node.props?.className === 'kode-memory-search-bar'))
 })
 
 test('bots sidebar registers collapsible trailing toggle, larger nameplate styling, and wecom watch source', () => {

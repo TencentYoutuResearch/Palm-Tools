@@ -117,6 +117,18 @@ impl Extensions {
         let catalog = extension_targets::catalog(hub)?;
         value["targets"] = json!(catalog.paths);
         value["profileTargets"] = json!(catalog.profiles);
+        value["capabilities"] = json!({"packageToggle": true});
+        // Releases synced by older services already recorded the relative package path.
+        // Expose that durable identity immediately, without re-cloning or reinstalling.
+        for source in value["sources"].as_array_mut().into_iter().flatten() {
+            let disabled = source["disabledPackages"].as_array().cloned().unwrap_or_default();
+            for package in source["packages"].as_array_mut().into_iter().flatten() {
+                if package["path"].is_string() {
+                    package["key"] = package["path"].clone();
+                    package["enabled"] = json!(!disabled.contains(&package["path"]));
+                }
+            }
+        }
         value["power"] = self.power.lock().status();
         Ok(value)
     }

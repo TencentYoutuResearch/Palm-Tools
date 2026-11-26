@@ -1189,7 +1189,30 @@ async fn toggling_one_extension_uses_the_installed_release_and_preserves_sibling
     let change = |input| hub.extensions.change(hub, input);
     change(json!({"action":"save-source","source":{"id":"sample","kind":"local","location":origin,"targets":["claude"]}})).unwrap();
     let synced = change(json!({"action":"sync-source","id":"sample"})).unwrap();
+    // Exercise a pre-toggle release as it exists on an upgraded host.
+    let mut legacy = super::extensions::state(hub).unwrap();
+    for pkg in legacy["sources"][0]["packages"].as_array_mut().unwrap() {
+        pkg.as_object_mut().unwrap().remove("enabled");
+        pkg.as_object_mut().unwrap().remove("key");
+    }
+    super::extensions::save(hub, &legacy).unwrap();
+    let upgraded = hub.extensions.view(hub).unwrap();
+    assert_eq!(upgraded["capabilities"]["packageToggle"], true);
+    assert_eq!(upgraded["sources"][0]["packages"][0]["key"], "one");
+    assert_eq!(upgraded["sources"][0]["packages"][0]["enabled"], true);
     let toggle = |enabled| json!({"action":"set-package-enabled","id":"sample","packageKey":"one","release":synced["sources"][0]["release"],"enabled":enabled});
+    #[cfg(unix)]
+    {
+        let pkg = std::path::PathBuf::from(synced["sources"][0]["plugins"]["claude"][0]["path"].as_str().unwrap());
+        let mcp = pkg.join("mcp");
+        std::fs::create_dir_all(&mcp).unwrap();
+        std::os::unix::fs::symlink(fixture._root.path(), mcp.join("node_modules")).unwrap();
+        // Other links in the same installed package must still pass validation.
+        let escape = mcp.join("outside");
+        std::os::unix::fs::symlink(fixture._root.path(), &escape).unwrap();
+        assert!(change(toggle(false)).unwrap_err().to_string().contains("mcp/outside"));
+        std::fs::remove_file(escape).unwrap();
+    }
     let off = change(toggle(false)).unwrap();
     let source = &off["sources"][0];
     assert_eq!(source["plugins"]["claude"].as_array().unwrap().len(), 1);
