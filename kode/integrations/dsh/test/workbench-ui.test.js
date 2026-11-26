@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import vm from 'node:vm'
 import { readFile } from 'node:fs/promises'
+import { readAgentClientSource } from '../scripts/build-agent-client.js'
 const source = await readFile(new URL('../packages/chat/workbench-ui.js', import.meta.url), 'utf8')
 const headerActions = 'conversation.session.header.actions'
 test('legacy jobs keep their bindings by the avatar while the native session panel keeps its own toggle', () => {
@@ -62,7 +63,7 @@ test('legacy jobs keep their bindings by the avatar while the native session pan
   assert.equal(registrations.length, 0)
 })
 test('worktree search lives inside the dropdown and preserves selection while filtering local and remote branches', async () => {
-  const client = await readFile(new URL('../src/agent-client.js', import.meta.url), 'utf8')
+  const client = await readAgentClientSource()
   let cursor = 0, value = 'refs/heads/main'
   const state = [], info = { branch: 'main', commit: '1234567890', branches: [{ name: 'main', ref: value, commit: '1234567890' }, { name: 'origin/FEATURE', ref: 'refs/remotes/origin/FEATURE', commit: '2345678901' }] }
   const scope = { h: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) }), Menu: 'menu', IconChevronDownOutlineRegular: 'chevron', IconSearchOutlineRegular: 'search', IconCheckOutlineRegular: 'check',

@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 pub enum Scope {
     /// 项目级:绑定到某个项目 slug(通常是 cwd 哈希或仓库名)
     Project(String),
+    /// 伙伴级：绑定到单个 Bot ID。
+    Bot(String),
     /// 跨项目共享池:不属于任何具体项目,所有 agent 都可访问(通用知识 / 用户偏好)。
     /// 2026-06:旧的 `Global` 已并入此变体,语义重叠故合并。
     Shared,
@@ -26,6 +28,7 @@ impl Scope {
     pub fn as_str(&self) -> String {
         match self {
             Self::Project(s) => format!("project:{}", s),
+            Self::Bot(id) => format!("bot:{}", id),
             Self::Shared => "shared".to_string(),
         }
     }
@@ -36,6 +39,8 @@ impl Scope {
             Ok(Self::Shared)
         } else if let Some(name) = s.strip_prefix("project:") {
             Ok(Self::Project(name.to_string()))
+        } else if let Some(id) = s.strip_prefix("bot:").filter(|id| !id.trim().is_empty()) {
+            Ok(Self::Bot(id.to_string()))
         } else {
             Err(anyhow!("invalid scope: {}", s))
         }
@@ -355,12 +360,13 @@ deprecated: false
 
     #[test]
     fn scope_parse_roundtrip() {
-        for s in ["shared", "project:kode", "project:foo-bar"] {
+        for s in ["shared", "project:kode", "project:foo-bar", "bot:bot_7424c117db55405f"] {
             assert_eq!(Scope::parse(s).unwrap().as_str(), s);
         }
         // `global` 是旧别名,parse 成 Shared(归一化,不再 roundtrip 回 "global")
         assert_eq!(Scope::parse("global").unwrap(), Scope::Shared);
         assert!(Scope::parse("nope").is_err());
+        assert!(Scope::parse("bot:").is_err());
     }
 
     #[test]

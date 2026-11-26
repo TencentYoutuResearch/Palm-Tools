@@ -1,9 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
 import vm from 'node:vm'
+import { readAgentClientSource } from '../scripts/build-agent-client.js'
 
-const source = await readFile(new URL('../src/agent-client.js', import.meta.url), 'utf8')
+const source = await readAgentClientSource()
 test('model and effort are native submenus of one stable root; choices and Fast never dismiss it', () => {
   let cursor = 0, mounted = false
   const state = [], requests = []

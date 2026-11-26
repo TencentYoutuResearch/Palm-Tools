@@ -74,6 +74,11 @@ The archive includes the private UI subpackages as bundled dependencies, so pnpm
 does not need a source checkout. Other npm dependencies are downloaded during installation.
 Start the installed profile with `dsh web --no-open` (or `dsh web` to open a browser).
 
+The client entry in `src/agent-client.js` contains DSH registration, with feature
+code in `src/agent-client/`. Run `npm run build:client` after editing the client
+in a source checkout. Both package builders run this step through `npm pack`
+and ship the generated classic script at `lib/agent-client.js`.
+
 On first start the plugin creates private state under `~/.config/kode/dsh`, including
 the administrator token, backend configuration and owner-token state. The
 bundled `kode-session-server` is started only for a loopback HTTP URL. An existing
@@ -86,6 +91,8 @@ Explicit configuration always takes precedence over automatic provisioning.
 ### Source checkout
 
 ```sh
+cd /absolute/path/to/kode/integrations/dsh
+npm run build:client
 dsh plugin --profile web add /absolute/path/to/kode/integrations/dsh
 ```
 

@@ -353,7 +353,7 @@ GET /api/ext/v1/events/stream?kinds=…&owner=self&label=…&after=<cursor>   (S
 | 权限：默认 `min(default, 上限)`；请求高于上限直接拒绝（403），不悄悄降级 | `bots.rs` |
 | 角色说明：支持 `--append-system-prompt` 的 backend 注入系统提示（与记忆提示共用一个 flag）；其他 backend（如 Codex）作为第一条消息发送 | `kode-core/src/session/mod.rs` |
 | 记忆范围：会话标签 `bot:<id>`，角色说明里写明记忆范围 `bot:<id>` | 同上 |
-| 伙伴界面放在 dsh：侧栏「伙伴」页可新建、编辑、删除、设为默认；「开始对话」用伙伴的 Agent 在 dsh 里开会话，角色说明随第一条消息发送，权限按上限映射（只做计划→只读，其余最高为工作区可写），并记为伙伴的主会话；「继续对话」直接打开主会话 | `integrations/dsh/src/bots-api.js`、`agent-client.js` `KodeBotsPage` |
+| 伙伴界面放在 dsh：侧栏「伙伴」页可新建、编辑、删除、设为默认；「开始对话」用伙伴的 Agent 在 dsh 里开会话，角色说明随第一条消息发送，权限按上限映射（只做计划→只读，其余最高为工作区可写），并记为伙伴的主会话；「继续对话」直接打开主会话 | `integrations/dsh/src/bots-api.js`、`integrations/dsh/src/agent-client/bots-page.js` 的 `KodeBotsPage` |
 
 尚未做：主会话与上下文压缩（P1，先 `/compact`，不支持时再轮换）、技能引用、来源权限上限（P2，`kode-bots`）、dsh 侧栏伙伴列表（P0-b 的 dsh 桥）。
 

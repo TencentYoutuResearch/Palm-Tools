@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { load } from 'js-yaml'
 import * as include from '@deepseek-ai/cordis-plugin-include'
+import { readAgentClientSource } from '../scripts/build-agent-client.js'
 
 test('default composition exposes built-in dsh and preserves official settings and trajectory', async () => {
   const source = await readFile(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
@@ -13,7 +14,7 @@ test('default composition exposes built-in dsh and preserves official settings a
   for (const id of ['ui-settings-models', 'ui-settings-web-search', 'ui-trajectory']) {
     assert.notEqual(patch.find(row => row.id === id)?.disabled, true, id)
   }
-  const client = await readFile(new URL('../src/agent-client.js', import.meta.url), 'utf8')
+  const client = await readAgentClientSource()
   assert.doesNotMatch(client, /function AgentTrajectory|function AgentSettingsShell/)
   const host = await readFile(new URL('../src/dsh-conversation.js', import.meta.url), 'utf8')
   assert.doesNotMatch(host, /loader\.create\(['"]@deepseek-ai\/dsh-client-ui-settings-models/)

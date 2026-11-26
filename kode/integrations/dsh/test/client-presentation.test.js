@@ -1,10 +1,10 @@
 /** Exercise the registered client seats without a browser or backend credentials. */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
 import vm from 'node:vm'
+import { readAgentClientSource } from '../scripts/build-agent-client.js'
 
-const source = await readFile(new URL('../src/agent-client.js', import.meta.url), 'utf8')
+const source = await readAgentClientSource()
 function client(directoryData = { current: 'local', hosts: [] }, windowProperties = {}, contextProperties = {}, globals = {}, hooks = {}) {
   const { primitives: primitiveOverrides = {}, ...reactHooks } = hooks
   let plugin
@@ -2252,7 +2252,7 @@ test('the 伙伴 page lists bots as an avatar rail and registers the kode-bot pr
   const fence = c.ctx.slots.entries('conversation.chat.markdown.fence').find(entry => entry.options.key === 'kode-bot')
   assert.equal(fence?.component.name, 'BotProposalCard')
   assert.match(source, /action: 'builder'/)
-  assert.match(source, /function BotSettingsModal/)
+  assert.match(source, /function BotSettingsPage/)
   assert.match(source, /function BotSkillsPanel/)
 })
 

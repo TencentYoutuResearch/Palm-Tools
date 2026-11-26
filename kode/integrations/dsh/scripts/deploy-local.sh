@@ -13,10 +13,11 @@ if [ -s "$NVM_DIR/nvm.sh" ]; then
 fi
 
 npm --prefix "$ROOT_DIR" test
+npm --prefix "$ROOT_DIR" run build:client
 npm --prefix "$ROOT_DIR" run build:bundle -- --target aarch64-apple-darwin
 cp "$ROOT_DIR/dist/kode-dsh-0.1.0-darwin-arm64.tgz" "$ARTIFACT"
 "$DSH_CLI" plugin --profile desktop add "$ARTIFACT"
-cmp "$ROOT_DIR/src/agent-client.js" "$HOME/.dsh/profiles/desktop/node_modules/@kode/dsh/src/agent-client.js"
+cmp "$ROOT_DIR/lib/agent-client.js" "$HOME/.dsh/profiles/desktop/node_modules/@kode/dsh/lib/agent-client.js"
 
 printf 'Installed %s\n' "$ARTIFACT"
 osascript -e 'tell application "DeepSeek Harness" to quit' || true

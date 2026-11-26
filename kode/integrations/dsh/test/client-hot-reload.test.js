@@ -1,12 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
 import vm from 'node:vm'
 import { fileURLToPath } from 'node:url'
 import { composeEntries, loadOverlayPatches } from '@deepseek-ai/dsh-app-boot'
 import { Context, Service } from '@deepseek-ai/cordis'
+import { readAgentClientSource } from '../scripts/build-agent-client.js'
 
-const source = await readFile(new URL('../src/agent-client.js', import.meta.url), 'utf8')
+const source = await readAgentClientSource()
 const start = source.indexOf("    ctx.slots.inject('tool.call.toolview', function* () {")
 const end = source.indexOf("    ctx.effect(", start)
 
