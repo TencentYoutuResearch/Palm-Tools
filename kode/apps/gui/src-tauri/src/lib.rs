@@ -273,6 +273,7 @@ pub fn run() {
             commands::memory_browse_state_get,
             commands::memory_browse_state_set,
             workspace::open_path,
+            workspace::reveal_path,
             commands::read_clipboard,
             attachments::upload_remote_attachments,
             attachments::paste_remote_clipboard,

@@ -37,6 +37,7 @@ type InstallOptions = {
   getBackendKey?: () => string
   safeMouseMode?: boolean
   deferSingleClickMs?: number
+  shouldIgnoreMouseDown?: (event: MouseEvent) => boolean
 }
 const DRAG_DISTANCE_SQUARED = 25
 export const CODEX_MULTI_CLICK_MS = 500
@@ -70,6 +71,7 @@ export function installCodexMouseSelection(
     getBackendKey,
     safeMouseMode = false,
     deferSingleClickMs = SINGLE_CLICK_FORWARD_DELAY_MS,
+    shouldIgnoreMouseDown,
   } = options
   const doc = host.ownerDocument
   let pending: Gesture | null = null
@@ -213,6 +215,7 @@ export function installCodexMouseSelection(
 
   function onDown(event: MouseEvent) {
     if (replaying || event.button !== 0 || event.altKey || event.metaKey || event.ctrlKey || event.shiftKey) return
+    if (shouldIgnoreMouseDown?.(event)) return
     if (!currentBackendSupportsSelection()) return
     if (term.modes.mouseTrackingMode === 'none' || !term.element?.contains(event.target as Node)) return
     const detail = clickDetail(event)
