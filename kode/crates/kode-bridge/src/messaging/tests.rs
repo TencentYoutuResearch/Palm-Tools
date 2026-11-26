@@ -1560,6 +1560,10 @@ async fn backend_handoff_case(source_runtime: &str, target_runtime: &str, brief:
     assert!(ctx.runtimes.claim(target_runtime, &boot).unwrap()["commands"].as_array().unwrap().is_empty());
     let mut conflict = input.clone();
     if brief.is_some() {
+        let mut changed_model = input.clone();
+        changed_model["model"] = json!("other-model");
+        let retry = client.post(&url).bearer_auth("admin-test").json(&changed_model).send().await.unwrap();
+        assert_eq!(retry.status(), 400);
         conflict["brief"] = json!("Another handoff brief");
     } else {
         conflict["source_session_id"] = json!("different");
