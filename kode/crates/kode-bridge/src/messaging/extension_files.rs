@@ -209,13 +209,15 @@ fn copy_tree(source: &Path, target: &Path, count: &mut usize, depth: usize) -> R
     }
     Ok(())
 }
-fn validate_tree(root: &Path, path: &Path, count: &mut usize, depth: usize) -> Result<()> {
+fn validate_tree(root: &Path, path: &Path, count: &mut usize, depth: usize, installed: bool) -> Result<()> {
     if depth > 32 {
         bail!("extension source tree is too deep")
     }
     for entry in fs::read_dir(path)? {
         let entry = entry?;
-        if entry.file_name() == ".git" {
+        // Native MCP launchers may install node_modules into their own cache
+        // after initial admission. Discovery never indexes dependency trees.
+        if entry.file_name() == ".git" || (installed && entry.file_name() == "node_modules") {
             continue;
         }
         *count += 1;
@@ -224,10 +226,10 @@ fn validate_tree(root: &Path, path: &Path, count: &mut usize, depth: usize) -> R
         }
         let ty = entry.file_type()?;
         if ty.is_symlink() && !fs::canonicalize(entry.path())?.starts_with(root) {
-            bail!("来源符号链接超出包目录")
+            bail!("来源符号链接超出包目录：{}", entry.path().strip_prefix(root)?.display())
         }
         if ty.is_dir() {
-            validate_tree(root, &entry.path(), count, depth + 1)?
+            validate_tree(root, &entry.path(), count, depth + 1, installed)?
         }
     }
     Ok(())
@@ -729,7 +731,8 @@ pub fn inspect_release(root: &Path, source: &Value, release_id: &str, revision: 
     uuid::Uuid::parse_str(release_id).context("invalid release")?;
     let package = root.join("sources").join(name).join("releases").join(release_id).join("package");
     let package = fs::canonicalize(package)?;
-    validate_tree(&package, &package, &mut 0, 0)?;
+    let already_installed = source["release"].as_str() == Some(release_id);
+    validate_tree(&package, &package, &mut 0, 0, already_installed)?;
     let selected = fs::canonicalize(package.join(source["subdir"].as_str().unwrap_or(".")))?;
     if !selected.starts_with(&package) {
         bail!("子目录超出来源范围")
