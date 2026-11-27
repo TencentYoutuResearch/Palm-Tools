@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, symlink, unlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { once } from 'node:events'
@@ -37,6 +37,21 @@ test('Agent configuration API admits only the dsh owner and preserves identity w
     assert.equal((await request(undefined, 'anonymous')).status, 401)
     assert.equal((await request({ action: 'save', profile: { name: 'Must not persist', type: 'codex' } }, 'guest')).status, 403)
     assert.equal(profiles.list().length, 1)
+    const cli = join(root, 'agy')
+    const agy = await profiles.save({ name: 'Antigravity', type: 'antigravity', executable: 'agy', env: { PATH: root } })
+    await profiles.setDefaultProfile(agy.id)
+    const directory = async (query = '') => (await fetch(endpoint + query, { headers: { 'x-test-role': 'owner' } })).json()
+    const draft = await directory()
+    assert.ok(!draft.profiles.some(p => p.id === agy.id))
+    assert.equal(draft.currentProfile.id, 'native')
+    assert.equal(draft.defaultProfileId, 'native')
+    assert.ok((await directory('?configuration=1')).profiles.some(p => p.id === agy.id))
+    await symlink(process.execPath, cli)
+    assert.equal((await directory()).defaultProfileId, agy.id)
+    assert.ok((await (await request()).json()).profiles.some(p => p.id === agy.id))
+    await unlink(cli)
+    assert.ok(!(await (await request()).json()).profiles.some(p => p.id === agy.id))
+    await profiles.remove(agy.id)
     const one = await (await request({ action: 'save', profile: { name: 'Codex', type: 'codex' } })).json()
     const two = await (await request({ action: 'save', profile: { name: 'Tcodex', type: 'codex', executable: 'tcodex' } })).json()
     assert.notEqual(one.profile.id, two.profile.id)
