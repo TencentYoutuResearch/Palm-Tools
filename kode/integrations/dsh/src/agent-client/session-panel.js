@@ -117,7 +117,7 @@
     })
   }
   function relayKind(row, rows) {
-    if (row.direction !== 'sent') return row.reply ? 'reply' : 'incoming'
+    if (row.direction !== 'sent') return row.reply ? 'reply' : answeredBy(rows, row.id, row.nodeId, row.sessionId) ? 'responded' : 'incoming'
     if (row.reply) return 'replied'
     if (row.answered === true) return 'answered'
     return rows.some(other => other.direction === 'received' && other.replyTo === row.id && other.nodeId === row.nodeId && other.sessionId === row.sessionId) ? 'answered' : 'waiting'
@@ -136,15 +136,16 @@
     return h(DisclosurePanelRows, { key: cardKey(sessionId), rows: messages.toReversed(), renderFactorySlot,
       rowProps: row => {
         const key = relayKind(row, messages), kind = relayKinds[key], peer = relayPeer(row, nameOf), title = relayTitle(row)
-        return { icon: relayIcon(key),
-          label: title, hint: kind.label,
-          preview: [title, peer.direction + ' ' + peer.name + ' · ' + kind.label],
+        const { badge, label: delivery } = relayBadge(row, key), state = [kind.label, delivery].filter(Boolean).join('，')
+        return { icon: relayIcon(key, badge),
+          label: title, hint: state,
+          preview: [title, peer.direction + ' ' + peer.name + ' · ' + state],
           detail: h('span', { className: 'kode-relay-peer' }, h('span', { className: 'kode-relay-direction' }, peer.direction), ' ', peer.name),
-          detailTitle: `${peer.direction} ${peer.name}`, actionLabel: `${title}，${kind.label}，${peer.direction} ${peer.name}`,
+          detailTitle: `${peer.direction} ${peer.name}`, actionLabel: `${title}，${state}，${peer.direction} ${peer.name}`,
           trailing: h(IconChevronDownOutlineRegular, { size: 14, 'aria-hidden': true }) }
       },
       content: row => {
-        const kind = relayKinds[relayKind(row, messages)], status = row.direction === 'sent' && deliveryStatusLabels[row.status]
+        const kind = relayKinds[relayKind(row, messages)], status = row.direction === 'sent' && deliveryStatusLabels[row.deliveryStatus ?? row.status]
         const peer = relayPeer(row, nameOf), here = `本会话 ${nameOf(undefined, sessionId)}`
         const route = row.direction === 'sent' ? `${here} → ${peer.name}` : `${peer.name} → ${here}`
         return h(React.Fragment, null,
@@ -422,14 +423,15 @@
     const entries = useSyncExternalStore(fn => props.slots.subscribe('conversation.chat.node', fn), () => props.slots.entries('conversation.chat.node'))
     const nameOf = useNames(props.sessions)
     const relay = parseRelay(props.node.data)
-    if (relay) return h(RelayCard, { relay, time: props.node.data.time, nameOf, sessionId: props.sessionId, node: props.node, useChat: props.useChat })
+    if (relay) return h(RelayCard, { relay, time: props.node.data.time, nameOf, sessionId: props.sessionId, node: props.node, useChat: props.useChat, useProjection: props.useProjection })
     // Preserve the native presentation of schedules, goals, and other triggers.
     const original = entries.find(entry => entry.options.key === 'turn-trigger' && entry.component !== RelayTrigger)
     return original ? h(original.component, props) : null
   }
-  function MessagingTool({ toolName, block, phase, useDisclosure, sessions, sessionId }) {
+  function MessagingTool({ toolName, block, phase, useDisclosure, sessions, sessionId, useProjection }) {
     const { expanded: open, setExpanded: setOpen } = useDisclosure()
     const nameOf = useNames(sessions)
+    const relays = useProjection?.('kodeSessionPanel', state => state?.relays)
     const args = block.args, content = args?.text('content') ?? '', target = [args?.text('node_id'), args?.text('session_id')].filter(Boolean).join('/')
     const raw = textContent(block.content)
     let result
@@ -438,8 +440,12 @@
     const status = block.isError ? '调用失败' : phase !== 'result' ? '进行中' : result?.message ? `发送时：${deliveryStatusLabels[result.message.status] ?? result.message.status}` : result?.timed_out ? '暂未收到新消息' : '已返回'
     if (toolName === 'kode_sessions_send' && target) {
       const peer = nameOf(args?.text('node_id'), args?.text('session_id'))
+      // Prefer the projected row (it carries later receipts and the answered flag); the call's own result is the fallback.
+      const sent = result?.message?.id && relays?.find(row => row.direction === 'sent' && row.id === result.message.id && row.nodeId === args?.text('node_id') && row.sessionId === args?.text('session_id'))
+      const kind = sent ? relayKind(sent, relays) : args?.text('in_reply_to') ? 'replied' : 'sent'
+      const outcome = block.isError ? { badge: 'fail', label: '未送达：通信未成功' } : phase !== 'result' ? {} : relayBadge(sent || { direction: 'sent', status: result?.message?.status }, kind)
       return h('section', { className: 'kode-relay', 'aria-label': title, 'data-open': open ? '' : undefined },
-        h(RelayToggle, { from: currentEnd(nameOf(undefined, sessionId)), to: { name: peer, title: peer }, title: relayTitle({ title: args?.text('title') ?? result?.message?.title ?? relayTitlePrefix(content).title, replyTo: args?.text('in_reply_to') }), open, onToggle: () => setOpen(!open), kind: args?.text('in_reply_to') ? 'replied' : 'sent', failed: block.isError }),
+        h(RelayToggle, { from: currentEnd(nameOf(undefined, sessionId)), to: { name: peer, title: peer }, title: relayTitle({ title: args?.text('title') ?? result?.message?.title ?? relayTitlePrefix(content).title, replyTo: args?.text('in_reply_to') }), open, onToggle: () => setOpen(!open), kind, badge: outcome.badge, state: [relayKinds[kind].label, outcome.label].filter(Boolean).join('，') }),
         open && h('div', { className: 'kode-relay-detail' }, h('p', { className: 'kode-panel-meta' }, `${title} · `, h('span', { className: block.isError ? 'kode-error' : undefined }, status)), h(PanelMarkdown, { text: relayTitlePrefix(content).content, className: 'kode-relay-body' }), h('p', { className: 'kode-config-note' }, '投递状态不代表目标任务已完成。'), block.isError && h(Failure, { text: '通信未成功，可在轨迹中查看原因。' })),
       )
     }

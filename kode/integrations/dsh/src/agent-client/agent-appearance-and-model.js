@@ -138,12 +138,19 @@
         openAvatarDialog({ sessionId, host, profile })
       }
     }
-    const avatar = h(AgentAvatar, { profile, host, size: panel ? 28 : 24, status: status ?? (currentSession?.running ? 'running' : 'idle') })
+    const avatar = h(AgentAvatar, { profile, host, size: panel ? 32 : 24, status: status ?? (currentSession?.running ? 'running' : 'idle') })
     if (panel) {
+      // Two lines beside a 32px avatar: the name with its edit pencil right after it, then the Agent type.
+      // Only the pencil edits, so tapping the name or avatar never opens a dialog by surprise.
+      const editLabel = bot ? `编辑伙伴 ${bot.name}` : `设置 ${profile.name} 的头像与背景`
       return h(SessionIdentitySection, null, h('div', { className: 'kode-environment-identity' },
-        h(SessionPanelRow, { icon: avatar, label: profile.name, detail: profile.name === type ? undefined : type,
-          actionLabel: bot ? `编辑伙伴 ${bot.name}` : `设置 ${profile.name} 的头像与背景`,
-          trailing: h(IconEditOutlineRegular, { size: 14, 'aria-hidden': true }), onClick: choose }),
+        h('span', { className: 'kode-identity-avatar' }, avatar),
+        h('span', { className: 'kode-identity-lines' },
+          h('span', { className: 'kode-identity-name' },
+            h('strong', { title: profile.name }, profile.name),
+            h(Tooltip, { label: bot ? '编辑伙伴' : '头像与背景', side: 'bottom', delayMs: 350, portal: true },
+              h('button', { type: 'button', className: 'kode-identity-edit', 'aria-label': editLabel, onClick: choose }, h(IconEditOutlineRegular, { size: 14, 'aria-hidden': true })))),
+          h('span', { className: 'kode-identity-type', title: type }, type)),
         h(HandoffAction, { sessionId, sessions, panel: true, dismissOverlay })))
     }
     return h('span', { className: 'kode-agent-identity', title: bot ? `${bot.name} · 伙伴（${base.name}）` : `${profile.name} · ${type}` },
