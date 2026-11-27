@@ -1178,7 +1178,11 @@ describe('SpecOps server', () => {
       body: JSON.stringify({ request: 'Plan docs commit test', backend_key: 'codebuddy' }),
     }))
     const startedBody = await started.json() as { intake_id: string }
-    await (await fetch(`${server.origin}/api/intakes/${startedBody.intake_id}`, auth(server))).json()
+    await expect.poll(async () => {
+      const response = await fetch(`${server.origin}/api/intakes/${startedBody.intake_id}`, auth(server))
+      const intake = await response.json() as { document: { path: string } | null }
+      return intake.document?.path
+    }, { timeout: 5000 }).toBe('.specops/changes/bug/plan-docs')
 
     // The plan docs commit must have landed on the main workspace.
     const { git } = await import('./helpers.js')
