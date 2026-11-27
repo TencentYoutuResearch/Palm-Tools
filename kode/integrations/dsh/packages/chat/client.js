@@ -6165,7 +6165,7 @@ function UserStyleBubble({ content, loadImage, renderFactorySlot, actions, pendi
 			return [
 				...rows,
 				...pendingRows,
-				...running && !entries.some(entry => entry.kind === "node" && nodeStore.get(entry.key)?.kind === "turn-process" && nodeStore.get(entry.key)?.location?.turn?.status === "open") ? [(0, react_jsx_runtime.jsx)(RunningStatus, {
+				...running ? [(0, react_jsx_runtime.jsx)(RunningStatus, {
 					startTime: runningStartTime,
 					t
 				}, "running")] : []
@@ -7158,7 +7158,7 @@ const previousStatus = (0, react.useRef)(turn?.status);
   }
   previousStatus.current = turn?.status;
 }, [turn?.status, node.data.turn, turnProcess.setOpen]);
-if (turn?.status === "open") return (0, react_jsx_runtime.jsx)(RunningStatus, { startTime: turn.start?.time, t }); if (turn?.status !== "closed") return null;
+if (turn?.status !== "closed") return null;
 			const canCollapse = turnProcess.foldable && turnProcess.hasContent && !turnProcessAlwaysOpen(node);
 			const reason = turn.end?.data.reason.kind;
 			const stopped = reason === "aborted" || reason === "interrupted";
@@ -8256,7 +8256,9 @@ const icon = (0, react_jsx_runtime.jsxs)("svg", { width: 18, height: 18, viewBox
 				anchorSeq,
 				location: options.location ?? contextLocation(context),
 				visibility: options.visibility ?? "visible",
-				groupTree: options.groupTree,
+				groupTree: (kind === "context" || kind === "turn-trigger") && data.source?.kind === "agent-message" && data.source?.senderSessionId?.startsWith("kode:") && data.source?.form === "relay"
+                    ? "input" : kind === "tool-call" && ["kode_sessions_send", "ask_user_question"].includes((data.root?.call ?? data.root)?.name)
+                    ? "turn" : options.groupTree,
 				data
 			};
 		}

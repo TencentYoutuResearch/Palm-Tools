@@ -178,7 +178,7 @@ export class ProjectHosts {
         if (this.recovering) throw new Error('服务正在准备重启，请稍候。')
         this.recovering = true
         try {
-          const recovery = await prepareLocalRecovery(this.ctx, this.config)
+          const recovery = await prepareLocalRecovery(this.ctx, this.config, { confirmedSessions: Array.isArray(input.confirmedSessions) ? input.confirmedSessions : [] })
           const job = recovery.backendOnly ? { id: randomUUID(), status: 'running' } : undefined
           if (job) this.localRecoveryJob = job
           res.once('finish', () => {
@@ -193,7 +193,11 @@ export class ProjectHosts {
             }
           })
           return json(res, 202, job ?? { status: 'restarting' })
-        } catch (error) { this.recovering = false; throw error }
+        } catch (error) {
+          this.recovering = false
+          if (error.affectedSessions) return json(res, 200, { status: 'confirmation-required', sessions: error.affectedSessions })
+          throw error
+        }
       }
       if (input.action === 'deploy') {
         if (current !== 'local') throw new Error('请返回此计算机后添加或部署 SSH 主机。')

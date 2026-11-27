@@ -34,17 +34,20 @@
   function ServiceRecovery({ host, settings, status, onBusyChange }) {
     const { data: hosts } = useProjectHosts()
     const [busy, setBusy] = useState(false), [job, setJob] = useState(null), [error, setError] = useState(''), [success, setSuccess] = useState(false)
+    const [warning, setWarning] = useState(null)
     const task = React.useRef(null)
     useEffect(() => () => task.current?.abort(), [])
     useEffect(() => { onBusyChange?.(busy); return () => onBusyChange?.(false) }, [busy, onBusyChange])
     const supported = host === 'local' ? hosts.localRecoverySupported === true : hosts.deploymentSupported !== false
     const hintId = React.useId()
-    const recover = async () => {
+    const recover = async confirmedSessions => {
       if (task.current) return
       const controller = new AbortController(); task.current = controller
       setBusy(true); setError(''); setSuccess(false)
       try {
-        await recoverHostService(host, {
+        setWarning(null)
+        const result = await recoverHostService(host, {
+          confirmedSessions,
           signal: controller.signal, progress: setJob, readSettings: () => settings.request(undefined, controller.signal),
           request: async (body, id) => {
             const response = await fetch(`/api/kode/project-hosts?current=local${id ? `&${host === 'local' ? 'recovery' : 'deployment'}=${encodeURIComponent(id)}` : ''}`, { credentials: 'same-origin', cache: 'no-store', signal: controller.signal, ...(body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}) })
@@ -60,12 +63,13 @@
             signal.addEventListener('abort', abort, { once: true })
           }),
         })
+        if (result?.status === 'confirmation-required') { if (!controller.signal.aborted) setWarning(result.sessions); return }
         if (!controller.signal.aborted) { setSuccess(true); settings.retry() }
       } catch (error) { if (!controller.signal.aborted) setError(error.message) }
       finally { if (!controller.signal.aborted) setBusy(false); task.current = null }
     }
     const hint = host !== 'local' ? '通过 SSH 更新并重启所选主机的服务。'
-      : supported ? '使用已安装的版本重启 Kode 后端。有运行中或排队的会话时不会重启。'
+      : supported ? '重启期间会话通信会短暂断开，服务就绪后会自动重连。'
         : hosts.localRecoverySupported === false ? '此启动方式不支持在这里重启本机服务，请在服务部署处重启后重新连接。' : ''
     // One service row: state and what the buttons do on the left, the buttons themselves aligned on the right.
     return h('div', { className: 'kode-service-recovery', 'aria-busy': busy },
@@ -78,6 +82,12 @@
       (busy || success) && h('p', { className: 'kode-config-note kode-service-progress', role: 'status', 'aria-live': 'polite' },
         success ? (host === 'local' ? '服务已重启' : '服务已更新并连接')
           : job?.steps?.find(step => step.status === 'running')?.message || (host === 'local' ? '正在等待服务重新启动…' : job?.status === 'done' ? '部署完成，正在检查接口…' : '正在准备部署…')),
+      warning && h(Modal, { open: true, title: '中断会话并重启？', closeLabel: '关闭', className: 'kode-confirm-dialog',
+        onClose: () => setWarning(null), description: '此启动方式还需要重启 Web Host。当前执行会中断，已保存的对话和排队消息会保留。',
+        footer: h(React.Fragment, null,
+          h(Button, { variant: 'outline', onClick: () => setWarning(null) }, '取消'),
+          h(Button, { className: 'kode-delete', onClick: () => void recover(warning.map(row => row.id)) }, '中断并重启')) },
+        h('ul', null, ...warning.map(row => h('li', { key: row.id }, row.title)))),
       h(Failure, { text: error }))
   }
   function ServiceRecoveryLink({ host, slots }) {

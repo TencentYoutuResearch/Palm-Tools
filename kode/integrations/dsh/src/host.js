@@ -205,6 +205,7 @@ export async function apply(ctx, config = {}) {
     const params = {
       node_id: { type: 'string', required: true }, session_id: { type: 'string', required: true },
       content: { type: 'string', required: true }, idempotency_key: { type: 'string', required: true, description: 'Stable key for one logical send; reuse only when retrying the same content.' },
+      ...(node.queued_messages === true ? { interrupt: { type: 'boolean', description: 'Set false to queue until the recipient finishes its current turn. Defaults to true.' } } : {}),
       in_reply_to: { type: 'string' },
       ...(node.message_titles === true ? { title: messageTitleParameter } : {}),
     }
@@ -217,6 +218,7 @@ export async function apply(ctx, config = {}) {
         : (inReplyTo ? replyMessageTitle(inbound?.title || sessionTitle(agent)) : undefined)
       const message = await client.call(`${PREFIX}messages`, {
         target: { node_id: args.node_id, session_id: args.session_id }, content: args.content,
+        ...(args.interrupt !== undefined ? { interrupt: args.interrupt } : {}),
         idempotency_key: args.idempotency_key, in_reply_to: inReplyTo,
         ...(node.message_titles === true && resolvedTitle !== undefined ? { title: resolvedTitle } : {}),
       }, signal)
@@ -309,7 +311,7 @@ export async function apply(ctx, config = {}) {
           await client.call(`${PREFIX}messages/${receipt.id}`, receipt.body, signal)
           entry.receipts.shift()
         }
-        const pending = await client.call(`${PREFIX}sessions/${encodeURIComponent(agent.id)}/claim`, {}, signal)
+        const pending = await client.call(`${PREFIX}sessions/${encodeURIComponent(agent.id)}/claim${node.queued_messages === true ? "?queued_messages=true" : ""}`, {}, signal)
         for (const message of pending.messages) {
           let status = 'accepted', detail
           try {
@@ -342,7 +344,7 @@ export async function apply(ctx, config = {}) {
             const input = relayInput(effectiveMessage, inputId)
             // An active wait can return the reply itself. Leave its inbox copy
             // removable so an ACP restart cannot interrupt that same wait.
-            if (!(message.in_reply_to && entry.activeWaits) && agent.canSteerRelay?.()) agent.steer(input)
+            if (message.interrupt !== false && !(message.in_reply_to && entry.activeWaits) && agent.canSteerRelay?.()) agent.steer(input)
             else agent.followup(input)
             // Acceptance is reported only after the inbox has reached persistence listeners.
             if (!entry.delivery) await agent.ctx.parallel('session/flush', agent.session)

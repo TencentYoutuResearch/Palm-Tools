@@ -5,6 +5,7 @@ import { agentEvents } from '@deepseek-ai/dsh-agent'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import { ToolCallRecovery, appendPluginRecord } from '@deepseek-ai/dsh-session'
 import { AssistantStreamAccumulator, BlockAssembler } from '@deepseek-ai/dsh-llm'
+import { questionHeaderTools } from './codex-async-question.js'
 import { humanInput } from './native-commands.js'
 import { runHumanShell } from './native-shell.js'
 import { fastPreference, fastServiceTier } from './model-fast.js'
@@ -236,8 +237,9 @@ export class NativeAgentDriver {
           continue
         }
         const tools = this.ctx.tools.schemas(this)
+        const headerTools = questionHeaderTools(tools,binding?.profile)
         const previous = this.session.requestHeader()
-        this.session.append('request/header', { header: { config: selection, ...(tools.length ? { tools } : {}) }, reason: previous ? 'resume' : 'initial' })
+        this.session.append('request/header', { header: { config: selection, ...(headerTools.length ? { tools: headerTools } : {}) }, reason: previous ? 'resume' : 'initial' })
         this.session.append('step/start', { turn, step }); opened = true
         for (const message of messages) this.session.append('user/message', message, historyEditSurface(this.session, message))
         let stream = new AssistantStreamAccumulator(), assembler = new BlockAssembler(), chunkCount = 0, started = false

@@ -96,7 +96,7 @@ export class RuntimeBridge {
       if (stamp && this.coldStamps.get(row.sessionId) === stamp && this.known.get(row.sessionId)?.status !== 'exited' && this.known.has(row.sessionId)
         && !this.extra.get(row.sessionId)?.length && !this.continued.get(row.sessionId)?.size
         && ![...this.pending.values()].some(request => request.sessionId === row.sessionId)) continue
-      if (stamp) this.coldStamps.set(row.sessionId, stamp); else this.coldStamps.delete(row.sessionId)
+      this.coldStamps.delete(row.sessionId)
       const observed = agent ? { events: agent.session.snapshotEvents() } : await sessionInspector(controller, this.service('sessionQuery'))(row.sessionId, this.stop.signal)
       if (!agent && needsEmptySessionCheck(row) && setupOnlySession(observed)) {
         const previous = this.known.get(row.sessionId)
@@ -153,11 +153,12 @@ export class RuntimeBridge {
       const committed = new Set(projected.filter(event => event.kind === 'message' && event.payload.streaming === false).map(event => event.payload.id))
       const publication = [...projected, ...extra.filter(event => !committed.has(event.payload.id))]
       const dto = this.projection(row, agent)
-      this.known.set(row.sessionId, dto)
       for (let offset = 0; offset < Math.max(1, publication.length); offset += 128) {
         const response = await this.call('publish', { runtime: this.runtime, boot_id: this.bootId, sessions: [{ session_id: row.sessionId, dto, events: publication.slice(offset, offset + 128) }] })
         this.ids.set(row.sessionId, response.sessions[0].id)
       }
+      this.known.set(row.sessionId, dto)
+      if (stamp) this.coldStamps.set(row.sessionId, stamp)
       if (events.length) this.cursors.set(row.sessionId, events.at(-1).seq)
       this.extra.set(row.sessionId, (this.extra.get(row.sessionId) ?? []).filter(event => !extra.includes(event)))
     }

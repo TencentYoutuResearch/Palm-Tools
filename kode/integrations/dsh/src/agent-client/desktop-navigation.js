@@ -14,9 +14,11 @@
     h('span', { className: 'kode-brand-ink' }),
     h('img', { src: BRAND_LAYER('red'), alt: '', draggable: false }))
   }
-  // The sidebar slot offers a 24px seat sized for dsh's own wordmark; Kode's mark and name
-  // scale up to fill the row up to the collapse toggle (see .kode-brand-name).
-  function SidebarBrandMark() { return h(KodeBrandMark, { height: 26, className: 'kode-sidebar-brand-mark' }) }
+  function SidebarBrandMark() {
+    return h('span', { className: 'kode-sidebar-brand-mark' },
+      h('img', { src: '/api/kode/avatars/media?type=kode&state=idle', width: 24, height: 24, className: 'kode-sidebar-app-icon', alt: '', draggable: false }),
+      h(KodeBrandMark, { height: 24 }))
+  }
   // dsh draws its inverted Harness badge only inside BrandWordmark. Keep exactly that plate and
   // its glyphs (with their theme fills), drop the deepseek letters and whale outright, and frame
   // the viewBox on the plate; the text fallback covers primitives without the badge.

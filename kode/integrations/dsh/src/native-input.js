@@ -1,11 +1,13 @@
 /** Translate official dsh attachment references without replacing upload or storage. */
 import { fileHandleText, offloadedImageText } from '@deepseek-ai/dsh-llm'
 
+import { codexQuestionReply } from './codex-async-question.js'
+
 export async function nativeInput(messages, { attachments, codex, signal }) {
   const input = []
   for (const message of messages) for (const part of message.content) {
     signal?.throwIfAborted()
-    if (part.type === 'text') { input.push({ type: 'text', text: part.text }); continue }
+    if (part.type === 'text') { input.push({ type: 'text', text: codex ? codexQuestionReply(message.source,part.text) : part.text }); continue }
     if (part.type === 'file') {
       input.push({ type: 'text', text: fileHandleText(part.attachment, attachments?.fileHostPath(part.attachment)) })
       continue

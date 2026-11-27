@@ -116,3 +116,31 @@ test('historical relay contexts remain visible while internal contexts keep thei
   assert.equal(visible({ ...node, visibility: 'hidden' }), false)
   assert.equal(visible({ ...node, data: { ...node.data, source: { kind: 'agent-message', form: 'notice' } } }), false)
 })
+
+test('the running indicator follows acknowledged and pending steering in an open turn', () => {
+  const flow = region('chat/ChatFlow')
+  const tail = flow.slice(flow.lastIndexOf('return ['), flow.lastIndexOf('];') + 2)
+  const render = vm.compileFunction(tail, ['rows', 'pendingRows', 'running', 'react_jsx_runtime', 'RunningStatus', 'runningStartTime', 't'])
+  const history = ['original input', 'previous AI output', 'accepted steering', 'subsequent AI output']
+  const pending = ['pending steering']
+  const jsx = { jsx: component => component }
+  for (const running of [true, false]) {
+    assert.deepEqual(Array.from(render(history, pending, running, jsx, 'running', 0, null)),
+      [...history, ...pending, ...(running ? ['running'] : [])])
+  }
+  assert.doesNotMatch(source, /turn\?\.status === "open"\) return .*?\(RunningStatus,/)
+})
+
+test('communication stays outside the completed process fold, in both directions', () => {
+  const factory = source.slice(source.indexOf('function chatNode(context,'), source.indexOf('//#endregion', source.indexOf('function chatNode(context,')))
+  const scope = vm.createContext({})
+  vm.runInContext(factory, scope)
+  const node = (kind, data) => scope.chatNode({}, kind, 5, data, { location: {} })
+  for (const kind of ['context', 'turn-trigger']) {
+    assert.equal(node(kind, { source: { kind: 'agent-message', form: 'relay', senderSessionId: 'kode:n:s' } }).groupTree, 'input')
+  }
+  const call = { name: 'kode_sessions_send' }
+  for (const root of [call, { call }]) assert.equal(node('tool-call', { root }).groupTree, 'turn')
+  assert.equal(node('tool-call', { root: { call: { name: 'ask_user_question' } } }).groupTree, 'turn')
+  assert.equal(node('tool-call', { root: { name: 'exec_command' } }).groupTree, undefined)
+})

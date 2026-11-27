@@ -1,3 +1,4 @@
+import { relayPattern } from '../src/relay-pattern.js'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -14,7 +15,7 @@ export async function readAgentClientSource() {
   const sections = [...source.matchAll(includes)]
   const bodies = await Promise.all(sections.map(([, file]) => readFile(new URL(file, parts), 'utf8')))
   let index = 0
-  return source.replace(includes, () => bodies[index++])
+  return source.replace(includes, () => bodies[index++]).replace('/* @relayPattern */ null', () => relayPattern.toString())
 }
 
 export async function buildAgentClient(outputDir = defaultOutputDir) {
