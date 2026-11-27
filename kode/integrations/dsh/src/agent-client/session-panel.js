@@ -84,9 +84,9 @@
       git && h(SessionGitLocation, { git }),
       h(native, props))
   }
-  function PanelList({ rows, renderFactorySlot, renderRow }) {
+  function PanelList({ rows, renderFactorySlot, renderRow, visibleLimit = 3 }) {
     const [expanded, setExpanded] = useState(false)
-    const limit = 3, foldable = rows.length > limit
+    const limit = visibleLimit, foldable = rows.length > limit
     const label = expanded ? '收起' : `显示另外 ${rows.length - limit} 项`
     return h(React.Fragment, null,
       (expanded ? rows : rows.slice(0, limit)).map(renderRow),
@@ -157,14 +157,55 @@
     const messages = props.useProjection('kodeSessionPanel', state => state?.relays)
     return messages?.length ? h(CommunicationRows, { ...props, messages }) : null
   }
+  // Public GitHub links may be pasted without any provider tool result. Read
+  // only github.com PRs from its fixed API origin, without user credentials.
+  const publicReviewCache = new Map()
+  function publicReviewStatus(url) {
+    const match = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)$/.exec(url)
+    if (!match) return
+    const cached = publicReviewCache.get(url)
+    if (cached && cached.until > Date.now()) return cached.promise
+    const [,owner,repo,number] = match
+    const promise = fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${number}`, {
+      credentials:'omit',referrerPolicy:'no-referrer',signal:AbortSignal.timeout(8000),
+    }).then(response => response.ok ? response.json() : null).then(row => {
+      if (row?.merged_at) return 'merged'
+      if (row?.state === 'closed') return 'closed'
+      if (row?.state === 'open') return row.draft ? 'draft' : 'open'
+    }).catch(() => undefined)
+    publicReviewCache.delete(url)
+    publicReviewCache.set(url,{until:Date.now()+300000,promise})
+    if (publicReviewCache.size > 128) publicReviewCache.delete(publicReviewCache.keys().next().value)
+    return promise
+  }
   function SessionReviewLinks({ sessionId, useProjection, renderFactorySlot, nativeChanges }) {
     const reviews = useProjection('kodeSessionPanel', state => state?.reviews)
     const tracked = new Set((nativeChanges ?? []).map(entry => entry.url?.split(/[?#]/)[0].replace(/\/$/, '')))
     const rows = reviews?.filter(row => /^https?:\/\//i.test(row.url) && !tracked.has(row.url)).toReversed()
-    return rows?.length ? h(PanelList, { key: cardKey(sessionId), rows, renderFactorySlot,
-      renderRow: row => h(SessionPanelRow, { key: row.url, href: row.url, compact: true, icon: h(IconBranchOutlineRegular, { size: 16 }),
-        preview: [`${row.repo} · ${row.kind} #${row.number}`, row.url],
-        label: `${row.kind} #${row.number}`, detail: row.repo, actionLabel: `打开 ${row.repo} 的 ${row.kind} #${row.number}`,
+    const [githubStates,setGithubStates] = useState({})
+    const githubUrls = (rows ?? []).map(row => row.url).filter(url => url.startsWith('https://github.com/')).join('\n')
+    useEffect(() => {
+      if (!githubUrls) return
+      let active = true
+      async function refresh() {
+        if (document.visibilityState === 'hidden') return
+        const entries = await Promise.all(githubUrls.split('\n').map(async url => [url, await publicReviewStatus(url)]))
+        if (active) setGithubStates(Object.fromEntries(entries))
+      }
+      refresh()
+      const timer = setInterval(refresh,300000)
+      document.addEventListener('visibilitychange',refresh)
+      return () => {active=false;clearInterval(timer);document.removeEventListener('visibilitychange',refresh)}
+    },[githubUrls])
+    const resolved = rows?.map(row => githubStates[row.url] ? {...row,status:githubStates[row.url]} : row)
+    const finished = row => row.status === 'merged' || row.status === 'closed'
+    const labels = {open:'打开',closed:'已关闭',merged:'已合入',draft:'草稿'}
+    const ordered = resolved && [...resolved.filter(row => !finished(row)), ...resolved.filter(finished)]
+    return rows?.length ? h(PanelList, { key: cardKey(sessionId), rows:ordered, visibleLimit:Math.min(3,resolved.filter(row => !finished(row)).length), renderFactorySlot,
+      renderRow: row => h(SessionPanelRow, { key: row.url, href: row.url, compact: true, icon: h('span',{className:'kode-review-symbol'},h(IconBranchOutlineRegular, { size: 16 }),
+          row.status && h('i',{'data-review-status':row.status},row.status === 'merged' ? h('svg',{viewBox:'0 0 12 12',width:9,height:9,fill:'none',stroke:'currentColor',strokeWidth:1.5},h('path',{d:'M3 2v8M9 2c0 4-6 3-6 6'}),h('circle',{cx:9,cy:2,r:1})) : ({open:'✓',closed:'×',draft:'·'})[row.status])),
+        preview: [`${row.repo} · ${row.kind} #${row.number}`, labels[row.status] ?? '状态未知', row.url],
+        label: `${row.kind} #${row.number}`, detail: row.repo, actionLabel: `打开 ${row.repo} 的 ${row.kind} #${row.number}，${labels[row.status] ?? '状态未知'}`,
         trailing: h(IconChevronRightOutlineRegular, { size: 14, 'aria-hidden': true }) }),
     }) : null
   }

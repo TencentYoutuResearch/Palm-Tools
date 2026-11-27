@@ -7,6 +7,9 @@
 .kode-conversation-loading>svg{animation:kode-loading-spin 850ms linear infinite}
 @keyframes kode-loading-spin{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){.kode-conversation-loading>svg{animation:none}.kode-relay-toggle>svg,.kode-tool-heading>svg{transition:none}}
+.kode-review-symbol{position:relative;display:inline-flex}
+[data-review-status]{position:absolute;right:-4px;bottom:-2px;display:grid;place-items:center;width:11px;height:11px;border-radius:50%;background:#59636e;color:white;font:700 10px/1 system-ui;box-shadow:0 0 0 1px var(--dsw-alias-bg-layer-1)}
+[data-review-status=open]{background:#19753a}[data-review-status=closed]{background:#b42834}[data-review-status=merged]{background:#8250af}
 .kode-panel-link{color:inherit;text-decoration:none}
 @media(hover:hover){[data-session-panel-row]:has(>.kode-panel-link):hover{background:var(--dsw-alias-interactive-bg-hover)}}
 .kode-panel-link:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px;border-radius:var(--dsw-radius-sm)}

@@ -2410,3 +2410,14 @@ test('current host requests and replies render as communication cards when they 
     assert.equal(result.props.relay.replyTo, replyTo)
   }
 })
+
+test('completed review links start folded even when there are no open reviews', () => {
+  const c=client()
+  const render=(statuses)=>{
+    const reviews=statuses.map((status,i)=>({url:'https://forge.example/team/repo/-/merge_requests/'+(i+1),number:String(i+1),repo:'team/repo',kind:'MR',status}))
+    return visibleText(c.entryById('kode-review-links')({sessionId:'review',slots:c.ctx.slots,useProjection:(_,select)=>select({reviews}),renderFactorySlot:(_,props)=>props.label}))
+  }
+  assert.match(render(['merged']),/显示另外 1 项/)
+  assert.doesNotMatch(render(['closed','merged']),/MR #/)
+  assert.match(render(['open','closed','merged']),/MR #1.*显示另外 2 项/)
+})

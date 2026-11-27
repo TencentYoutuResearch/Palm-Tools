@@ -91,3 +91,11 @@ test('a confirmed reply survives an idempotent send retry after the reply leaves
   assert.equal(view.relays.some(row => row.id === 'reply'), false)
   assert.equal(view.relays.find(row => row.id === 'request').answered, true)
 })
+
+test('review status is keyed by provider URL and survives later mentions', () => {
+  const url='https://git.example/org/repo/-/merge_requests/118'
+  const event={type:'tool/result',data:{message:{content:text(JSON.stringify({server:'gongfeng',status:'completed',result:{structuredContent:{web_url:url,iid:118,state:'merged'}}}))}}}
+  assert.deepEqual(project(event).reviews,[])
+  assert.equal(project(event,assistant(url)).reviews[0].status,'merged')
+  assert.equal(project(event,assistant(url.replace('/org/','/other/'))).reviews[0].status,undefined)
+})
