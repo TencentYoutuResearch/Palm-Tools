@@ -10,6 +10,9 @@
 .kode-review-symbol{position:relative;display:inline-flex}
 [data-review-status]{position:absolute;right:-2px;bottom:-1px;display:grid;place-items:center;width:9px;height:9px;box-sizing:border-box;padding:0;border-radius:50%;corner-shape:round;background:#59636e;color:white;font:700 8px/1 system-ui;clip-path:circle(50%)}
 [data-review-status=open]{background:#19753a}[data-review-status=closed]{background:#b42834}[data-review-status=merged]{background:#8250af}
+/* The mark is badge artwork, independent of the host's panel SVG sizing. */
+[data-review-status=merged]::after{content:'';width:6px;height:6px;background:center / contain no-repeat url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'%3E%3Cpath d='M2 1v6m4-6v1c0 2-4 2-4 4' fill='none' stroke='white' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E")}
+[data-review-status=draft]::after{content:'';width:2px;height:2px;border-radius:50%;background:currentColor}
 .kode-panel-link{color:inherit;text-decoration:none}
 @media(hover:hover){[data-session-panel-row]:has(>.kode-panel-link):hover{background:var(--dsw-alias-interactive-bg-hover)}}
 .kode-panel-link:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px;border-radius:var(--dsw-radius-sm)}
