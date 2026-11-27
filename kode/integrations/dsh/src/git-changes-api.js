@@ -14,6 +14,15 @@ const execute = promisify(execFile)
 const GIT_OVERRIDE_VARS = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_CEILING_DIRECTORIES', 'GIT_DISCOVERY_ACROSS_FILESYSTEM']
 const MAX_DIFF_BYTES = 256 * 1024
 const MAX_BODY_BYTES = 32 * 1024
+const DEFAULT_COMMIT_LIMIT = 40
+const MAX_COMMIT_LIMIT = 2000
+
+export function normalizeCommitLimit(value) {
+  if (value === undefined || value === null || value === '') return DEFAULT_COMMIT_LIMIT
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return DEFAULT_COMMIT_LIMIT
+  return Math.min(MAX_COMMIT_LIMIT, Math.max(1, Math.trunc(parsed)))
+}
 
 function cleanGitEnv() {
   const env = { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C' }
@@ -219,22 +228,26 @@ async function resolveCheckout(cwd, signal, deps) {
   }
 }
 
-export async function readGitStatus(cwd, signal, deps = {}) {
+export async function readGitStatus(cwd, signal, deps = {}, { commitLimit } = {}) {
   const gitInfo = await resolveCheckout(cwd, signal, deps)
-  if (!gitInfo) return { cwd, git: null, staged: [], unstaged: [], untracked: [], commits: [] }
+  if (!gitInfo) return { cwd, git: null, staged: [], unstaged: [], untracked: [], commits: [], hasMoreCommits: false }
+  const safeLimit = normalizeCommitLimit(commitLimit)
   const git = makeGit(gitInfo.root, signal, deps)
   const [porcelain, stagedNumstat, unstagedNumstat, logText] = await Promise.all([
     git(['status', '--porcelain=v1', '-z', '-uall']),
     git(['diff', '--cached', '--numstat', '-z']).catch(() => ''),
     git(['diff', '--numstat', '-z']).catch(() => ''),
-    git(['log', '--all', '-n', '40', '--date=unix', '--decorate=full', '--format=%H%x1f%h%x1f%an%x1f%ct%x1f%ar%x1f%s%x1f%P%x1f%D']).catch(() => ''),
+    git(['log', '--all', '-n', String(safeLimit + 1), '--date=unix', '--decorate=full', '--format=%H%x1f%h%x1f%an%x1f%ct%x1f%ar%x1f%s%x1f%P%x1f%D']).catch(() => ''),
   ])
   const parsed = parsePorcelainZ(porcelain, parseNumstatZ(stagedNumstat), parseNumstatZ(unstagedNumstat))
+  const allCommits = parseCommits(logText)
+  const hasMoreCommits = allCommits.length > safeLimit && safeLimit < MAX_COMMIT_LIMIT
   return {
     cwd,
     git: gitInfo,
     ...parsed,
-    commits: parseCommits(logText),
+    commits: allCommits.slice(0, safeLimit),
+    hasMoreCommits,
   }
 }
 
@@ -307,7 +320,7 @@ export async function readGitDiff(cwd, { path, scope = 'unstaged', commit }, sig
   return { path: relPath, scope, diff, binary, truncated }
 }
 
-export async function applyGitAction(cwd, { action, path, all = false, scope = 'unstaged' }, signal, deps = {}) {
+export async function applyGitAction(cwd, { action, path, all = false, scope = 'unstaged', commitLimit }, signal, deps = {}) {
   const gitInfo = await resolveCheckout(cwd, signal, deps)
   if (!gitInfo) throw new Error('当前工作区不是 Git 仓库')
   const git = makeGit(gitInfo.root, signal, deps)
@@ -319,7 +332,7 @@ export async function applyGitAction(cwd, { action, path, all = false, scope = '
       if (!relPath) throw new Error('无效的文件路径')
       await git(['add', '--', relPath])
     }
-    return readGitStatus(cwd, signal, deps)
+    return readGitStatus(cwd, signal, deps, { commitLimit })
   }
   if (action === 'unstage') {
     if (all) {
@@ -329,7 +342,7 @@ export async function applyGitAction(cwd, { action, path, all = false, scope = '
       if (!relPath) throw new Error('无效的文件路径')
       try { await git(['reset', 'HEAD', '--', relPath]) } catch { await git(['rm', '--cached', '--', relPath]) }
     }
-    return readGitStatus(cwd, signal, deps)
+    return readGitStatus(cwd, signal, deps, { commitLimit })
   }
   if (action === 'discard') {
     const relPath = validateRepoRelativePath(path)
@@ -346,7 +359,7 @@ export async function applyGitAction(cwd, { action, path, all = false, scope = '
     } else {
       await git(['checkout', '--', relPath])
     }
-    return readGitStatus(cwd, signal, deps)
+    return readGitStatus(cwd, signal, deps, { commitLimit })
   }
   throw new Error('未知的 Git 操作')
 }
@@ -374,7 +387,7 @@ export function registerGitChangesApi(ctx, deps = {}) {
           if (cwd === undefined) return send(404, { error: 'Session not found on this Host' })
           const path = cwd ? await realpath(cwd).catch(() => null) : null
           signal.throwIfAborted()
-          if (!path) return send(200, { cwd, git: null, staged: [], unstaged: [], untracked: [], commits: [] })
+          if (!path) return send(200, { cwd, git: null, staged: [], unstaged: [], untracked: [], commits: [], hasMoreCommits: false })
           if (params.get('commitDetail')) {
             return send(200, await readCommitDetail(path, params.get('commitDetail'), signal, deps))
           }
@@ -386,7 +399,7 @@ export function registerGitChangesApi(ctx, deps = {}) {
             }, signal, deps)
             return send(200, result)
           }
-          return send(200, await readGitStatus(path, signal, deps))
+          return send(200, await readGitStatus(path, signal, deps, { commitLimit: params.get('commitLimit') ?? undefined }))
         }
         if (req.method === 'POST') {
           let body = ''

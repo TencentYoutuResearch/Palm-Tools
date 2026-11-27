@@ -289,28 +289,28 @@
           h('button', { key: preset.id, type: 'button', className: 'kode-banner-chip', 'aria-pressed': banner === preset.id, disabled: busy, onClick: () => setBanner(preset.id) }, preset.label)))),
       h('div', { className: 'kode-field' },
         h('span', null, '预接渠道连接器（可选，创建后可在「连接器」里添加 19+ MCP 应用与细调）'),
-        h('div', { className: 'kode-bot-banner-picker' }, ...CONNECTOR_TYPES.filter(item => item.type !== 'mcp').map(item =>
+        h('div', { className: 'kode-connector-quick-picks' }, ...CONNECTOR_TYPES.filter(item => item.type !== 'mcp').map(item =>
           h('button', {
             key: item.type,
             type: 'button',
-            className: 'kode-banner-chip',
+            className: 'kode-banner-chip kode-connector-pick-chip',
             'aria-pressed': selectedConnectors.includes(item.type),
             disabled: busy,
             title: item.summary,
             onClick: () => toggleItem(selectedConnectors, setSelectedConnectors, item.type),
-          }, `${item.badge} · ${item.name}`)))),
+          }, h(ConnectorIcon, { type: item.type, size: 17, compact: true }), item.name)))),
       popularApps.length > 0 && h('div', { className: 'kode-field' },
         h('span', null, '常用官方 MCP 应用（可选）'),
-        h('div', { className: 'kode-bot-banner-picker' }, ...popularApps.map(app =>
+        h('div', { className: 'kode-connector-quick-picks' }, ...popularApps.map(app =>
           h('button', {
             key: app.id,
             type: 'button',
-            className: 'kode-banner-chip',
+            className: 'kode-banner-chip kode-connector-pick-chip',
             'aria-pressed': selectedApps.includes(app.id),
             disabled: busy,
             title: app.summary,
             onClick: () => toggleItem(selectedApps, setSelectedApps, app.id),
-          }, `${app.badge} · ${app.name}`)))),
+          }, h(ConnectorIcon, { type: 'mcp', appId: app.id, size: 17, compact: true }), app.name)))),
       data.routines?.length > 0 && h('div', { className: 'kode-field' },
         h('span', null, '日常节奏（可选）'),
         h('div', { className: 'kode-bot-banner-picker' }, ...data.routines.map(routine =>

@@ -153,6 +153,34 @@ test('git-changes API inspects real repo status, diffs, commits, and performs st
     const discardedUntracked = await request('POST', '/api/kode/git-changes', { sessionId: 's1', action: 'discard', path: 'src/new.js', scope: 'untracked' })
     assert.equal(discardedUntracked.statusCode, 200)
     assert.equal(discardedUntracked.body.untracked.length, 0)
+    assert.equal(discardedUntracked.body.hasMoreCommits, false)
+
+    // Add more commits to verify commitLimit + hasMoreCommits pagination
+    await writeFile(join(dir, 'src/index.js'), 'const a = 10\n')
+    await git('add', 'src/index.js')
+    await git('commit', '-m', 'second commit')
+    await writeFile(join(dir, 'src/index.js'), 'const a = 20\n')
+    await git('add', 'src/index.js')
+    await git('commit', '-m', 'third commit')
+
+    const page1 = await request('GET', '/api/kode/git-changes?sessionId=s1&commitLimit=2')
+    assert.equal(page1.statusCode, 200)
+    assert.equal(page1.body.commits.length, 2)
+    assert.equal(page1.body.commits[0].subject, 'third commit')
+    assert.equal(page1.body.commits[1].subject, 'second commit')
+    assert.equal(page1.body.hasMoreCommits, true)
+
+    const page2 = await request('GET', '/api/kode/git-changes?sessionId=s1&commitLimit=4')
+    assert.equal(page2.statusCode, 200)
+    assert.equal(page2.body.commits.length, 3)
+    assert.equal(page2.body.hasMoreCommits, false)
+
+    // POST action preserves requested commitLimit
+    await writeFile(join(dir, 'src/index.js'), 'const a = 30\n')
+    const stagedWithLimit = await request('POST', '/api/kode/git-changes', { sessionId: 's1', action: 'stage', path: 'src/index.js', commitLimit: 1 })
+    assert.equal(stagedWithLimit.statusCode, 200)
+    assert.equal(stagedWithLimit.body.commits.length, 1)
+    assert.equal(stagedWithLimit.body.hasMoreCommits, true)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

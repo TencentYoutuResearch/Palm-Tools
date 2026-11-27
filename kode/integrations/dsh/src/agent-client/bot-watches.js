@@ -183,7 +183,10 @@
                 : act({ action: 'watch_toggle', id: watch.id, enabled })),
             }),
             h('div', { className: 'kode-watch-text' },
-              h('span', { className: 'kode-agent-name' }, watch.spec.name, fromConnector && h('span', { className: 'kode-agent-tag', style: { marginInlineStart: '6px' } }, '连接器自动绑定')),
+              h('span', { className: 'kode-agent-name kode-watch-name-row' },
+                fromConnector && typeof ConnectorIcon === 'function' && h(ConnectorIcon, { type: linkedConnector.type, appId: linkedConnector.config?.app_id, size: 18, compact: true }),
+                watch.spec.name,
+                fromConnector && h('span', { className: 'kode-agent-tag' }, '连接器自动绑定')),
               h('span', { className: 'kode-secondary' }, watchSummary(watch.spec))),
             h(Button, { disabled: busy, onClick: () => void act({ action: 'watch_run', id: watch.id }) }, '运行一次'),
             fromConnector && onOpenConnectors

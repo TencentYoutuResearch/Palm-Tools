@@ -5,6 +5,7 @@
   const GRAPH_LANE_STEP = 16
   const GRAPH_LANE_INSET = 11
   const GRAPH_ROW_HEIGHT = 52
+  const COMMIT_PAGE_SIZE = 40
 
   function GuideArtworkGit({ size = 20 }) {
     return h('svg', { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', 'aria-hidden': true },
@@ -297,6 +298,8 @@
       useCallback(() => transport?.current ?? 'local', []))
     const [status, setStatus] = useState(null)
     const [loading, setLoading] = useState(false)
+    const [loadingMore, setLoadingMore] = useState(false)
+    const [moreError, setMoreError] = useState('')
     const [busy, setBusy] = useState(false)
     const [error, setError] = useState('')
     const [query, setQuery] = useState('')
@@ -308,30 +311,61 @@
     const [loadingDetail, setLoadingDetail] = useState(null)
     const [selection, setSelection] = useState(null)
     const [diffState, setDiffState] = useState(null)
+    const commitLimitRef = useRef(COMMIT_PAGE_SIZE)
+    const requestSeqRef = useRef(0)
     const alive = useRef(true)
 
-    const refresh = useCallback(async ({ silent = false } = {}) => {
+    const refresh = useCallback(async ({ silent = false, limit } = {}) => {
       if (!sessionId) return
+      const seq = ++requestSeqRef.current
+      const requestedLimit = limit ?? commitLimitRef.current
       if (!silent) setLoading(true)
       setError('')
       try {
-        const res = await fetchHost(`/api/kode/git-changes?sessionId=${encodeURIComponent(sessionId)}`, {
+        const params = new URLSearchParams({ sessionId, commitLimit: String(requestedLimit) })
+        const res = await fetchHost(`/api/kode/git-changes?${params}`, {
           credentials: 'same-origin', cache: 'no-store',
         }, host)
         const value = await parseHostJson(res)
         if (!res.ok) throw new Error(value.error ?? '读取 Git 状态失败')
-        if (alive.current) setStatus(value)
+        if (alive.current && seq === requestSeqRef.current) setStatus(value)
       } catch (failure) {
-        if (alive.current) setError(failure.message)
+        if (alive.current && seq === requestSeqRef.current) setError(failure.message)
       } finally {
-        if (alive.current) setLoading(false)
+        if (alive.current && seq === requestSeqRef.current) setLoading(false)
       }
     }, [sessionId, host])
 
+    const loadMoreCommits = useCallback(async () => {
+      if (!sessionId || loadingMore || loading) return
+      const seq = ++requestSeqRef.current
+      const nextLimit = commitLimitRef.current + COMMIT_PAGE_SIZE
+      setLoadingMore(true)
+      setMoreError('')
+      try {
+        const params = new URLSearchParams({ sessionId, commitLimit: String(nextLimit) })
+        const res = await fetchHost(`/api/kode/git-changes?${params}`, {
+          credentials: 'same-origin', cache: 'no-store',
+        }, host)
+        const value = await parseHostJson(res)
+        if (!res.ok) throw new Error(value.error ?? '加载更多提交失败')
+        if (alive.current && seq === requestSeqRef.current) {
+          commitLimitRef.current = nextLimit
+          setStatus(value)
+        }
+      } catch (failure) {
+        if (alive.current && seq === requestSeqRef.current) setMoreError(failure.message)
+      } finally {
+        if (alive.current && seq === requestSeqRef.current) setLoadingMore(false)
+      }
+    }, [sessionId, host, loadingMore, loading])
+
     useEffect(() => {
       alive.current = true
+      commitLimitRef.current = COMMIT_PAGE_SIZE
+      setLoadingMore(false); setMoreError('')
       setSelection(null); setDiffState(null); setCommitDetails({}); setExpandedKey('working')
-      void refresh()
+      void refresh({ limit: COMMIT_PAGE_SIZE })
       const onFocus = () => { if (document.visibilityState !== 'hidden') void refresh({ silent: true }) }
       window.addEventListener('focus', onFocus)
       document.addEventListener('visibilitychange', onFocus)
@@ -399,7 +433,7 @@
           method: 'POST',
           credentials: 'same-origin',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ sessionId, ...body }),
+          body: JSON.stringify({ sessionId, commitLimit: commitLimitRef.current, ...body }),
         }, host)
         const value = await parseHostJson(res)
         if (!res.ok) throw new Error(value.error ?? 'Git 操作失败')
@@ -611,7 +645,15 @@
                                       file.added > 0 && h('span', { className: 'is-add' }, `+${file.added}`),
                                       file.removed > 0 && h('span', { className: 'is-del' }, `-${file.removed}`)))
                                 }))))))
-                    }))),
+                    }),
+                status?.hasMoreCommits && h('button', {
+                  type: 'button',
+                  className: 'kode-git-more-btn',
+                  disabled: loadingMore || loading || busy,
+                  'aria-busy': loadingMore,
+                  onClick: () => void loadMoreCommits(),
+                }, loadingMore ? '正在加载更多提交…' : 'More · 查看更多历史提交'),
+                moreError && h('p', { className: 'kode-git-more-error', role: 'alert' }, moreError))),
         h(GitDiffView, { selection, diffState, busy, onAction: act, onClose: () => setSelection(null) })))
   }
 

@@ -2440,6 +2440,26 @@ test('bot session sidebar registers kanban board and connectors and proposal par
   assert.match(source, /VALID_TONES = new Set\(\['colleague', 'direct', 'warm', 'humorous', 'butler', 'custom'\]\)/)
   assert.match(source, /function BotTonePicker\(/)
   assert.match(source, /action: 'greet', id: bot\.id, force: true/)
+
+  const scope = { h: (type, props, ...children) => ({ type, props: props ?? {}, children }) }
+  vm.runInNewContext(
+    `${source.slice(source.indexOf('  const CONNECTOR_CATEGORIES = ['), source.indexOf('  function connectorWebhookUrl('))}\nObject.assign(globalThis, { CONNECTOR_TYPES, DEFAULT_MCP_APPS, CONNECTOR_ICON_SPECS })`,
+    scope,
+  )
+  for (const item of scope.CONNECTOR_TYPES) {
+    assert.ok(scope.CONNECTOR_ICON_SPECS[item.type], `has vector icon spec for connector ${item.type}`)
+    const icon = scope.ConnectorIcon({ type: item.type, size: 28 })
+    assert.equal(icon.children[0]?.type, 'svg')
+    assert.equal(icon.children[0]?.props?.viewBox, '0 0 24 24')
+  }
+  for (const app of scope.DEFAULT_MCP_APPS) {
+    assert.ok(scope.CONNECTOR_ICON_SPECS[`mcp:${app.id}`], `has vector icon spec for MCP app ${app.id}`)
+    const icon = scope.ConnectorIcon({ type: 'mcp', appId: app.id, size: 28 })
+    assert.equal(icon.children[0]?.type, 'svg')
+  }
+  const chips = scope.BotConnectorChips({ connectors: [{ id: 'c1', type: 'github', name: 'GitHub', enabled: true }, { id: 'c2', type: 'mcp', name: 'Notion', config: { app_id: 'notion' }, enabled: true }] })
+  assert.equal(chips.children.length, 2)
+  assert.equal(chips.children[0].children[0].type, scope.ConnectorIcon)
 })
 
 test('right sidebar registers VS Code-style Git Changes guide entry, tab and shortcut', () => {
@@ -2455,6 +2475,9 @@ test('right sidebar registers VS Code-style Git Changes guide entry, tab and sho
   assert.match(source, /function GraphRail\(/)
   assert.match(source, /function ExpandedRail\(/)
   assert.match(source, /installGitChangesSidebar\(ctx\)/)
+  assert.match(source, /function loadMoreCommits|loadMoreCommits = useCallback/)
+  assert.match(source, /status\?\.hasMoreCommits && h\('button'/)
+  assert.match(source, /More · 查看更多历史提交/)
 })
 
 test('current host requests and replies render as communication cards when they wake a turn', async () => {
