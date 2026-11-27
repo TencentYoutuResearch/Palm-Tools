@@ -192,7 +192,16 @@ async fn remove_peer(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Jso
     Ok(Json(json!({"removed":true})))
 }
 fn document_key(key: &str) -> Result<()> {
-    if !matches!(key, "agents" | "ssh-hosts" | "session-index" | "workspaces") {
+    if !matches!(
+        key,
+        "agents"
+            | "ssh-hosts"
+            | "session-index"
+            | "workspaces"
+            | "bot-connectors"
+            | "bot-voice"
+            | "wecom-bridge"
+    ) {
         return Err(Error(StatusCode::BAD_REQUEST, "unknown workbench document".into()));
     }
     Ok(())

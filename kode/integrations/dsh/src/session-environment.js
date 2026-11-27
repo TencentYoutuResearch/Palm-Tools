@@ -36,7 +36,7 @@ async function checkout(cwd, signal) {
 
 const directory = value => typeof value === 'string' && isAbsolute(value) && !value.includes('\0') ? value : null
 
-async function sessionDirectory(ctx, id, signal) {
+export async function sessionDirectory(ctx, id, signal) {
   const live = ctx.get('sessions')?.get(id) ?? ctx.get('agents')?.get(id)?.session
   if (live) {
     const projected = ctx.get('sessionProjections')?.snapshot?.(live, ['workingDirectory'])?.values?.workingDirectory

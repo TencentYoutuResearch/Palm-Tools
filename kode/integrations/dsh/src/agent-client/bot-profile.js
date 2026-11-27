@@ -272,10 +272,51 @@
       failure && h('div', null, h(Failure, { text: failure }), h(Button, { type: 'button', variant: 'outline', onClick: () => void store.load(true) }, '重新读取模型')))
   }
   // Fields the dsh view adds to a bot; the roster stores the rest.
-  const BOT_VIEW_FIELDS = ['agent', 'agent_type', 'agent_id', 'main_session_id', 'workspace', 'home', 'sessions']
+  // (`tone` and `tone_note` are forwarded on upsert and stripped by the server before Rust.)
+  const BOT_VIEW_FIELDS = ['agent', 'agent_type', 'agent_id', 'main_session_id', 'workspace', 'home', 'sessions', 'connectors']
   function storedBotFields(bot) {
     const stored = Object.fromEntries(Object.entries(bot).filter(([key]) => !BOT_VIEW_FIELDS.includes(key)))
     return { ...stored, model: stored.model?.trim?.() || null, tagline: stored.tagline?.trim() || null }
+  }
+  const BOT_TONE_FALLBACK = [
+    { id: 'colleague', label: '靠谱同事', summary: '像坐旁边的资深搭档，自然平实、说人话、有事直说', example: '「刚帮你扫了一眼，这处有个小坑，我先记在看板上了，你看现在顺手处理还是晚点？」' },
+    { id: 'direct', label: '干脆利落', summary: '少废话、结论先行、直击重点，适合审代码和排障', example: '「两个阻断项：第 42 行空指针、回调缺超时。建议先修前者，要我顺手提 patch 吗？」' },
+    { id: 'warm', label: '温和耐心', summary: '友好细腻、有同理心，循序渐进拆解，但不带客服腔', example: '「别急，这块逻辑确实绕，我先把关键路径顺了一遍，咱们一步步来看。」' },
+    { id: 'humorous', label: '轻松风趣', summary: '带点机灵和恰到好处的幽默感，干活靠谱但不沉闷', example: '「线上又在整活了？别慌，我把日志翻出来了，罪魁祸首八成是这个超时配置。」' },
+    { id: 'butler', label: '沉稳管家', summary: '周到克制、条理分明，主动把风险和边界替你想在前头', example: '「这两件事我先替你盯住，周四前没动静我再提醒你；眼下只需要你拍板接口方案。」' },
+    { id: 'custom', label: '自定义风格', summary: '完全按你在下方填写的口吻习惯来说话', example: '按你的自定义口吻说明执行（例如称呼方式、长短偏好、口头禅或禁忌）。' },
+  ]
+  function toneMeta(id, presets) {
+    const list = presets?.length ? presets : BOT_TONE_FALLBACK
+    return list.find(row => row.id === id) ?? list[0]
+  }
+  function BotTonePicker({ tone, toneNote, presets, disabled, compact = false, onChange }) {
+    const list = presets?.length ? presets : BOT_TONE_FALLBACK
+    const active = toneMeta(tone || 'colleague', list)
+    return h('div', { className: `kode-tone-picker${compact ? ' is-compact' : ''}` },
+      h('div', { className: 'kode-tone-grid', role: 'radiogroup', 'aria-label': '语气风格' },
+        ...list.map(item => h('button', {
+          key: item.id,
+          type: 'button',
+          role: 'radio',
+          'aria-checked': active.id === item.id,
+          className: `kode-tone-card${active.id === item.id ? ' is-active' : ''}`,
+          disabled,
+          title: item.summary,
+          onClick: () => onChange({ tone: item.id, tone_note: toneNote ?? '' }),
+        },
+          h('strong', null, item.label),
+          !compact && h('span', { className: 'kode-secondary' }, item.summary)))),
+      active.example && h('p', { className: 'kode-tone-example' }, h('span', { className: 'kode-tone-example-tag' }, '说话示例'), active.example),
+      h('label', { className: 'kode-field' },
+        h('span', null, active.id === 'custom' ? '自定义口吻说明（必填更贴合）' : '口吻补充 / 称呼习惯（可选）'),
+        h('input', {
+          maxLength: 400,
+          value: toneNote ?? '',
+          disabled,
+          placeholder: '例如：叫我「老王」、尽量用短句口语、少用感叹号、别老用 1/2/3 列清单',
+          onChange: event => onChange({ tone: active.id, tone_note: event.target.value }),
+        })))
   }
   async function botsQuery(query) {
     const response = await fetchHost(`/api/kode/bots?${query}`, { credentials: 'same-origin', cache: 'no-store' })
@@ -438,15 +479,16 @@
       h('div', { className: 'kode-settings-footer' }, saved && h('span', { className: 'kode-secondary', role: 'status' }, '已保存'), h(Button, { variant: 'primary', disabled: busy, onClick: () => void save() }, '保存')),
       h(Failure, { text: error }))
   }
-  const BOT_SETTINGS_TABS = [['profile', '资料'], ['persona', '角色说明'], ['run', '运行方式'], ['tasks', '任务'], ['skills', '技能'], ['watches', '关注与定时'], ['advanced', '高级']]
+  const BOT_SETTINGS_TABS = [['profile', '资料'], ['persona', '角色说明'], ['connectors', '连接器'], ['tasks', '看板'], ['watches', '关注与定时'], ['skills', '技能'], ['run', '运行方式'], ['advanced', '高级']]
   const BOT_OUTBOUND = [{ value: 'direct', label: '直接发送' }, { value: 'draft', label: '先起草，我确认后再发' }]
   // A bot's settings take over the whole 伙伴 page: sections on the left.
   function BotSettingsPage({ bot, data, initialTab = 'profile', ui, onClose, onDeleted }) {
     const [tab, setTab] = useState(initialTab), [draft, setDraft] = useState(() => ({ ...bot })), [busy, setBusy] = useState(false), [error, setError] = useState('')
-    useEffect(() => { setDraft({ ...bot }); setTab(initialTab) }, [bot.id])
+    useEffect(() => { setDraft({ ...bot }); setTab(initialTab) }, [bot.id, initialTab])
     const editable = ['profile', 'persona', 'run'].includes(tab)
     const openTasks = (useWatches().data?.tasks ?? []).filter(task => task.bot === bot.id && task.kind === 'task' && !task.closed).length
-    const dirty = ['name', 'tagline', 'avatar', 'banner', 'persona', 'backend_key', 'model', 'permission_ceiling', 'default_cwd', 'outbound'].some(key => (draft[key] ?? null) !== (bot[key] ?? null))
+    const activeConnectors = (bot.connectors ?? []).filter(row => row.enabled !== false).length
+    const dirty = ['name', 'tagline', 'avatar', 'banner', 'persona', 'tone', 'tone_note', 'backend_key', 'model', 'permission_ceiling', 'default_cwd', 'outbound'].some(key => (draft[key] ?? null) !== (bot[key] ?? null))
     const run = async (body, close = false) => {
       setBusy(true); setError('')
       try { const value = await botsCall(body); if (Array.isArray(value.bots)) publishBots({ data: value, error: '' }); if (close) onClose(); return value }
@@ -465,14 +507,18 @@
         h('h4', null, '基本资料'),
         field('名字', 'name', { maxLength: 80, required: true }),
         field('一句话简介', 'tagline', { maxLength: 120, placeholder: '显示在头像卡和侧栏，例如：逐条审 PR，指出风险' }),
-        field('角色说明（摘要显示在资料卡上）', 'persona', { rows: 7, placeholder: '这个伙伴负责什么、按什么标准做事、什么时候问你' })),
+        h('div', { className: 'kode-field' },
+          h('span', null, '语气风格（告别“人机味”）'),
+          h(BotTonePicker, { tone: draft.tone ?? 'colleague', toneNote: draft.tone_note ?? '', presets: data.tone_presets, disabled: busy, onChange: next => set(next) })),
+        field('角色说明（摘要显示在资料卡上）', 'persona', { rows: 6, placeholder: '这个伙伴负责什么、按什么标准做事、什么时候问你' })),
       h('section', { className: 'kode-bot-pane-card kode-bot-pane-media' },
         h('h4', null, '头像与背景'),
         h(BotAvatarPicker, { bot, draft: { ...draft, agent_type: data.agents.find(agent => agent.backend_key === draft.backend_key)?.type ?? draft.agent_type }, busy, onChange: next => set({ avatar: next.avatar, banner: next.banner }) })))
       : tab === 'persona' ? h('section', { className: 'kode-bot-pane-card' },
-        h('h4', null, '角色说明'),
-        h('span', { className: 'kode-secondary' }, '这段文字会作为伙伴的身份发给它：职责、工作方式、汇报格式和边界。'),
-        field('角色说明', 'persona', { rows: 16, placeholder: '这个伙伴负责什么、按什么标准做事、什么时候问你' }))
+        h('h4', null, '语气风格与角色说明'),
+        h('span', { className: 'kode-secondary' }, '语气风格决定伙伴怎么开口说话（去 AI 客服腔），角色说明决定它的职责和做事边界。改完后下次新对话或点「重新打招呼」立即生效。'),
+        h(BotTonePicker, { tone: draft.tone ?? 'colleague', toneNote: draft.tone_note ?? '', presets: data.tone_presets, disabled: busy, onChange: next => set(next) }),
+        field('角色说明', 'persona', { rows: 14, placeholder: '这个伙伴负责什么、按什么标准做事、什么时候问你' }))
       : tab === 'run' ? h('div', { className: 'kode-bot-run-form' },
         h(SelectField, { label: 'Agent', value: draft.backend_key, options: agents, disabled: busy, onChange: value => set({ backend_key: value, model: null }) }),
         h(BotModelPicker, { profileId: data.agents.find(agent => agent.backend_key === draft.backend_key)?.profile_id, model: draft.model, disabled: busy, onChange: value => set({ model: value || null }) }),
@@ -480,14 +526,22 @@
         h(SelectField, { label: '默认工作区', value: draft.default_cwd ?? '', options: places, disabled: busy, onChange: value => set({ default_cwd: value || null }) }),
         h(SelectField, { label: '对外消息（企业微信等）', value: draft.outbound ?? 'direct', options: BOT_OUTBOUND, disabled: busy, onChange: value => set({ outbound: value === 'direct' ? null : value }) }),
         h('span', { className: 'kode-config-note' }, '选「先起草」时，伙伴要发出去的消息会先放进伙伴页的「待你处理」，你改好、点发送才会发出。'))
-      : tab === 'tasks' ? h(BotTaskBoard, { bot, ui })
+      : tab === 'connectors' ? h(BotConnectorsPanel, { bot, data })
+      : tab === 'tasks' ? h(BotsKanbanBoard, { data, ui, singleBot: bot })
       : tab === 'skills' ? h(BotSkillsPanel, { bot })
-      : tab === 'watches' ? h(BotWatches, { bot, workspaces: data.workspaces, ui, routines: data.routines ?? [] })
+      : tab === 'watches' ? h(BotWatches, { bot, workspaces: data.workspaces, ui, routines: data.routines ?? [], onOpenConnectors: () => setTab('connectors') })
       : h('div', { className: 'kode-bot-advanced' },
         h('p', { className: 'kode-secondary' }, `记忆范围 bot:${bot.id}`),
         h('p', { className: 'kode-secondary' }, `伙伴空间 ${bot.home ?? '—'}`),
         h('div', { className: 'kode-bot-actions' },
           data.default_bot !== bot.id && h(Button, { disabled: busy, onClick: () => void run({ action: 'set_default', id: bot.id }) }, '设为默认伙伴'),
+          h(Button, {
+            disabled: busy || !bot.agent,
+            onClick: async () => {
+              const result = await run({ action: 'greet', id: bot.id, force: true, idempotency_key: `bot-greet-retry-${bot.id}-${Date.now()}` })
+              if (result?.sessionId) { void refreshBots(); await ui()?.openSession(result.sessionId) }
+            },
+          }, '重新打招呼'),
           bot.main_session_id && h(Button, { disabled: busy, onClick: () => void run({ action: 'forget', id: bot.id }) }, '下次开始新对话')),
         h('div', { className: 'kode-bot-danger' },
           h('span', null, h('strong', null, '删除伙伴'), h('span', { className: 'kode-secondary' }, '它的会话、伙伴空间里的文件和记忆都会保留。')),
@@ -499,7 +553,7 @@
         h(BotAvatar, { bot: draft, size: 32 }),
         h('h2', null, bot.name, h('span', { className: 'kode-secondary' }, ' · 伙伴设置'))),
       h('div', { className: 'kode-bot-settings-body' },
-        h('nav', { className: 'kode-bot-settings-nav', 'aria-label': '设置分类' }, ...BOT_SETTINGS_TABS.map(([id, label]) => h('button', { key: id, type: 'button', 'aria-current': tab === id ? 'page' : undefined, onClick: () => setTab(id) }, label, id === 'skills' && bot.skills?.length ? h('span', { className: 'kode-bot-nav-count' }, bot.skills.length) : id === 'tasks' && openTasks ? h('span', { className: 'kode-bot-nav-count' }, openTasks) : null))),
+        h('nav', { className: 'kode-bot-settings-nav', 'aria-label': '设置分类' }, ...BOT_SETTINGS_TABS.map(([id, label]) => h('button', { key: id, type: 'button', 'aria-current': tab === id ? 'page' : undefined, onClick: () => setTab(id) }, label, id === 'skills' && bot.skills?.length ? h('span', { className: 'kode-bot-nav-count' }, bot.skills.length) : id === 'tasks' && openTasks ? h('span', { className: 'kode-bot-nav-count' }, openTasks) : id === 'connectors' && activeConnectors ? h('span', { className: 'kode-bot-nav-count' }, activeConnectors) : null))),
         h('div', { className: 'kode-bot-settings-pane' }, body, h(Failure, { text: error }))),
       editable && h('footer', { className: 'kode-bot-settings-foot' },
         dirty && h('span', { className: 'kode-secondary' }, '有未保存的修改'),

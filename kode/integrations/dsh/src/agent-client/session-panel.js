@@ -172,6 +172,78 @@
   function FallbackPanelSection({ slots, nativeId, component, ...props }) {
     return useSlotEntry(slots, CARD_SECTIONS, nativeId) ? null : h(component, props)
   }
+  function BotSessionBoardSection({ sessionId, dismissOverlay }) {
+    const host = useWorkspaceDirectory().current
+    const roster = useBotsData(), bot = host === 'local' ? botOfSession(roster, sessionId) : undefined
+    const watchData = useWatches().data
+    const [title, setTitle] = useState(''), [busy, setBusy] = useState(false)
+    if (!bot) return null
+    const tasks = (watchData?.tasks ?? []).filter(t => t.bot === bot.id && t.status !== 'cancelled')
+    const seen = new Set(tasks.map(t => t.session_uuid).filter(Boolean))
+    const watchesById = new Map((watchData?.watches ?? []).map(w => [w.id, w]))
+    const activeRuns = (watchData?.runs ?? []).filter(r => r.bot === bot.id && (!r.session_uuid || !seen.has(r.session_uuid)) && ['needs_user', 'starting', 'running'].includes(r.status))
+    const needs = [
+      ...tasks.filter(t => t.status === 'needs_user').map(t => ({ key: `t:${t.id}`, title: t.title, status: 'needs_user', task: t })),
+      ...activeRuns.filter(r => r.status === 'needs_user').map(r => ({ key: `r:${r.id}`, title: watchesById.get(r.watch_id)?.spec?.name ?? '关注任务', status: 'needs_user', run: r })),
+    ]
+    const working = [
+      ...tasks.filter(t => t.status === 'in_progress').map(t => ({ key: `t:${t.id}`, title: t.title, status: 'in_progress', task: t })),
+      ...activeRuns.filter(r => r.status !== 'needs_user').map(r => ({ key: `r:${r.id}`, title: watchesById.get(r.watch_id)?.spec?.name ?? '后台执行', status: 'in_progress', run: r })),
+    ]
+    const waiting = tasks.filter(t => t.status === 'waiting' || t.status === 'planned').map(t => ({ key: `t:${t.id}`, title: t.title, status: t.status, task: t }))
+    const openFullBoard = () => {
+      dismissOverlay?.()
+      requestedBotTasks = bot.id
+      openBotsPage?.()
+      window.dispatchEvent(new CustomEvent('kode-bot-tasks'))
+    }
+    const quickAdd = async event => {
+      event.preventDefault()
+      if (!title.trim() || busy) return
+      setBusy(true)
+      try { await taskAct({ action: 'task_upsert', task: { bot: bot.id, title: title.trim() } }); setTitle('') }
+      catch { /* Handled on full board */ }
+      finally { setBusy(false) }
+    }
+    const preview = [...needs, ...working, ...waiting].slice(0, 5)
+    return h('div', { className: 'kode-session-bot-board' },
+      h('div', { className: 'kode-session-bot-counts' },
+        h('span', { className: 'kode-kanban-pill is-amber' }, `待处理 ${needs.length}`),
+        h('span', { className: 'kode-kanban-pill is-blue' }, `进行中 ${working.length}`),
+        h('span', { className: 'kode-kanban-pill is-slate' }, `计划 ${waiting.length}`)),
+      preview.length > 0
+        ? h('ul', { className: 'kode-session-bot-items' }, ...preview.map(item => h('li', { key: item.key, className: `kode-session-bot-item is-${item.status}` },
+          h('span', { className: 'kode-session-bot-item-dot', 'aria-hidden': true }),
+          h('span', { className: 'kode-session-bot-item-title', title: item.task?.reason || item.run?.summary || item.title }, item.title),
+          item.task?.status === 'needs_user' && item.task?.kind === 'task' && h('button', {
+            type: 'button',
+            className: 'kode-session-bot-item-act',
+            disabled: busy,
+            onClick: () => void taskAct({ action: 'task_upsert', task: { id: item.task.id, status: 'in_progress', reason: '' } }),
+          }, '继续'))))
+        : h('p', { className: 'kode-secondary kode-session-bot-empty' }, '看板暂无待办，可在下方快速记录。'),
+      h('form', { className: 'kode-session-bot-add', onSubmit: quickAdd },
+        h('input', { 'aria-label': '快速新增任务', placeholder: `给 ${bot.name} 加一条任务…`, value: title, disabled: busy, onChange: event => setTitle(event.target.value) }),
+        h(Button, { type: 'submit', size: 'sm', variant: 'ghost', disabled: busy || !title.trim() }, '添加')),
+      h(Button, { size: 'sm', variant: 'outline', onClick: openFullBoard }, '打开完整看板'))
+  }
+  function BotSessionConnectorsSection({ sessionId, dismissOverlay }) {
+    const host = useWorkspaceDirectory().current
+    const roster = useBotsData(), bot = host === 'local' ? botOfSession(roster, sessionId) : undefined
+    if (!bot) return null
+    const connectors = bot.connectors ?? []
+    const openConnectors = () => {
+      dismissOverlay?.()
+      requestedBotConnectors = bot.id
+      openBotsPage?.()
+      window.dispatchEvent(new CustomEvent('kode-bot-connectors'))
+    }
+    return h('div', { className: 'kode-session-bot-connectors' },
+      connectors.length > 0
+        ? h(BotConnectorChips, { connectors })
+        : h('p', { className: 'kode-secondary kode-session-bot-empty' }, '尚未接入企微、GitHub、Webhook 或 MCP 应用。'),
+      h(Button, { size: 'sm', variant: 'outline', onClick: openConnectors }, connectors.length ? '管理连接器' : '添加连接器'))
+  }
   function installSessionPanel(ctx) {
     const session = sessionId => ({ sessionId, sessions: ctx.sessions, slots: ctx.slots })
     ctx.slots.inject(CARD_ENVIRONMENT, function* () {
@@ -180,6 +252,8 @@
     wrapSlot(ctx, CARD_ENVIRONMENT, entry => entry.options.id === 'project',
       native => props => h(SessionProjectLocation, { ...props, native }))
     ctx.slots.inject(CARD_SECTIONS, function* () {
+      yield ctx.slots.register({ name: CARD_SECTIONS, id: 'kode-bot-board', order: 50, label: () => '伙伴看板', inject: session }, BotSessionBoardSection)
+      yield ctx.slots.register({ name: CARD_SECTIONS, id: 'kode-bot-connectors', order: 60, label: () => '连接器', inject: session }, BotSessionConnectorsSection)
       yield ctx.slots.register({ name: CARD_SECTIONS, id: 'kode-review-links', order: 100, label: () => '代码评审', inject: session },
         props => h(FallbackPanelSection, { ...props, nativeId: 'change-requests', component: SessionReviewLinks }))
       yield ctx.slots.register({ name: CARD_SECTIONS, id: 'kode-child-agents', order: 200, label: () => '子 Agent', inject: session },

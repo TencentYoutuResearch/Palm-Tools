@@ -48,11 +48,6 @@ export async function apply(ctx, config = {}) {
   ctx.provide?.('kodeBackend', admin)
   const backend = await connectBackend(admin, runtimeConfig)
   ctx.effect(() => backend.close, 'kode.backend-lifetime')
-  const wecom = runtimeConfig.wecomBridge === false ? null : new WeComBridge(admin, { logger: ctx.logger })
-  if (wecom) {
-    void wecom.start().catch(error => ctx.logger?.warn?.('WeCom bridge start failed: %s', error.message))
-    ctx.effect(() => () => wecom.stop(), 'kode.wecom-bridge')
-  }
   const node = backend.node
   if (runtimeConfig.publishWorkbenchConnection && runtimeConfig.sharedBackendState) {
     const path = runtimeConfig.workbenchConnectionFile ?? join(homedir(), process.platform === 'darwin' ? 'Library/Application Support/kode/workbench-connection.json' : '.config/kode/workbench-connection.json')
@@ -60,6 +55,12 @@ export async function apply(ctx, config = {}) {
     await writeFile(path, JSON.stringify({ url: admin.url, token_file: runtimeConfig.tokenFile, server_command: runtimeConfig.serverCommand, server_config: runtimeConfig.serverConfig, server_args: runtimeConfig.serverArgs ?? [] }), { mode: 0o600 })
   }
   const stateFile = runtimeConfig.stateFile ?? join(homedir(), '.config', 'kode', `dsh-${node.node_id}.json`)
+  const stateDir = dirname(stateFile)
+  const wecom = runtimeConfig.wecomBridge === false ? null : new WeComBridge(admin, { logger: ctx.logger, storageFile: join(stateDir, 'dsh-wecom-bridge.json') })
+  if (wecom) {
+    void wecom.start().catch(error => ctx.logger?.warn?.('WeCom bridge start failed: %s', error.message))
+    ctx.effect(() => () => wecom.stop(), 'kode.wecom-bridge')
+  }
   let tokens = Object.create(null)
   try { tokens = Object.assign(Object.create(null), JSON.parse(await readFile(stateFile, 'utf8'))) } catch (e) { if (e.code !== 'ENOENT') throw e }
   const active = new Map()
@@ -90,7 +91,7 @@ export async function apply(ctx, config = {}) {
     webCtx.effect(() => registerSharedSessionApi(webCtx, admin), 'kode.shared-session-api')
     installSessionCreator(webCtx, admin, node.node_id)
     const { registerBotsApi } = await import('./bots-api.js')
-    webCtx.effect(() => registerBotsApi(webCtx, admin, { wecom }), 'kode.bots-api')
+    webCtx.effect(() => registerBotsApi(webCtx, admin, { wecom, storageDir: stateDir }), 'kode.bots-api')
     if (wecom) webCtx.effect(() => registerWeComApi(webCtx, wecom), 'kode.wecom-api')
     const { registerProjectHosts } = await import('./project-hosts.js')
     await registerProjectHosts(webCtx, { ...runtimeConfig, backendClient: admin })

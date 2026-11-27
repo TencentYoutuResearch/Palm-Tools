@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { agentFor, botAgentTypes, botRoutines, botsView, botTemplates, registerBotsApi, runBotForWatch } from '../src/bots-api.js'
+import { agentFor, botAgentTypes, botRoutines, botsView, botTemplates, greetingPrompt, registerBotsApi, runBotForWatch, storedBot } from '../src/bots-api.js'
 
 const runtime = {
   hasRuntime: type => type !== 'missing',
@@ -116,7 +116,9 @@ test('a watch run starts the bot in the watched folder at the capped mode, keyed
   assert.equal(created[0].permission, 'read-only')
   assert.equal(created[0].title, 'Kit · Docs')
   assert.equal(created[0].model, 'm')
-  assert.equal(created[0].task, 'P\n\nCheck docs')
+  assert.ok(created[0].task.startsWith('P\n\n'))
+  assert.match(created[0].task, /沟通语气与表达风格（靠谱同事）/)
+  assert.ok(created[0].task.endsWith('\n\nCheck docs'))
   await runBotForWatch(ctx, backend, { bot_id: 'b1', task: 'again', workspace: '/repo', permission: 'acceptEdits' }, 'watch.run-1')
   assert.equal(created[1].idempotency_key, created[0].idempotency_key, 'a retried Kode request reuses its creation')
   assert.equal(created[1].permission, 'workspace-write')
@@ -223,4 +225,93 @@ test('a bot never runs on DeepSeek Harness itself, which needs its own model pro
   assert.equal(agentFor(withDsh, 'codex').id, 'builtin-codex')
   const view = botsView({ bots: [], workspaces: {}, homes: {} }, { runtime: withDsh, sessions: [], archived: new Set(), workspaces: [] })
   assert.deepEqual(view.agents.map(row => row.backend_key), ['codex'], 'the picker and the builder see the same list')
+})
+
+test('a newly configured bot greets the user in read-only mode with its tone, skills and connectors, and greet is idempotent', async () => {
+  const prompt = greetingPrompt(
+    { id: 'b1', name: '大管家', tagline: '盯进度和汇总汇报', tone: 'humorous', tone_note: '叫我老王', skills: [{ slug: 'standup', name: '每日站会' }] },
+    {
+      connectors: [{ id: 'c1', name: '企业微信', enabled: true, how_to_ask: '在研发群发消息' }],
+      watches: [{ bot: 'b1', enabled: false, spec: { name: '每日站会' } }],
+    },
+  )
+  assert.match(prompt, /轻松风趣/)
+  assert.match(prompt, /去人机味底线/)
+  assert.match(prompt, /严禁人机味/)
+  assert.match(prompt, /叫我老王/)
+  assert.match(prompt, /大管家/)
+  assert.match(prompt, /企业微信（在研发群发消息）/)
+  assert.match(prompt, /每日站会（当前暂停）/)
+  assert.match(prompt, /不要改文件/)
+  const stripped = storedBot({ id: 'b1', name: '大管家', connectors: [{ id: 'c1' }], tone: 'direct', tone_note: '简短' })
+  assert.equal(stripped.connectors, undefined, 'view-only connectors are stripped before saving to Rust Bot')
+  assert.equal(stripped.tone, undefined, 'view-only tone is stripped before saving to Rust Bot')
+  assert.equal(stripped.tone_note, undefined, 'view-only tone_note is stripped before saving to Rust Bot')
+
+  const created = [], calls = []
+  let mainSession = null
+  const sessions = []
+  let voiceDoc = { version: 1, voices: {} }
+  let handler
+  const roster = () => ({
+    bots: [{ id: 'b1', name: '大管家', tagline: '盯进度', backend_key: 'claude', permission_ceiling: 'acceptEdits', main_session: mainSession }],
+    workspaces: { b1: '/bots/b1' },
+    persona_prompts: { b1: '你是大管家。' },
+  })
+  const services = {
+    kodeAgents: runtime,
+    kodeSessionCreator: {
+      create: async input => {
+        created.push(input)
+        sessions.push({ sessionId: 'greet-1', cwd: input.workspace })
+        return { address: { session_id: 'greet-1' } }
+      },
+    },
+    sessionController: { list: async () => ({ items: sessions }) },
+    workspaceRegistry: { list: () => [{ id: 'w1', title: '大管家', path: '/bots/b1' }], archivedSessionIds: [] },
+  }
+  const backend = {
+    call: async (path, body) => {
+      calls.push([path, body])
+      if (path === '/api/v1/messaging/workbench/bots') {
+        if (body?.action === 'set_main_session') { mainSession = body.session; return { ok: true } }
+        if (body?.action === 'upsert') {
+          assert.equal(body.bot.tone, undefined, 'Rust Bot upsert never receives unknown tone field')
+          assert.equal(body.bot.tone_note, undefined, 'Rust Bot upsert never receives unknown tone_note field')
+          return { ok: true }
+        }
+        return roster()
+      }
+      if (path === '/api/v1/messaging/workbench/watches') return { watches: [], runs: [] }
+      if (path === '/api/v1/messaging/workbench/documents/bot-voice') {
+        if (body?.value) voiceDoc = body.value
+        return { revision: 1, value: voiceDoc }
+      }
+      if (path.startsWith('/api/v1/messaging/workbench/documents/')) return { value: { version: 1, connectors: [] } }
+      return {}
+    },
+  }
+  const routes = []
+  registerBotsApi({ get: name => services[name], connection: { admit: () => ({ peer: { principal: { kind: 'owner' } } }) }, webServer: { register: route => { routes.push(route); if (route.path === '/api/kode/bots') handler = route.handler } } }, backend, { execFile: async () => ({ stdout: '', stderr: '' }) })
+  const webhookRoute = routes.find(route => route.path === '/api/kode/bot-webhooks')
+  assert.equal(webhookRoute?.auth, 'anonymous', 'external webhook callbacks bypass browser cookie auth and use per-connector Bearer secret')
+  const post = async body => { const res = { setHeader() {}, end(text) { this.body = JSON.parse(text) } }; await handler({ method: 'POST', async *[Symbol.asyncIterator]() { yield JSON.stringify(body) } }, res); return res }
+
+  const saved = await post({ action: 'upsert', bot: { id: 'b1', name: '大管家', backend_key: 'claude', permission_ceiling: 'acceptEdits', tone: 'direct', tone_note: '少说废话' } })
+  assert.equal(saved.body.bots[0].tone, 'direct')
+  assert.equal(saved.body.bots[0].tone_note, '少说废话')
+  assert.ok(saved.body.tone_presets.some(item => item.id === 'humorous'))
+
+  const first = await post({ action: 'greet', id: 'b1' })
+  assert.deepEqual(first.body, { sessionId: 'greet-1' })
+  assert.equal(created.length, 1)
+  assert.equal(created[0].permission, 'read-only', 'proactive greeting never runs write tools')
+  assert.match(created[0].task, /你是大管家。/)
+  assert.match(created[0].task, /干脆利落/)
+  assert.match(created[0].task, /少说废话/)
+  assert.match(created[0].task, /严禁人机味/)
+
+  const second = await post({ action: 'greet', id: 'b1' })
+  assert.deepEqual(second.body, { sessionId: 'greet-1', alreadyStarted: true })
+  assert.equal(created.length, 1, 'second greet reuses the live main session')
 })

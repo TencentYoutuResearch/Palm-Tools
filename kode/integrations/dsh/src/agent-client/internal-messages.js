@@ -84,6 +84,9 @@
   function InternalMessageAdapter({ native, kodeSessions, ...props }) {
     const data=props.node?.data
     if (!data || (props.node.kind==='assistant-step' && data.status!=='settled')) return h(native,props)
+    // Bot creation and first-meeting prompts are real model input, but not
+    // part of the user's conversation. The bot's reply is the confirmation.
+    if (props.node.kind === 'user' && (data.source_kind === 'kode-bootstrap' || data.source?.kind === 'kode-bootstrap')) return null
     const relay = props.node.kind === 'context' ? parseRelay(data) : undefined
     if (relay) return h(HistoricalRelay, { relay, time: data.time, sessions: kodeSessions, sessionId: props.sessionId, node: props.node, useChat: props.useChat })
     const field=props.node.kind==='assistant-step'?'blocks':'content'

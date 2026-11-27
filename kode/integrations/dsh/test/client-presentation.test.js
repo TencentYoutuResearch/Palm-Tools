@@ -219,6 +219,14 @@ test('context wrappers collapse into fields while mixed user text and images kee
   assert.equal(JSON.stringify(node),before)
   assert.doesNotMatch(visibleText(tree),/INSTRUCTIONS|environment_context|查看原文/)
 })
+test('bot bootstrap prompts stay hidden while ordinary user messages remain visible',()=>{
+  const c=client()
+  const hidden=internalTree(c,'user','伙伴配置与首次见面提示',{source:{kind:'kode-bootstrap'}})
+  assert.equal(hidden.tree,null)
+  const visible=internalTree(c,'user','这是用户真正发来的第一句话',{source:{kind:'user'}})
+  assert.equal(visible.tree.type,c.native)
+  assert.equal(visible.tree.props.node.data.content[0].text,'这是用户真正发来的第一句话')
+})
 test('ordinary XML, inline tag mentions, fenced examples and incomplete wrappers are untouched',()=>{
   const c=client()
   for(const text of ['<div>普通 HTML</div>','请解释 <environment_context> 这个标签。','```xml\n<environment_context>\n<cwd>/srv/example</cwd>\n</environment_context>\n```','<subagent_notification>\nnot closed']) {
@@ -2298,6 +2306,33 @@ test('a proposal keeps known routines and draft mode, and creation sets them up'
   assert.ok(watches.every(row => row.enabled === false), 'a template used as is starts with routines paused')
 })
 
+test('a proposal parses connectors, creation binds connectors and greets, and the 伙伴 page renders Kanban and Connectors', async () => {
+  const calls = []
+  const scope = botsUiScope({
+    publishBots: () => {}, botsSnapshot: { data: { bots: [] } },
+    botsCall: async body => {
+      calls.push(body)
+      if (body.action === 'upsert') return { bots: [{ id: 'bot_new', name: body.bot.name }] }
+      if (body.action === 'greet') return { sessionId: 'sess_greet_1' }
+      return { bots: [{ id: 'bot_new', name: 'Ops' }] }
+    },
+  })
+  const parsed = scope.botProposal(JSON.stringify({
+    name: 'Ops',
+    backend_key: 'claude',
+    connectors: [{ type: 'wecom', name: '企微值班', config: { chat_id: 'wr1' } }, 'webhook', { type: 'unknown' }],
+  }), [{ backend_key: 'claude' }])
+  assert.deepEqual(plain(parsed.connectors.map(row => [row.type, row.name])), [['wecom', '企微值班'], ['webhook', 'webhook']])
+  const result = await scope.createBot(parsed.bot, [], undefined, { connectors: parsed.connectors, greet: true })
+  assert.equal(result.sessionId, 'sess_greet_1')
+  assert.deepEqual(calls.map(row => row.action), ['upsert', 'connector_upsert', 'connector_upsert', 'greet'])
+  assert.match(source, /function BotsKanbanBoard/)
+  assert.match(source, /function BotConnectorsPanel/)
+  assert.match(source, /function BotQuickCreateForm/)
+  assert.match(source, /\['connectors', '连接器'\]/)
+  assert.match(source, /\['tasks', '看板'\]/)
+})
+
 test('the inbox gathers plans, drafted messages, tasks and runs that need the user', () => {
   const scope = { h: (type, props, ...children) => ({ type, props: props ?? {}, children }) }
   vm.runInNewContext(source.slice(source.indexOf('  /** Everything waiting for you across bots'), source.indexOf('  function BotInboxItem(')), scope)
@@ -2391,4 +2426,28 @@ test('plugin switches drop the duplicate state label and Remove uses the native 
   assert.match(source, /!key && h\('span', null, '需更新服务'\)/)
   assert.match(source, /\.kode-source-remove\{color:var\(--dsw-alias-state-error-primary\);--dsh-button-outline-color:color-mix\(in srgb,var\(--dsw-alias-state-error-primary\) 30%,transparent\);--dsw-alias-interactive-bg-hover:color-mix\(in srgb,var\(--dsw-alias-state-error-primary\) 8%,transparent\)\}/)
   assert.doesNotMatch(source, /kode-mcp-manual/)
+})
+
+test('bot session sidebar registers kanban board and connectors and proposal parses discord/mcp and tone', () => {
+  assert.match(source, /id: 'kode-bot-board', order: 50, label: \(\) => '伙伴看板'/)
+  assert.match(source, /id: 'kode-bot-connectors', order: 60, label: \(\) => '连接器'/)
+  assert.match(source, /VALID_CONNECTOR_TYPES = new Set\(\['wecom', 'webhook', 'github', 'team', 'slack', 'discord', 'linear', 'google', 'mcp'\]\)/)
+  assert.match(source, /VALID_TONES = new Set\(\['colleague', 'direct', 'warm', 'humorous', 'butler', 'custom'\]\)/)
+  assert.match(source, /function BotTonePicker\(/)
+  assert.match(source, /action: 'greet', id: bot\.id, force: true/)
+})
+
+test('right sidebar registers VS Code-style Git Changes guide entry, tab and shortcut', () => {
+  assert.match(source, /const GIT_TAB_ID = 'kode-git-changes'/)
+  assert.match(source, /commandId: 'kode\.gitChanges\.open'/)
+  const defaults = source.match(/id: 'kode\.gitChanges\.open',[\s\S]*?defaults: \{([\s\S]*?)\n          \},/)?.[1]
+  assert.ok(defaults)
+  assert.match(defaults, /'desktop:macos'/)
+  assert.doesNotMatch(defaults, /'web:/)
+  assert.match(source, /description: \(\) => '查看工作区 Git Graph、变更树、Diff 与暂存区'/)
+  assert.match(source, /function buildGitTree\(/)
+  assert.match(source, /function layoutGitGraph\(/)
+  assert.match(source, /function GraphRail\(/)
+  assert.match(source, /function ExpandedRail\(/)
+  assert.match(source, /installGitChangesSidebar\(ctx\)/)
 })

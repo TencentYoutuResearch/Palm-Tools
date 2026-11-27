@@ -168,6 +168,13 @@ async fn workbench_configuration_is_durable_versioned_and_not_agent_accessible()
     assert_eq!(client.get(&url).bearer_auth(owner.owner_token).send().await.unwrap().status(), 403);
     let current: Value = client.get(&url).bearer_auth("admin-test").send().await.unwrap().json().await.unwrap();
     assert_eq!(current, saved);
+    for key in ["bot-connectors", "bot-voice", "wecom-bridge"] {
+        let doc_url = format!("{}/api/v1/messaging/workbench/documents/{key}", s.url);
+        let written: Value = client.post(&doc_url).bearer_auth("admin-test").json(&json!({"expected_revision":0,"value":{"version":1,"key":key}})).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+        assert_eq!(written["revision"], 1);
+        let read_back: Value = client.get(&doc_url).bearer_auth("admin-test").send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+        assert_eq!(read_back["value"]["key"], key);
+    }
     assert_eq!(client.get(format!("{}/api/v1/messaging/workbench/documents/arbitrary-file", s.url)).bearer_auth("admin-test").send().await.unwrap().status(), 400);
 }
 

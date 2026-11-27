@@ -49,7 +49,7 @@ export class BackendClient {
       throw new Error(`Kode backend returned invalid JSON (HTTP ${response.status}, ${path})`)
     }
     if (result === undefined) throw new Error(`Kode backend returned an empty response (HTTP ${response.status}, ${path})`)
-    if (!response.ok) throw new Error(`kode backend (${response.status}): ${result.error ?? 'request failed'}`)
+    if (!response.ok) throw Object.assign(new Error(`kode backend (${response.status}): ${result.error ?? 'request failed'}`), { status: response.status })
     return result
   }
   async asset(path, signal) {
