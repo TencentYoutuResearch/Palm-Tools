@@ -203,7 +203,7 @@
     const ordered = resolved && [...resolved.filter(row => !finished(row)), ...resolved.filter(finished)]
     return rows?.length ? h(PanelList, { key: cardKey(sessionId), rows:ordered, visibleLimit:Math.min(3,resolved.filter(row => !finished(row)).length), renderFactorySlot,
       renderRow: row => h(SessionPanelRow, { key: row.url, href: row.url, compact: true, icon: h('span',{className:'kode-review-symbol'},h(IconBranchOutlineRegular, { size: 16 }),
-          row.status && h('i',{'data-review-status':row.status},row.status === 'merged' ? h('svg',{viewBox:'0 0 12 12',width:9,height:9,fill:'none',stroke:'currentColor',strokeWidth:1.5},h('path',{d:'M3 2v8M9 2c0 4-6 3-6 6'}),h('circle',{cx:9,cy:2,r:1})) : ({open:'✓',closed:'×',draft:'·'})[row.status])),
+          row.status && h('i',{'data-review-status':row.status},row.status === 'merged' ? h('svg',{viewBox:'0 0 12 12',width:7,height:7,fill:'none',stroke:'currentColor',strokeWidth:1.5},h('path',{d:'M3 2v8M9 2c0 4-6 3-6 6'}),h('circle',{cx:9,cy:2,r:1})) : ({open:'✓',closed:'×',draft:'·'})[row.status])),
         preview: [`${row.repo} · ${row.kind} #${row.number}`, labels[row.status] ?? '状态未知', row.url],
         label: `${row.kind} #${row.number}`, detail: row.repo, actionLabel: `打开 ${row.repo} 的 ${row.kind} #${row.number}，${labels[row.status] ?? '状态未知'}`,
         trailing: h(IconChevronRightOutlineRegular, { size: 14, 'aria-hidden': true }) }),
