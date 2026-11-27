@@ -5,6 +5,7 @@ import vm from 'node:vm'
 import { readAgentClientSource } from '../scripts/build-agent-client.js'
 
 const source = await readAgentClientSource()
+const SETTINGS_UI = { SettingsTitle: 'SettingsTitle', SettingsTag: 'SettingsTag', IconDatabaseOutlineRegular: 'database', IconSkillOutlineRegular: 'skill', IconLinkOutlineRegular: 'link', IconGaugeOutlineRegular: 'gauge', IconInfoOutlineRegular: 'info', IconRemoteConnectionOutlineRegular: 'remote', IconPersonalizationOutlineRegular: 'personalization', IconPluginPinwheelOutlineRegular: 'plugin', IconClockOutlineRegular: 'clock', IconAgentPresetOutlineRegular: 'agent-preset' }
 function client(directoryData = { current: 'local', hosts: [] }, windowProperties = {}, contextProperties = {}, globals = {}, hooks = {}) {
   const { primitives: primitiveOverrides = {}, ...reactHooks } = hooks
   let plugin
@@ -362,7 +363,10 @@ test('Agent list keeps editors collapsed until requested', () => {
   assert.match(JSON.stringify(body), /默认 Agent/); assert.match(JSON.stringify(body), /添加 Agent/)
   const defaultAgent = findNode(body, child => child?.props?.label === '默认 Agent')
   assert.equal(defaultAgent.props.showLabel, false)
-  assert.ok(findNode(body, child => child?.type === 'h3' && child.children.includes('默认 Agent')))
+  const heading = findNode(body, child => child?.type?.name === 'SettingsTitle' && child.children.includes('默认 Agent'))
+  assert.ok(heading, 'section titles go through the shared heading')
+  assert.equal(heading.type(heading.props).type, 'h3', 'and still render a native h3')
+  assert.equal(heading.props.icon, 'IconAgentPresetOutlineRegular', 'with the native Agent glyph')
   assert.ok(findNode(body, child => child?.props?.className === 'kode-settings-scope' && child.children?.some(row => row?.props?.label === '默认 Agent')), 'default Agent uses the same framed scope as the configuration Host')
   assert.doesNotMatch(JSON.stringify(body), /kode-agent-form|type.:.password/)
 })
@@ -420,12 +424,15 @@ test('model menu owns model, effort and Fast selection in one trigger', async ()
 })
 
 test('Agent update controls highlight only a confirmed release and use the correct update action', () => {
-  const scope={h:(type,props,...children)=>({type,props,children}),Button:'button'}
+  const scope={h:(type,props,...children)=>({type,props,children}),Button:'button',...SETTINGS_UI}
   vm.runInNewContext(source.slice(source.indexOf('  function AgentVersionIdentity'), source.indexOf('  function AgentSettingsBody')),scope)
   const profile={id:'configured',name:'Work Codex',type:'codex'}, calls=[]
   const state={versions:{configured:{current:'1.2.3',latest:'1.3.0',updateAvailable:true}},operate:(...args)=>calls.push(args)}
   const identity=scope.AgentVersionIdentity({profile,state})
-  assert.match(visibleText(identity),/Work Codex.*1.2.3.*可更新到 1.3.0/)
+  assert.match(visibleText(identity),/Work Codex.*v1\.2\.3.*↑ 1\.3\.0/)
+  const tags=[];(function walk(node){if(!node||typeof node!=='object')return;if(node.type==='SettingsTag')tags.push(node.props);(node.children??[]).forEach(walk)})(identity)
+  assert.deepEqual(tags.map(tag=>[tag.tone,tag['aria-label']]),[['version','已安装 1.2.3'],['update','可更新到 1.3.0']],'versions are monospace tags with spoken names')
+  assert.doesNotMatch(visibleText(scope.AgentVersionIdentity({profile,state:{versions:{configured:{current:'1.3.0'}}}})),/↑|可更新/,'no update tag without a confirmed release')
   const button=scope.AgentUpdateButton({profile,state})
   assert.equal(button.props.variant,'primary')
   button.props.onClick()
@@ -541,7 +548,7 @@ test('Plugin and Skills sources stay a multi-item list with an on-demand editor 
    {id:'acp-unknown',name:'Unconfigured ACP',type:'custom'},
  ],configuredDefaultProfileId:'codex'}
  const sessions={list:{getSnapshot:()=>({byId:{active:{retainedBy:{mainView:1},projectionValues:{kodeAgent:{profileId:'deepseek'}}}}})}}
- const scope={directory:()=>({getSnapshot:()=>({data:agents})}),useSyncExternalStore:(_,get)=>get(),hubCall:async body=>{requests.push(body);return slots[0]},React:{Fragment:'fragment'},Button:'button',Modal:'modal',Failure:'failure',SelectField:'select',IconPlusOutlineRegular:'plus',IconChevronDownOutlineRegular:'chevron',IconCheckOutlineRegular:'check',IconClockOutlineRegular:'clock',transport:null,h:(type,props,...children)=>({type,props,children}),useEffect(){},AbortController,setTimeout:()=>0,clearTimeout(){},useRef:(()=>{const refs=[];let i=0;return value=>refs[i++%1]??=({current:value})})(),useState(initial){const at=index++;if(slots[at]===undefined)slots[at]=initial;return[slots[at],value=>{slots[at]=typeof value==='function'?value(slots[at]):value}]}}
+ const scope={...SETTINGS_UI,directory:()=>({getSnapshot:()=>({data:agents})}),useSyncExternalStore:(_,get)=>get(),hubCall:async body=>{requests.push(body);return slots[0]},React:{Fragment:'fragment'},Button:'button',Modal:'modal',Failure:'failure',SelectField:'select',IconPlusOutlineRegular:'plus',IconChevronDownOutlineRegular:'chevron',IconCheckOutlineRegular:'check',IconClockOutlineRegular:'clock',transport:null,h:(type,props,...children)=>({type,props,children}),useEffect(){},AbortController,setTimeout:()=>0,clearTimeout(){},useRef:(()=>{const refs=[];let i=0;return value=>refs[i++%1]??=({current:value})})(),useState(initial){const at=index++;if(slots[at]===undefined)slots[at]=initial;return[slots[at],value=>{slots[at]=typeof value==='function'?value(slots[at]):value}]}}
  vm.runInNewContext(source.slice(source.indexOf('  const hubTargetNames'),source.indexOf('  function GoalBar')),scope)
  const render=()=>{index=0;return scope.HubSettings({host:'local',sessions})}
  render();slots[0]={power:{supported:false},sources:[{id:'remote',kind:'git',location:'https://example.test/remote',subdir:'plugins/remote',targets:['dsh'],nativeStatus:{dsh:'skills-only'},updatedAt:1,release:'r1',packages:[{name:'remote',path:'.',displayName:'Remote Toolkit',description:'Remote summary',longDescription:'Long remote summary',version:'1.2.3',author:'team',category:'Engineering',logo:'assets/logo.png',skills:[{name:'example-skill',description:'Skill summary'}],agents:[{name:'reviewer',description:'Reviews changes'}],hooks:[{name:'PreToolUse',description:'Hook summary'}],commands:[{name:'build',description:'Build summary'}],rules:[{name:'discipline',description:'Rule summary'}],mcp:[{name:'remote-mcp',type:'http'}]}]},{id:'local',kind:'local',location:'/tmp/skills',targets:['dsh'],skills:['skills--local']}],targets:{dsh:'.agents/skills',codex:'.codex/skills',tclaude:'.tclaude/skills','directory-fixture':'/example/custom/skills'},profileTargets:{deepseek:'dsh',codex:'codex','codex-alt':'codex',tclaude:'tclaude','acp-with-skills':'directory-fixture'}}
@@ -634,7 +641,7 @@ test('plugin toggles preserve source boundaries and sequence MCP login with retr
   const codex = { id: 'codex', name: 'Codex', type: 'codex', origin: 'builtin' }
   const agents = { profiles: [codex], configuredDefaultProfileId: 'codex' }
   const sessions = { list: { getSnapshot: () => ({ byId: {} }) } }
-  const scope = {
+  const scope = { ...SETTINGS_UI,
     directory: () => ({ getSnapshot: () => ({ data: agents }) }), useSyncExternalStore: (_, get) => get(),
     hubCall: async body => {
       requests.push(body)
@@ -755,7 +762,7 @@ test('MCP rows reuse the Agent sync tags and one-click authorization logs in eac
       { packageKey: 'kit', name: 'local', status: 'mystery' },
     ],
   }
-  const scope = {
+  const scope = { ...SETTINGS_UI,
     directory: () => ({ getSnapshot: () => ({ data: agents }) }), useSyncExternalStore: (_, get) => get(),
     hubCall: async body => {
       requests.push({ ...body })
@@ -848,11 +855,11 @@ test('Kode settings use the native settings section and a pinnable sidebar panel
   assert.ok(!c.ctx.slots.entries('sidebar.panellist.actions').some(row => row.options.id === 'kode-entries'), 'standalone does not duplicate the native menu entry')
   const main = c.entry('main', 'kode-settings'), wrapper = main(), panel = wrapper.children[0], tree = panel.type(panel.props)
   assert.match(JSON.stringify(tree), /插件与集成/); assert.doesNotMatch(JSON.stringify(tree), /Agent 共享/)
-  assert.match(JSON.stringify(tree), /统一管理 Agent、插件、连接与个性化设置/)
+  assert.doesNotMatch(JSON.stringify(tree), /统一管理 Agent、插件、连接与个性化设置/, 'the brand header needs no tagline')
   assert.match(findNode(tree, node => node.type === 'img' && node.props.src?.includes('type=kode'))?.props.src, /\/api\/kode\/avatars\/media\?type=kode&state=idle/)
   assert.match(source,/\.kode-settings-scope \.kode-field\{[^}]*width:100%;max-width:none/)
   assert.match(source,/\.kode-settings-brand-avatar\{[^}]*width:32px;height:32px/)
-  assert.match(source,/\.kode-settings-brand p\{[^}]*font-size:12px;line-height:18px/)
+  assert.doesNotMatch(source,/\.kode-settings-brand p\{/)
   c.ctx.layout.selectPanel('kode-settings')
   assert.deepEqual(selected, ['kode-settings'])
   assert.equal(c.shell.component, c.native)
@@ -1644,7 +1651,7 @@ test('global activity uses project priority across Hosts and updates without mou
 test('interface settings toggle the device service directly and report save failures', () => {
  let enabled = true, error = '', received
  const service = { subscribe: () => () => {}, getSnapshot: () => ({ tokenIsland: enabled }), update(value) { received = value; enabled = value.tokenIsland } }
- const scope = { avatarContext: { get: name => name === 'kodeInterface' ? service : undefined },
+ const scope = { ...SETTINGS_UI, avatarContext: { get: name => name === 'kodeInterface' ? service : undefined },
    React: { Fragment: 'fragment', useMemo: fn => fn(), useCallback: fn => fn }, useSyncExternalStore: (_subscribe, get) => get(),
    useState: () => [error, value => { error = value }], SelectField: 'select', Failure: 'failure', h: (type, props, ...children) => ({ type, props: props ?? {}, children }) }
  const component = vm.runInNewContext(source.slice(source.indexOf('  function InterfaceSettingsBody('), source.indexOf('  function NotificationSettingsBody(')) + '\nInterfaceSettingsBody', scope)
@@ -1696,7 +1703,7 @@ test('settings group small preferences by task, preserve deep links, and keep de
 test('Agent naming is grouped under conversation communication and missing support is explained', () => {
  const shared = { messaging_enabled: false, memory_enabled: true, auto_resume_interrupted: true }
  let data
- const scope = {
+ const scope = { ...SETTINGS_UI,
   h: (type, props, ...children) => ({ type, props: props ?? {}, children }),
   React: { Fragment: 'fragment' }, Button: 'button', useState: value => [value, () => {}],
   useIntegrationSettings: () => ({ data, update() {}, busy: false, error: '' }),
@@ -1711,7 +1718,8 @@ test('Agent naming is grouped under conversation communication and missing suppo
  assert.equal(findNode(communication, node => node.type?.name === 'SessionNamingSettings').props.prompt, 'Example')
  assert.doesNotMatch(visibleText(communication), /共享记忆/)
  const unsupported = findNode(render(shared), node => node.props?.['aria-label'] === '会话通信')
- assert.match(visibleText(unsupported), /Agent 会话命名.*更新服务后即可设置/s)
+ assert.match(visibleText(unsupported), /自定义会话命名规则.*更新服务后即可设置/s)
+ assert.doesNotMatch(visibleText(available), /允许 Agent 发现|允许 Agent 搜索|全额返还能量/, 'switch labels speak for themselves')
  assert.ok(findNode(unsupported, node => node.type === 'ServiceRecoveryLink'))
  data = { settings: { ...shared, session_naming_prompt: 'Example' } }
  const general = scope.SessionBehaviorSettings({ host: 'local' })
@@ -1730,7 +1738,7 @@ test('session naming shows the effective rule, edits it in place, saves and rest
       return [state[index], next => { state[index] = typeof next === 'function' ? next(state[index]) : next }]
     },
     useRef: () => ({ current: null }), useEffect: () => {}, requestAnimationFrame: fn => fn(),
-    Button: 'button',
+    Button: 'button', ...SETTINGS_UI,
   }
   vm.runInNewContext(source.slice(source.indexOf('  function SessionNamingSettings('), source.indexOf('  function SessionBehaviorSettings(')), scope)
   const update = async input => {
@@ -1744,7 +1752,8 @@ test('session naming shows the effective rule, edits it in place, saves and rest
   // View state: the default rule is visible and marked as the default; nothing is editable yet.
   let view = render()
   assert.equal(findNode(view, node => node.type === 'pre').children[0], defaultPrompt)
-  assert.match(visibleText(view), /默认/); assert.match(visibleText(view), /最多 4 个词/)
+  assert.match(visibleText(view), /自定义会话命名规则/); assert.doesNotMatch(visibleText(view), /Agent 会话命名/)
+  assert.match(visibleText(view), /默认/); assert.match(visibleText(view), /用于 Agent 创建的会话 · 最多 4 词/)
   assert.equal(findNode(view, node => node.type === 'textarea'), undefined)
   // Edit state starts from the effective rule; unchanged text cannot be saved.
   button(view, '编辑规则').props.onClick()
@@ -1948,8 +1957,10 @@ test('communication rows show only a title and tell waiting from answered by the
   const request = { nodeId: 'n', sessionId: 'peer', id: 'theirs', direction: 'received', reply: false, content: '# 帮我看看\n细节' }
   const rows = [ask, delivered, answer, reply, request]
   assert.deepEqual(rows.map(row => scope.relayKind(row, rows)), ['answered', 'waiting', 'reply', 'replied', 'incoming'])
-  assert.deepEqual(rows.map(row => scope.relayKinds[scope.relayKind(row, rows)].icon), ['plane', 'plane', 'mail-read', 'plane', 'mail-unread'], 'sent, received requests and received replies each keep their own native glyph')
-  assert.deepEqual(rows.map(row => scope.relayKinds[scope.relayKind(row, rows)].badge), ['check','clock',undefined,undefined,undefined])
+  assert.deepEqual(rows.map(row => scope.relayKinds[scope.relayKind(row, rows)].icon), ['plane', 'plane', 'mail-read', 'plane', 'mail-read'], 'the glyph shows direction only: sent flies out, received arrives as opened mail')
+  assert.deepEqual(new Set(Object.values(scope.relayKinds).map(kind => kind.icon)), new Set(['plane', 'mail-read']), 'exactly two direction glyphs')
+  assert.ok(Object.values(scope.relayKinds).every(kind => Object.keys(kind).join() === 'label,icon'), 'no badge or tone competes with the glyph')
+  assert.doesNotMatch(source, /kode-relay-badge|data-kode-tone/, 'waiting and answered stay in the detail line, not as a corner mark')
   assert.deepEqual(Object.values(scope.relayKinds).map(kind => kind.label), ['等待对方回复', '已收到回复', '已发送', '已回复对方', '收到对方回复', '收到消息'])
   assert.doesNotMatch(source, /data-inbound|scaleX\(-1\)/, 'no glyph is mirrored to fake a direction')
   assert.equal(scope.relayKind(ask, [ask]), 'waiting', 'an accepted receipt is not a reply')
@@ -2019,7 +2030,8 @@ test('chat relay cards start collapsed to route and title, and reveal the body o
   const toggle = find(card, node => node.type === 'button')
   assert.equal(toggle.props['aria-expanded'], false)
   assert.equal(find(card, node => node.props?.className === 'kode-relay-icon').children[0].type, 'mail-read', 'a received reply arrives as opened mail')
-  assert.equal(find(render({ ...relay, replyTo: undefined }), node => node.props?.className === 'kode-relay-icon').children[0].type, 'mail-unread', 'a received request arrives as unread mail')
+  assert.equal(find(render({ ...relay, replyTo: undefined }), node => node.props?.className === 'kode-relay-icon').children[0].type, 'mail-read', 'a received request arrives as the same opened mail')
+  assert.equal(find(render(relay), node => node.props?.className === 'kode-relay-icon').children.length, 1, 'the card carries no status badge')
   assert.equal(text(card), '评审助手→当前会话代码评审结论')
   assert.equal(find(card, node => node.type === 'strong' && node.props.title === '当前会话（当前会话）') != null, true)
   assert.equal(find(card, node => node.type === 'time'), undefined)

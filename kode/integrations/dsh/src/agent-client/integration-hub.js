@@ -25,13 +25,15 @@
       finally { setBusy(false) }
     }
     return h('div', { className: 'kode-settings-group kode-power-settings' },
-      h('h3', { className: 'kode-settings-group-title' }, '电源'),
+      h(SettingsTitle, { icon: IconGaugeOutlineRegular }, '电源'),
       h('div', { className: 'kode-settings-card' },
         !data && !error && h('p', { className: 'kode-config-note', role: 'status' }, '正在读取电源设置…'),
         data && h(React.Fragment, null,
-          h('label', { className: 'kode-integration-row' }, h('span', null, h('strong', null, '息屏后继续运行'), h('span', { className: 'kode-config-note' }, '阻止此主机自动休眠，屏幕仍可熄灭。停止 Kode 后端后释放；合盖和手动休眠由系统控制。')),
+          h('label', { className: 'kode-integration-row' }, h('span', null,
+              h('strong', null, '息屏后继续运行', !data.power.error && h(SettingsTag, { tone: data.power.active ? 'success' : 'kind', role: 'status' }, data.power.active ? '保持唤醒' : data.power.supported ? '系统默认' : '不支持')),
+              h('span', { className: 'kode-config-note' }, '阻止自动休眠，屏幕仍可熄灭；合盖与手动休眠由系统控制。')),
             h('input', { type: 'checkbox', role: 'switch', checked: data.keepAwake, disabled: busy || !data.power.supported, onChange: event => void update(event.target.checked) })),
-          h('p', { className: 'kode-config-note', role: 'status' }, data.power.error || (data.power.active ? '主机正在保持唤醒。' : data.power.supported ? '主机使用系统默认休眠设置。' : '此主机暂不支持保持唤醒。'))),
+          data.power.error && h('p', { className: 'kode-config-note kode-error', role: 'status' }, data.power.error)),
         h(Failure, { text: error })))
   }
   const hubTargetNames = { dsh: 'DeepSeek Harness', codex: 'Codex', claude: 'Claude Code', codebuddy: 'CodeBuddy', cursor: 'Cursor', antigravity: 'Antigravity', tcodex: 'TCodex', tclaude: 'TClaude' }
@@ -261,8 +263,8 @@
         h(Button, { variant: 'outline', disabled: busy, onClick: () => setDraft(null) }, '取消'),
         h(Button, { type: 'submit', variant: 'primary', disabled: busy || !draft.targets.length }, busy ? '保存中…' : draft.editing ? '保存修改' : '添加来源')))
     return h('div', { className: 'kode-settings-group kode-hub-settings' },
-      h('h3', { className: 'kode-settings-group-title' }, 'Plugin / Skills 来源'),
-      host !== 'local' && h('p', { className: 'kode-config-note' }, '配置主机 · ' + (hosts.find(row => row.id === host)?.name ?? host)),
+      h(SettingsTitle, { icon: IconPluginPinwheelOutlineRegular }, 'Plugin / Skills 来源',
+        host !== 'local' && h(SettingsTag, { 'aria-label': '配置主机 ' + (hosts.find(row => row.id === host)?.name ?? host) }, hosts.find(row => row.id === host)?.name ?? host)),
       h(Failure, { text: error || agentError }),
       (!data || !agents) && !error && !agentError && h('p', { className: 'kode-config-note', role: 'status' }, '正在读取 Agent 和来源…'),
       data && agents && sources.length > 0 && h('div', { className: 'kode-settings-card kode-agent-list-card kode-hub-sources-card' },

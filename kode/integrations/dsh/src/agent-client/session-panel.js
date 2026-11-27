@@ -16,7 +16,7 @@
     }
   }
   // `hint` names what the leading icon shows: a tooltip for pointers and hidden text for screen readers.
-  function SessionPanelRow({ icon, label, hint, preview, detail, detailTitle = detail, trailing, actionLabel, onClick, expanded, href, compact, tone }) {
+  function SessionPanelRow({ icon, label, hint, preview, detail, detailTitle = detail, trailing, actionLabel, onClick, expanded, href, compact }) {
     const body = [
       h('span', { key: 'icon', 'data-row-part': 'icon', 'aria-hidden': true, title: preview ? undefined : hint }, icon),
       h('span', { key: 'label', 'data-row-part': 'lines' },
@@ -27,7 +27,7 @@
     const anchor = href ? h('a', { 'data-row-part': 'body', className: 'kode-panel-link', href, target: '_blank', rel: 'noopener noreferrer', 'aria-label': actionLabel }, body) :
         onClick ? h('button', { type: 'button', 'data-row-part': 'body', 'aria-label': actionLabel, 'aria-expanded': expanded, onClick }, body) :
           h('span', { 'data-row-part': 'body' }, body)
-    return h('div', { 'data-session-panel-row': '', 'data-kode-panel-row': '', 'data-kode-compact': compact ? '' : undefined, 'data-kode-tone': tone },
+    return h('div', { 'data-session-panel-row': '', 'data-kode-panel-row': '', 'data-kode-compact': compact ? '' : undefined },
       preview ? h(Tooltip, { label: h('span', {style:{display:'grid',gap:3,whiteSpace:'normal',overflowWrap:'anywhere'}}, h('strong',null,preview[0]), ...preview.slice(1).map((line,i) => h('span',{key:i},line))), side: 'bottom', maxWidth: 360, delayMs: 350, portal: true }, anchor) : anchor,
       trailing && h('span', { 'data-row-part': 'trailing' }, trailing))
   }
@@ -137,7 +137,7 @@
       rowProps: row => {
         const key = relayKind(row, messages), kind = relayKinds[key], peer = relayPeer(row, nameOf), title = relayTitle(row)
         return { icon: relayIcon(key),
-          label: title, hint: kind.label, tone: kind.tone,
+          label: title, hint: kind.label,
           preview: [title, peer.direction + ' ' + peer.name + ' · ' + kind.label],
           detail: h('span', { className: 'kode-relay-peer' }, h('span', { className: 'kode-relay-direction' }, peer.direction), ' ', peer.name),
           detailTitle: `${peer.direction} ${peer.name}`, actionLabel: `${title}，${kind.label}，${peer.direction} ${peer.name}`,
@@ -203,7 +203,7 @@
     const ordered = resolved && [...resolved.filter(row => !finished(row)), ...resolved.filter(finished)]
     return rows?.length ? h(PanelList, { key: cardKey(sessionId), rows:ordered, visibleLimit:Math.min(3,resolved.filter(row => !finished(row)).length), renderFactorySlot,
       renderRow: row => h(SessionPanelRow, { key: row.url, href: row.url, compact: true, icon: h('span',{className:'kode-review-symbol'},h(IconBranchOutlineRegular, { size: 16 }),
-          row.status && h('i',{'data-review-status':row.status},({open:'✓',closed:'×'})[row.status])),
+          row.status && h('i',{'data-review-status':row.status})),
         preview: [`${row.repo} · ${row.kind} #${row.number}`, labels[row.status] ?? '状态未知', row.url],
         label: `${row.kind} #${row.number}`, detail: row.repo, actionLabel: `打开 ${row.repo} 的 ${row.kind} #${row.number}，${labels[row.status] ?? '状态未知'}`,
         trailing: h(IconChevronRightOutlineRegular, { size: 14, 'aria-hidden': true }) }),

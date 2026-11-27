@@ -112,7 +112,7 @@ test('notification settings explain denied permission and expose independently n
   const fragment = source.slice(source.indexOf('  function notificationState('), source.indexOf('  const settingsSections ='))
   const h = (type, props, ...children) => ({ type, props, children: children.flat() })
   const state = { permission: 'denied', completed: true, waiting: false }, service = { subscribe() {}, getSnapshot: () => state }
-  const scope = { h, React: { Fragment: 'fragment', useCallback: fn => fn, useMemo: fn => fn() }, useSyncExternalStore: (_subscribe, get) => get(), useState: initial => [initial, () => {}], Button: 'button', Failure: 'failure', IconCheckOutlineRegular: 'check', IconWarningOutlineRegular: 'warning', IconLoadingOutlineRegular: 'loading', avatarContext: { get: () => service } }
+  const scope = { SettingsTitle: 'SettingsTitle', SettingsTag: 'SettingsTag', IconInfoOutlineRegular: 'info', h, React: { Fragment: 'fragment', useCallback: fn => fn, useMemo: fn => fn() }, useSyncExternalStore: (_subscribe, get) => get(), useState: initial => [initial, () => {}], Button: 'button', Failure: 'failure', IconCheckOutlineRegular: 'check', IconWarningOutlineRegular: 'warning', IconLoadingOutlineRegular: 'loading', avatarContext: { get: () => service } }
   vm.runInNewContext(fragment, scope)
   const view = scope.NotificationSettingsBody(), nodes = []
   const visit = value => { if (!value || typeof value !== 'object') return; nodes.push(value); for (const child of value.children ?? []) visit(child) }; visit(view)

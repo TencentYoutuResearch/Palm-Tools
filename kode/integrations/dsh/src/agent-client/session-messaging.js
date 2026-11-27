@@ -65,19 +65,18 @@
     return h('span', { 'data-kode-relay': marker, hidden: true }, css && h('style', null, css))
   }
   // The projection's answered flag wins; otherwise only a received relay that names a sent request in its reply-to answers it. Delivery receipts never do.
-  // Sent lines fly out on the paper plane; received ones arrive as mail, opened once they answer us.
+  // Rows show direction only: whatever we sent flies out on the paper plane, whatever we received arrives as opened mail.
+  // Waiting/answered stay as labels for the detail line; no badge competes with the glyph.
   const relayKinds = {
-    waiting: { label: '等待对方回复', icon: IconPaperPlaneOutlineRegular, badge: IconClockOutlineRegular, tone: 'waiting' },
-    answered: { label: '已收到回复', icon: IconPaperPlaneOutlineRegular, badge: IconCheckOutlineRegular, tone: 'answered' },
+    waiting: { label: '等待对方回复', icon: IconPaperPlaneOutlineRegular },
+    answered: { label: '已收到回复', icon: IconPaperPlaneOutlineRegular },
     sent: { label: '已发送', icon: IconPaperPlaneOutlineRegular },
     replied: { label: '已回复对方', icon: IconPaperPlaneOutlineRegular },
     reply: { label: '收到对方回复', icon: IconMailReadOutlineRegular },
-    incoming: { label: '收到消息', icon: IconMailUnreadOutlineRegular },
+    incoming: { label: '收到消息', icon: IconMailReadOutlineRegular },
   }
   function relayIcon(key) {
-    const {icon,badge} = relayKinds[key]
-    return h('span', { className:'kode-relay-icon', 'data-relay-kind':key, 'aria-hidden':true },
-      h(icon,{size:16}), badge && h('span',{className:'kode-relay-badge'},h(badge,{size:7})))
+    return h('span', { className:'kode-relay-icon', 'data-relay-kind':key, 'aria-hidden':true }, h(relayKinds[key].icon,{size:16}))
   }
   // Agent prose reads as Markdown, but a panel body must stay quiet: images become
   // links (MarkdownText would fetch remote ones), single newlines keep their line
