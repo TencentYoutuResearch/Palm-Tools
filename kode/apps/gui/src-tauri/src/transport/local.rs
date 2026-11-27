@@ -98,6 +98,15 @@ impl SessionTransport for LocalTransport {
             backend = crate::shared_agents::configuration(&spec.backend_key,spec.resume_session_uuid.as_deref()).await
                 .map_err(TransportError::BadRequest)?;
         }
+        if let Some(persona) = spec.system_prompt.as_deref().filter(|s| !s.trim().is_empty()) {
+            if let Some(args) = kode_core::session::inject_persona(
+                &backend.args,
+                backend.protocol_key(&spec.backend_key),
+                persona,
+            ) {
+                backend.args = args;
+            }
+        }
 
         let id = self.ctx.alloc_id();
         let cwd_path = spec
@@ -355,6 +364,7 @@ mod tests {
                 permission_mode: None,
                 model: None,
                 memory_context: None,
+                system_prompt: None,
                 terminal_dark: None,
             })
             .await
@@ -403,6 +413,7 @@ mod tests {
                 permission_mode: None,
                 model: None,
                 memory_context: None,
+                system_prompt: None,
                 terminal_dark: None,
             })
             .await
@@ -448,6 +459,7 @@ mod tests {
                 permission_mode: None,
                 model: None,
                 memory_context: None,
+                system_prompt: None,
                 terminal_dark: None,
             })
             .await

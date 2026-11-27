@@ -857,3 +857,255 @@ async fn quiet_hours_hold_bot_notifications_and_release_them_as_one() {
     assert!(digest["body"].as_str().unwrap().contains("Kit 在等你处理"), "{digest}");
     assert!(feed.try_recv().is_err());
 }
+
+#[tokio::test]
+async fn tui_bot_sessions_expose_orchestration_tools_dispatch_workers_and_coexist_with_dsh() {
+    let s = server().await;
+    let recorded = Arc::new(Mutex::new(Recorded::default()));
+    let _host = host(s.ctx.clone(), recorded.clone());
+    let http = reqwest::Client::new();
+    let workdir = tempfile::tempdir().unwrap();
+    let workdir_path = workdir.path().to_string_lossy().into_owned();
+
+    let kit = bots(
+        &s,
+        json!({"action":"upsert","bot":{"name":"Kit","backend_key":"claude","permission_ceiling":"acceptEdits"}}),
+    )
+    .await;
+    let kit_id = kit["default_bot"].as_str().unwrap().to_owned();
+
+    // Publish a GUI main session and an unrelated GUI session via HTTP so native credentials exist.
+    let pub_res: Value = http
+        .post(format!("{}/api/v1/messaging/runtime/publish", s.url))
+        .bearer_auth(ADMIN)
+        .json(&json!({
+            "runtime": "gui",
+            "boot_id": BOOT,
+            "sessions": [
+                {
+                    "session_id": "gui:bot-main",
+                    "dto": {"title": "Kit", "backend_key": "claude", "status": "idle", "cwd": workdir_path, "session_uuid": "uuid-bot-main"},
+                    "events": []
+                },
+                {
+                    "session_id": "gui:plain",
+                    "dto": {"title": "Plain", "backend_key": "claude", "status": "idle", "cwd": workdir_path, "session_uuid": "uuid-plain"},
+                    "events": []
+                }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let bot_pub_id = pub_res["sessions"][0]["id"].as_u64().unwrap();
+    let plain_pub_id = pub_res["sessions"][1]["id"].as_u64().unwrap();
+
+    // Even if main_session was recorded by DSH ("session-dsh-main"), dsh-session-index alias bridges it to GUI ("uuid-bot-main")!
+    s.hub
+        .store
+        .save_document(
+            "dsh-session-index",
+            0,
+            json!({
+                "native_sessions": [
+                    {"session_id": "uuid-bot-main", "dsh_session_id": "session-dsh-main"}
+                ]
+            }),
+        )
+        .unwrap();
+    bots(
+        &s,
+        json!({"action":"set_main_session","id":kit_id,"session":{"runtime":"dsh","session_id":"session-dsh-main"}}),
+    )
+    .await;
+
+    let bot_cred: Value = http
+        .post(format!("{}/api/v1/messaging/native/{bot_pub_id}/credential", s.url))
+        .bearer_auth(ADMIN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let bot_token = bot_cred["token"].as_str().unwrap();
+
+    let plain_cred: Value = http
+        .post(format!("{}/api/v1/messaging/native/{plain_pub_id}/credential", s.url))
+        .bearer_auth(ADMIN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let plain_token = plain_cred["token"].as_str().unwrap();
+
+    // Plain session gets orchestration tools, but NOT bot_* tools.
+    let plain_tools: Value = http
+        .get(format!("{}/api/v1/messaging/session-tools", s.url))
+        .bearer_auth(plain_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let plain_names: Vec<&str> = plain_tools["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    assert!(plain_names.contains(&"kode_sessions_create"), "{plain_names:?}");
+    assert!(!plain_names.contains(&"bot_task_update"), "{plain_names:?}");
+
+    // Bridged TUI bot session gets all 8 orchestration + bot tools!
+    let bot_tools: Value = http
+        .get(format!("{}/api/v1/messaging/session-tools", s.url))
+        .bearer_auth(bot_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let bot_names: Vec<&str> = bot_tools["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    for expected in [
+        "kode_sessions_create",
+        "kode_progress_snapshot",
+        "bot_tasks_list",
+        "bot_task_update",
+        "bot_plan_propose",
+        "bot_schedules_list",
+        "bot_schedule_upsert",
+        "bot_schedule_delete",
+    ] {
+        assert!(bot_names.contains(&expected), "missing {expected} in {bot_names:?}");
+    }
+
+    // Create a tracked task on the bot's board via session-tools/call.
+    let created_task: Value = http
+        .post(format!("{}/api/v1/messaging/session-tools/call", s.url))
+        .bearer_auth(bot_token)
+        .json(&json!({
+            "name": "bot_task_update",
+            "arguments": {"title": "Verify Auth Flow", "detail": "Check refresh token"}
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let task_id = created_task["task_id"].as_str().unwrap().to_owned();
+
+    // Permission ceiling non-escalation: bot ceiling is acceptEdits, so bypassPermissions must be 403.
+    let esc = http
+        .post(format!("{}/api/v1/messaging/session-tools/call", s.url))
+        .bearer_auth(bot_token)
+        .json(&json!({
+            "name": "kode_sessions_create",
+            "arguments": {
+                "title": "Auth Token Check",
+                "task": "Run auth tests",
+                "idempotency_key": "idem-esc",
+                "cwd": workdir_path,
+                "permission_mode": "bypassPermissions"
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(esc.status(), 403);
+
+    // Spawn worker session in TUI linked to task_id!
+    let spawned: Value = http
+        .post(format!("{}/api/v1/messaging/session-tools/call", s.url))
+        .bearer_auth(bot_token)
+        .json(&json!({
+            "name": "kode_sessions_create",
+            "arguments": {
+                "title": "Auth Token Check",
+                "task": "Run auth tests and summarize",
+                "idempotency_key": "idem-worker-1",
+                "cwd": workdir_path,
+                "task_id": task_id,
+                "runtime": "tui"
+            }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(spawned["created"], true, "{spawned}");
+    assert_eq!(spawned["runtime"], "tui", "{spawned}");
+
+    // Idempotent retry returns the exact same session; mismatched parameters return 409 CONFLICT.
+    let retry: Value = http
+        .post(format!("{}/api/v1/messaging/session-tools/call", s.url))
+        .bearer_auth(bot_token)
+        .json(&json!({
+            "name": "kode_sessions_create",
+            "arguments": {
+                "title": "Auth Token Check",
+                "task": "Run auth tests and summarize",
+                "idempotency_key": "idem-worker-1",
+                "cwd": workdir_path,
+                "task_id": task_id,
+                "runtime": "tui"
+            }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(retry["target"], spawned["target"]);
+    let conflict = http
+        .post(format!("{}/api/v1/messaging/session-tools/call", s.url))
+        .bearer_auth(bot_token)
+        .json(&json!({
+            "name": "kode_sessions_create",
+            "arguments": {
+                "title": "Different Subtask Title",
+                "task": "Run auth tests and summarize",
+                "idempotency_key": "idem-worker-1",
+                "cwd": workdir_path,
+                "runtime": "tui"
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), 409);
+
+    // Worker finishes turn -> post_to_main resolves the live GUI session across the DSH<->GUI alias bridge!
+    publish_as(
+        &s.ctx,
+        "gui:1:1",
+        "claude",
+        "idle",
+        json!([
+            {"key":"wk1","kind":"session.status","payload":{"status":"busy"}},
+            {"key":"wk2","kind":"message","payload":{"id":"wk2","role":"assistant","text":"Auth refresh token verified."}},
+            {"key":"wk3","kind":"session.status","payload":{"status":"idle"}},
+        ]),
+    );
+    let delivered = inputs_containing(&recorded, "【任务 · Verify Auth Flow】").await;
+    assert!(delivered.contains("Auth refresh token verified."), "{delivered}");
+}
+

@@ -110,6 +110,17 @@ impl Client {
             .into_iter()
             .map(|tool| json!({"name":tool["name"],"description":tool["description"],"inputSchema":tool["inputSchema"],"x-kode-extension":true}))
             .collect();
+        let orchestration: Vec<Value> = if settings["messaging_enabled"] == true {
+            self.call("session-tools", None)
+                .await
+                .map(|value| value["tools"].as_array().cloned().unwrap_or_default())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|tool| json!({"name":tool["name"],"description":tool["description"],"inputSchema":tool["inputSchema"],"x-kode-session-tool":true}))
+                .collect()
+        } else {
+            vec![]
+        };
         let builtin: Vec<Value> = tool_definitions(capabilities["message_titles"] == true, capabilities["queued_messages"] == true)
             .into_iter()
             .filter(|tool| {
@@ -126,13 +137,18 @@ impl Client {
                 }
             })
             .collect();
-        Ok(builtin.into_iter().chain(contributed).collect())
+        Ok(builtin.into_iter().chain(orchestration).chain(contributed).collect())
     }
     async fn execute(&self, name: &str, args: Value) -> Result<Value> {
         let tools = self.tools().await?;
         let Some(tool) = tools.iter().find(|tool| tool["name"] == name) else {
             bail!("This capability is disabled in Kode settings")
         };
+        if tool["x-kode-session-tool"] == true {
+            return self
+                .call("session-tools/call", Some(json!({"name":name,"arguments":args})))
+                .await;
+        }
         if tool["x-kode-extension"] == true {
             let result = self.call("extensions/tools/call", Some(json!({"name":name,"arguments":args}))).await?;
             let text = result["text"].as_str().unwrap_or_default().to_owned();
@@ -152,7 +168,13 @@ impl Client {
                 let mut result=self.call("sessions",None).await?;
                 if let Some(query)=args["query"].as_str().map(|q|q.trim().to_lowercase()).filter(|q|!q.is_empty()){
                     if let Some(rows)=result["sessions"].as_array_mut(){rows.retain(|row|format!("{} {}",row["title"].as_str().unwrap_or_default(),row["address"]).to_lowercase().contains(&query));}
-                }Ok(result)
+                }
+                if let Ok(catalog)=self.call("session-tools/catalog",None).await {
+                    for key in ["workspaces","agentConfigurations","sessionNaming"] {
+                        if !catalog[key].is_null() { result[key]=catalog[key].clone(); }
+                    }
+                }
+                Ok(result)
             },
             "kode_sessions_send" => {
                 let mut body = json!({
@@ -209,7 +231,7 @@ fn tool_definitions(message_titles: bool, queued_messages: bool) -> Vec<Value> {
         });
     }
     vec![
-    definition("kode_sessions_list","Find local and SSH conversations by name. Inspect matches before sending; never guess addresses.",json!({"query":{"type":"string"}}),&[]),
+    definition("kode_sessions_list","Find local and SSH conversations by name, plus workspaces, enabled agents, and sessionNaming policy for kode_sessions_create. Inspect matches before sending; never guess addresses.",json!({"query":{"type":"string"}}),&[]),
     definition("kode_sessions_send",&send_description,send_properties,&["node_id","session_id","content","idempotency_key"]),
     definition("kode_sessions_message_read","Read authenticated full-message pages. Offset counts Unicode code points; follow next until null. A preview is not proof of consumption.",json!({"message_id":{"type":"string"},"offset":{"type":"integer","minimum":0}}),&["message_id"]),
     definition("kode_sessions_delivery_status","Read persisted input delivery evidence. Queued is not consumed; consumed is not task completion.",json!({"message_id":{"type":"string"}}),&["message_id"]),
@@ -249,7 +271,7 @@ pub async fn run() -> Result<()> {
             if !active {return if method=="tools/list"{Ok(json!({"tools":[]}))}else{bail!("Session tools require a Kode-owned GUI session")}}
             if client.is_none(){client=Some(Client::bootstrap().await?)}
             let client=client.as_ref().context("Session client unavailable")?;
-            if method=="tools/list"{return Ok(json!({"tools":client.tools().await?.into_iter().map(|mut tool|{ if let Some(map)=tool.as_object_mut(){map.remove("x-kode-extension");} tool }).collect::<Vec<_>>()}))}
+            if method=="tools/list"{return Ok(json!({"tools":client.tools().await?.into_iter().map(|mut tool|{ if let Some(map)=tool.as_object_mut(){map.remove("x-kode-extension");map.remove("x-kode-session-tool");} tool }).collect::<Vec<_>>()}))}
             if method=="tools/call"{
                 let result=client.execute(request["params"]["name"].as_str().unwrap_or_default(),request["params"]["arguments"].clone()).await;
                 return Ok(match result{Ok(value)=>json!({"content":[{"type":"text","text":match value { Value::String(text)=>text, value=>value.to_string() }}]}),Err(error)=>json!({"isError":true,"content":[{"type":"text","text":error.to_string()}]})})

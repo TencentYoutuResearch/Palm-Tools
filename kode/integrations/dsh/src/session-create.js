@@ -40,7 +40,7 @@ export function installSessionCreator(ctx, backend, nodeId) {
     const title = required(input.title, 'title', 160), task = required(input.task, 'task', 64000)
     const key = createHash('sha256').update(`${source?.id ?? input.requester ?? 'owner'}:${required(input.idempotency_key, 'idempotency key', 160)}`).digest('hex')
     const modelRequest = input.model === undefined ? undefined : required(input.model, 'model', 256)
-    const identity = { title, task, cwd: input.cwd, workspace: input.workspace, workspace_id: input.workspace_id, agent: input.agent, permission: input.permission }
+    const identity = { title, task, cwd: input.cwd, workspace: input.workspace, workspace_id: input.workspace_id, agent: input.agent, permission: input.permission, initial_message_source: input.initial_message_source }
     const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
     const fingerprint = digest({ ...identity, model: modelRequest })
     const running = jobs.get(key)
@@ -138,7 +138,7 @@ export function installSessionCreator(ctx, backend, nodeId) {
       await ctx.get('sessionController').rename({ sessionId: agent.id, title })
       const delegated = Boolean(source || input.requester)
       await update(state => { state.creations[key].stage = delegated ? 'ready' : 'submitting' })
-      if (!delegated) agent.followup({ id: record.inputId, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: task }] })
+      if (!delegated) agent.followup({ id: record.inputId, role: 'user', source: { kind: input.initial_message_source ?? 'user' }, content: [{ type: 'text', text: task }] })
       await agent.ctx.sessions.flush(agent.session)
       const created = { address: { node_id: nodeId, session_id: agent.id }, title, agent: profile.name, model, workspace: { id: workspace.id, name: workspace.title, path: workspace.path }, cwd: agent.session.header.cwd, status: delegated ? 'ready' : 'started' }
       await update(state => { state.creations[key].stage = created.status; state.creations[key].result = created })

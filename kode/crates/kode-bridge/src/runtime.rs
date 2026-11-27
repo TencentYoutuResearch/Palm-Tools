@@ -531,6 +531,94 @@ impl Registry {
         guard.as_ref()?.query_row("SELECT id FROM runtime_sessions WHERE runtime=?1 AND native_id=?2", [runtime, native], |r| r.get(0)).optional().ok().flatten()
     }
 
+    /// Resolve a session across TUI (`gui`) and `dsh` by native id, CLI
+    /// `session_uuid`, `native_thread_id`, `kode:runtime:gui:<id>`, or known
+    /// aliases, preferring a currently live (non-exited, owner_alive) session.
+    pub fn resolve_live(&self, preferred_runtime: &str, session_id: &str, aliases: &[String]) -> Option<u64> {
+        let mut keys: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        if !session_id.is_empty() {
+            keys.insert(session_id);
+        }
+        for alias in aliases {
+            if !alias.is_empty() {
+                keys.insert(alias.as_str());
+            }
+        }
+        if keys.is_empty() {
+            return None;
+        }
+        let snaps = self.snapshots();
+        let matches = |snap: &Value| -> bool {
+            let Some(local_id) = snap["local_id"].as_u64() else {
+                return false;
+            };
+            let gui_key = format!("kode:runtime:gui:{local_id}");
+            if keys.contains(gui_key.as_str()) {
+                return true;
+            }
+            let dto = &snap["dto"];
+            for field in ["runtime_session_id", "session_uuid", "native_thread_id"] {
+                if dto[field].as_str().is_some_and(|v| keys.contains(v)) {
+                    return true;
+                }
+            }
+            false
+        };
+        let is_live = |snap: &Value| -> bool {
+            let dto = &snap["dto"];
+            dto["status"] != "exited"
+                && dto["runtime_online"] == true
+                && (dto["native_process_id"].is_null() || dto["owner_alive"] == true)
+        };
+        // 1. Live session in preferred runtime.
+        if let Some(id) = snaps
+            .iter()
+            .filter(|s| is_live(s) && s["dto"]["runtime"].as_str() == Some(preferred_runtime) && matches(s))
+            .filter_map(|s| s["local_id"].as_u64())
+            .last()
+        {
+            return Some(id);
+        }
+        // 2. Live session in any attached runtime (seamless TUI <-> DSH handoff).
+        if let Some(id) = snaps
+            .iter()
+            .filter(|s| is_live(s) && matches(s))
+            .filter_map(|s| s["local_id"].as_u64())
+            .last()
+        {
+            return Some(id);
+        }
+        None
+    }
+
+    /// Resolve a live session first, falling back to any historical published row.
+    pub fn resolve_any(&self, runtime: &str, session_id: &str, aliases: &[String]) -> Option<u64> {
+        if let Some(id) = self.resolve_live(runtime, session_id, aliases) {
+            return Some(id);
+        }
+        if let Some(id) = session_id
+            .strip_prefix("kode:runtime:gui:")
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|id| self.contains(*id))
+        {
+            return Some(id);
+        }
+        if let Some(id) = self.find(runtime, session_id) {
+            return Some(id);
+        }
+        let snaps = self.snapshots();
+        snaps
+            .iter()
+            .filter(|s| {
+                let dto = &s["dto"];
+                ["runtime_session_id", "session_uuid", "native_thread_id"]
+                    .iter()
+                    .any(|f| dto[*f].as_str().is_some_and(|v| v == session_id || aliases.iter().any(|a| a == v)))
+            })
+            .filter_map(|s| s["local_id"].as_u64())
+            .last()
+    }
+
     pub async fn command(
         &self,
         id: u64,

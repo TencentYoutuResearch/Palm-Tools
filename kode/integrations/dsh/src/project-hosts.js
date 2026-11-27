@@ -19,6 +19,7 @@ import { registerNativeSessionDirectory } from './native-session-directory.js'
 import { deployRemote, deploymentHost, DEPLOY_STEPS } from './remote-deploy.js'
 import { registerWorktreeApi } from './worktree-api.js'
 import { registerSessionEnvironment } from './session-environment.js'
+import { registerGitChangesApi } from './git-changes-api.js'
 import { registerBrowserApi } from './browser-host.js'
 import { prepareLocalRecovery, localRecoverySupported } from './service-recovery.js'
 const PATH = '/api/kode/project-hosts'
@@ -400,6 +401,7 @@ export class ProjectHosts {
 export async function registerProjectHosts(ctx, config) {
   ctx.effect(() => registerWorktreeApi(ctx, config), 'kode.worktree-api')
   ctx.effect(() => registerSessionEnvironment(ctx), 'kode.session-environment')
+  ctx.effect(() => registerGitChangesApi(ctx), 'kode.git-changes-api')
   ctx.effect(() => registerBrowserApi(ctx, { ...config, browserProfileDirectory: config.browserProfileDirectory ?? join(dirname(config.stateFile ?? join(homedir(), '.config/kode/owners.json')), 'sidebar-browser') }), 'kode.browser-api')
   const manager = new ProjectHosts(ctx, config); await manager.load()
   ctx.provide('kodeProjectHosts', manager)

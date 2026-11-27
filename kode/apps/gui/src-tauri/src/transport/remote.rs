@@ -1179,6 +1179,7 @@ mod tests {
                 permission_mode: None,
                 model: None,
                 memory_context: None,
+                system_prompt: None,
                 terminal_dark: None,
             })
             .await

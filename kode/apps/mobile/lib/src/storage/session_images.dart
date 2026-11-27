@@ -6,63 +6,32 @@
 // again. The OS may purge the cache early; a missing copy is fetched again.
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../api/api_client.dart';
+import '../protocol/protocol.dart';
 
-/// `{ id, mime, size }` as carried in a `message` or `tool_use` payload.
-class SessionImageRef {
-  final String id;
-  final String mime;
-  final int size;
-
-  const SessionImageRef({
-    required this.id,
-    required this.mime,
-    required this.size,
-  });
-
-  static final _id = RegExp(r'^[0-9a-f]{32}$');
-
-  String get extension => switch (mime) {
-    'image/jpeg' => 'jpg',
-    'image/gif' => 'gif',
-    'image/webp' => 'webp',
-    _ => 'png',
-  };
-
-  String get name => 'kode-$id.$extension';
-
-  /// Valid refs in [raw]; anything else in the list is skipped, so a
-  /// malformed id can never name a path outside the cache.
-  static List<SessionImageRef> listFrom(Object? raw) {
-    if (raw is! List) return const [];
-    return [
-      for (final item in raw)
-        if (item is Map &&
-            item['id'] is String &&
-            _id.hasMatch(item['id'] as String))
-          SessionImageRef(
-            id: item['id'] as String,
-            mime: item['mime'] as String? ?? 'image/png',
-            size: (item['size'] as num?)?.toInt() ?? 0,
-          ),
-    ];
-  }
-}
+export '../protocol/protocol.dart' show SessionImageRef;
 
 class SessionImageStore {
-  SessionImageStore._();
+  SessionImageStore._([Future<Directory> Function()? baseDir])
+    : _baseDir = baseDir ?? getApplicationCacheDirectory;
 
   static final instance = SessionImageStore._();
 
+  @visibleForTesting
+  SessionImageStore.withCacheDirectory(Directory dir)
+    : _baseDir = (() async => dir);
+
   static const retention = Duration(days: 7);
 
+  final Future<Directory> Function() _baseDir;
   final Map<String, Future<File>> _inflight = {};
   Future<Directory>? _dir;
 
   Future<Directory> _directory() => _dir ??= () async {
-    final base = await getApplicationCacheDirectory();
+    final base = await _baseDir();
     final dir = Directory('${base.path}/kode-session-images');
     await dir.create(recursive: true);
     // Before any download starts, so a fresh `.part` is never swept.
@@ -72,10 +41,11 @@ class SessionImageStore {
 
   /// The local copy of [ref], downloading it through [api] on first use.
   Future<File> fetch(SessionImageRef ref, ApiClient api) {
-    return _inflight[ref.id] ??= _fetch(
-      ref,
-      api,
-    ).whenComplete(() => _inflight.remove(ref.id));
+    return _inflight[ref.id] ??= _fetch(ref, api).whenComplete(() {
+      // Block body is mandatory: `Map.remove` returns the `Future<File>` value
+      // itself, which would make `whenComplete` await itself forever.
+      _inflight.remove(ref.id);
+    });
   }
 
   Future<File> _fetch(SessionImageRef ref, ApiClient api) async {

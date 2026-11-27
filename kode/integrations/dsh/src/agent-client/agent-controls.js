@@ -56,7 +56,7 @@
     if (!actions?.openSection) throw new Error('设置尚未就绪，请稍后重试。')
     actions.openSection(section)
   }
-  let requestedProfile, requestedServiceHost, requestedSettingsSection, openKodeSettings, openBotsPage, openMemoryPage, requestedBotStart, requestedBotWatches, requestedBotEdit, requestedBotProfile
+  let requestedProfile, requestedServiceHost, requestedSettingsSection, openKodeSettings, closeKodePanel, openBotsPage, openBotChat, openMemoryPage, requestedBotStart, requestedBotWatches, requestedBotEdit, requestedBotProfile, requestedBotConnectors, requestedBotTasks
   function AgentControl({ sessionId, sessions, remote, slots }) {
     const { data, busy, error, store, id } = useDirectory(sessionId, sessions)
     const [open, setOpen] = useState(false), [navigationError, setNavigationError] = useState('')

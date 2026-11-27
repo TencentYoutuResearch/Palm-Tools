@@ -99,6 +99,40 @@ void main() {
       ),
     );
   });
+
+  test('SessionImageStore.fetch resolves on download and cache hit', () async {
+    final tmp = Directory.systemTemp.createTempSync('kode-session-images-test-');
+    addTearDown(() => tmp.deleteSync(recursive: true));
+    final store = SessionImageStore.withCacheDirectory(tmp);
+
+    final bytes = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    var hits = 0;
+    final (_, api) = await _serve((req) async {
+      hits++;
+      await _json(req, 200, {
+        'id': _id,
+        'mime': 'image/png',
+        'size': bytes.length,
+        'offset': 0,
+        'data': base64Encode(bytes),
+        'complete': true,
+      });
+    });
+
+    final ref = const SessionImageRef(id: _id, mime: 'image/png', size: 8);
+    final first = await store
+        .fetch(ref, api)
+        .timeout(const Duration(seconds: 3));
+    expect(first.existsSync(), isTrue);
+    expect(first.readAsBytesSync(), bytes);
+    expect(hits, 1);
+
+    final second = await store
+        .fetch(ref, api)
+        .timeout(const Duration(seconds: 3));
+    expect(second.path, first.path);
+    expect(hits, 1);
+  });
 }
 
 class _CollectSink implements IOSink {

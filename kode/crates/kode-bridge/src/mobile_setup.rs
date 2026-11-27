@@ -12,6 +12,10 @@ struct MobileCreate {
     permission_mode: Option<String>,
     #[serde(default)]
     system_prompt: Option<String>,
+    #[serde(default)]
+    resume_session_uuid: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
 }
 
 pub async fn execute(ctx: Arc<Ctx>, kind: &str, payload: Value) -> (u16, Value) {
@@ -152,7 +156,15 @@ async fn execute_inner(ctx: Arc<Ctx>, kind: &str, payload: Value) -> Result<Valu
             }) {
                 return Err(ApiError::BadRequest("Unsupported permission mode".into()));
             }
-            let cfg = ctx.backend_for_session(&req.backend_key, None).ok()
+            let resume_uuid = req
+                .resume_session_uuid
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
+            let cfg = ctx
+                .backend_for_session(&req.backend_key, resume_uuid.as_deref())
+                .ok()
                 .filter(|cfg| cfg.is_enabled() && backend_probe::which(&cfg.command).is_some())
                 .ok_or_else(|| {
                     ApiError::BadRequest("Backend is unavailable on this desktop".into())
@@ -181,15 +193,21 @@ async fn execute_inner(ctx: Arc<Ctx>, kind: &str, payload: Value) -> Result<Valu
             let persona = req.system_prompt.as_deref().map(|persona| {
                 kode_core::session::inject_persona(&cfg.args, cfg.protocol_key(&req.backend_key), persona).is_some()
             });
-            let Json(dto) = create_session(
-                Extension(ctx),
+            let requested_title = req
+                .title
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && s.chars().count() <= 200)
+                .map(str::to_owned);
+            let Json(mut dto) = create_session(
+                Extension(ctx.clone()),
                 Json(CreateSessionReq {
                     transport: None,
                     backend_key: req.backend_key,
                     cols: None,
                     rows: None,
                     cwd: Some(cwd.to_string_lossy().into_owned()),
-                    resume_session_uuid: None,
+                    resume_session_uuid: resume_uuid,
                     permission_mode: req.permission_mode,
                     model: req.model,
                     memory_context: None,
@@ -201,6 +219,22 @@ async fn execute_inner(ctx: Arc<Ctx>, kind: &str, payload: Value) -> Result<Valu
                 }),
             )
             .await?;
+            if let Some(title) = requested_title {
+                let mut updated_dto = None;
+                if let Some(s) = ctx.sessions.lock().get_mut(&dto.id) {
+                    s.state.title = title.clone();
+                    s.state.title_pinned = true;
+                    dto.title = title;
+                    updated_dto = Some(session_to_dto(s));
+                }
+                if let Some(snap_dto) = updated_dto {
+                    ctx.bus.emit(EventEnvelope::new(
+                        dto.id,
+                        "session.updated",
+                        serde_json::to_value(snap_dto).unwrap_or_default(),
+                    ));
+                }
+            }
             let mut value = serde_json::to_value(dto).map_err(|e| ApiError::Internal(e.to_string()))?;
             if let Some(applied) = persona {
                 value["system_prompt"] = json!(if applied { "applied" } else { "unsupported" });

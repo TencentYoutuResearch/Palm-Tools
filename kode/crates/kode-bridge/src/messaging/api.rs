@@ -95,6 +95,7 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
         .route("/api/v1/messaging/cloud/account/sign_in", post(cloud_account_sign_in))
         .route("/api/v1/messaging/cloud/account/sign_out", post(cloud_account_sign_out))
         .route("/api/v1/messaging/cloud/account/methods", post(cloud_account_methods))
+        .route("/api/v1/messaging/cloud/account/default_relay", get(cloud_account_default_relay).post(cloud_account_default_relay))
         .route("/api/v1/messaging/cloud/account/linked", post(cloud_account_linked))
         .route("/api/v1/messaging/cloud/account/palmx/start", post(cloud_palmx_start))
         .route("/api/v1/messaging/cloud/account/palmx/poll", post(cloud_palmx_poll))
@@ -192,7 +193,16 @@ async fn remove_peer(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(input): Jso
     Ok(Json(json!({"removed":true})))
 }
 fn document_key(key: &str) -> Result<()> {
-    if !matches!(key, "agents" | "ssh-hosts" | "session-index" | "workspaces") {
+    if !matches!(
+        key,
+        "agents"
+            | "ssh-hosts"
+            | "session-index"
+            | "workspaces"
+            | "bot-connectors"
+            | "bot-voice"
+            | "wecom-bridge"
+    ) {
         return Err(Error(StatusCode::BAD_REQUEST, "unknown workbench document".into()));
     }
     Ok(())
@@ -225,10 +235,15 @@ async fn bot_roster(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<se
     // Front ends that run a bot outside the GUI runtime (dsh) send this text
     // themselves; one formatter keeps every runtime's persona identical.
     let personas: serde_json::Map<String, serde_json::Value> = roster.bots.iter().map(|bot| (bot.id.clone(), json!(bot.persona_prompt()))).collect();
+    let effective_prompts: serde_json::Map<String, serde_json::Value> = roster.bots.iter().map(|bot| (bot.id.clone(), json!(super::bot_prompt::effective_prompt(&hub, bot)))).collect();
+    let index_doc = hub.store.document("session-index").unwrap_or_default();
+    let runtime_snaps = hub.ctx.upgrade().map(|ctx| ctx.runtimes.snapshots()).unwrap_or_default();
+    let alias_graph = super::bot_prompt::build_session_aliases(&index_doc, &runtime_snaps);
+    let (main_aliases, adopted_aliases) = super::bot_prompt::roster_session_maps(&roster, &alias_graph);
     let root = roster.root();
     let workspaces: serde_json::Map<String, serde_json::Value> = roster.bots.iter().map(|bot| (bot.id.clone(), json!(bot.workspace(&root)))).collect();
     let homes: serde_json::Map<String, serde_json::Value> = roster.bots.iter().map(|bot| (bot.id.clone(), json!(bot.home(&root)))).collect();
-    Ok(Json(json!({"revision":revision,"bots":roster.bots,"default_bot":roster.default_bot,"persona_prompts":personas,"workspaces":workspaces,"homes":homes,"adopted":roster.adopted,"quiet_hours":roster.quiet_hours,"root":root,"default_root":super::bots::default_root()})))
+    Ok(Json(json!({"revision":revision,"bots":roster.bots,"default_bot":roster.default_bot,"persona_prompts":personas,"effective_prompts":effective_prompts,"main_aliases":main_aliases,"adopted_aliases":adopted_aliases,"workspaces":workspaces,"homes":homes,"adopted":roster.adopted,"quiet_hours":roster.quiet_hours,"root":root,"default_root":super::bots::default_root()})))
 }
 async fn change_bots(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(change): Json<super::bots::Change>) -> Result<Json<serde_json::Value>> {
     admin(&hub,&h)?;
@@ -794,6 +809,15 @@ async fn cloud_account_methods(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(i
     admin(&hub,&h)?;let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;
     let methods=crate::cloud_sync::CloudSyncManager::new(ctx).account_login_methods(input.server_url).await.map_err(|e|Error(StatusCode::BAD_GATEWAY,e))?;
     Ok(Json(json!({"methods":methods})))
+}
+async fn cloud_account_default_relay(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
+    admin(&hub,&h)?;
+    let url = std::env::var("KODE_RELAY_URL")
+        .ok()
+        .or_else(|| kode_core::config::Config::load().account.relay_url)
+        .map(|u| u.trim().to_string())
+        .unwrap_or_default();
+    Ok(Json(json!({"server_url": url})))
 }
 async fn cloud_account_linked(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<serde_json::Value>> {
     admin(&hub,&h)?;let ctx=hub.ctx.upgrade().ok_or_else(||Error(StatusCode::SERVICE_UNAVAILABLE,"backend stopping".into()))?;

@@ -152,6 +152,8 @@ pub enum Change {
     SetDefault { id: Option<String> },
     /// Point a bot at its main session, or clear it with `None`.
     SetMainSession { id: String, session: Option<MainSession> },
+    /// Ensure a bot's workspace & home folder exist and repair skill symlinks.
+    PrepareHome { id: String },
     /// Move the folder that holds bots' own workspaces (`None` = default).
     SetRoot { root: Option<String> },
     /// File a dsh session under a bot (`id: None` releases it).
@@ -329,6 +331,14 @@ fn apply(roster: &mut Roster, change: Change, now: u64) -> Result<()> {
             let bot = roster.bots.iter_mut().find(|b| b.id == id).context("unknown bot")?;
             bot.main_session = session;
             bot.updated_at = now;
+        }
+        Change::PrepareHome { id } => {
+            let root = roster.root();
+            let bot = roster.bots.iter().find(|b| b.id == id).context("unknown bot")?;
+            bot.ensure_workspace(&root)?;
+            let home = bot.home(&root);
+            std::fs::create_dir_all(&home).with_context(|| format!("cannot create {}", home.display()))?;
+            super::bot_prompt::repair_bot_skill_links(&home, &bot.skills);
         }
         Change::SetRoot { root } => {
             if root.as_deref().is_some_and(|r| !std::path::Path::new(r).is_absolute()) {

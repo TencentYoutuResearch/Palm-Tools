@@ -166,6 +166,15 @@ pub struct AvatarSet {
     pub name: String,
     /// Four frame data URLs, ready to use as <img src="..."> on the frontend.
     pub frames: Vec<String>,
+    /// Legacy gallery ids that were renamed to `name` in `.dsh-gallery.json`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+    /// Optional scene background data URL (`background.{png,jpg,jpeg,webp}`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background: Option<String>,
+    /// Optional compact banner data URL (`banner.{png,jpg,jpeg,webp}`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub banner: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -406,10 +415,16 @@ fn list_gallery_category(root: &Path) -> Vec<AvatarSet> {
     if !dir.is_dir() {
         return Vec::new();
     }
+    let (renamed, hidden) = read_dsh_gallery_catalog(root);
     let mut dirs: Vec<_> = match std::fs::read_dir(&dir) {
         Ok(e) => e
             .filter_map(Result::ok)
-            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                e.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                    && !name.starts_with('.')
+                    && !name.contains(".backup-")
+            })
             .collect(),
         Err(_) => return Vec::new(),
     };
@@ -418,9 +433,18 @@ fn list_gallery_category(root: &Path) -> Vec<AvatarSet> {
     let mut sets = Vec::new();
     for entry in dirs {
         let id = format!("gallery/{}", entry.file_name().to_string_lossy());
+        if hidden.contains(&id) {
+            continue;
+        }
+        let aliases = aliases_for_gallery_id(&id, &renamed);
         let id_dir = entry.path();
+        let background = read_gallery_media(&id_dir, "background", 16 * 1024 * 1024);
+        let banner = read_gallery_media(&id_dir, "banner", 8 * 1024 * 1024);
         // 单套帧:gallery/<id>/frame-XX.png
-        if let Some(set) = read_avatar_set(&id_dir, &id) {
+        if let Some(mut set) = read_avatar_set(&id_dir, &id) {
+            set.aliases = aliases;
+            set.background = background;
+            set.banner = banner;
             sets.push(set);
             continue;
         }
@@ -428,12 +452,94 @@ fn list_gallery_category(root: &Path) -> Vec<AvatarSet> {
         // 用 idle 作为 gallery 预览;运行时按 status 切到 library[status]
         let idle_dir = id_dir.join("idle");
         if idle_dir.is_dir() {
-            if let Some(set) = read_first_avatar_set(&idle_dir, &id) {
+            if let Some(mut set) = read_first_avatar_set(&idle_dir, &id) {
+                set.aliases = aliases;
+                set.background = background;
+                set.banner = banner;
                 sets.push(set);
             }
         }
     }
     sets
+}
+
+fn read_dsh_gallery_catalog(
+    root: &Path,
+) -> (
+    std::collections::HashMap<String, String>,
+    std::collections::HashSet<String>,
+) {
+    let Ok(raw) = std::fs::read_to_string(root.join(".dsh-gallery.json")) else {
+        return Default::default();
+    };
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Default::default();
+    };
+    let renamed = parsed
+        .get("renamed")
+        .and_then(serde_json::Value::as_object)
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+    let hidden = parsed
+        .get("hidden")
+        .and_then(serde_json::Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    (renamed, hidden)
+}
+
+fn aliases_for_gallery_id(
+    target_id: &str,
+    renamed: &std::collections::HashMap<String, String>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for alias in renamed.keys() {
+        let mut cur = alias.as_str();
+        let mut seen = std::collections::HashSet::new();
+        while let Some(next) = renamed.get(cur) {
+            if !seen.insert(cur) || seen.len() >= 32 {
+                cur = "";
+                break;
+            }
+            cur = next.as_str();
+        }
+        if cur == target_id && alias != target_id {
+            out.push(alias.clone());
+        }
+    }
+    out.sort();
+    out
+}
+
+fn read_gallery_media(dir: &Path, stem: &str, max_bytes: u64) -> Option<String> {
+    use base64::Engine;
+    for (ext, mime) in [
+        ("png", "image/png"),
+        ("jpg", "image/jpeg"),
+        ("jpeg", "image/jpeg"),
+        ("webp", "image/webp"),
+    ] {
+        let path = dir.join(format!("{stem}.{ext}"));
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if !meta.is_file() || meta.len() == 0 || meta.len() > max_bytes {
+            continue;
+        }
+        if let Ok(bytes) = std::fs::read(&path) {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+            return Some(format!("data:{mime};base64,{encoded}"));
+        }
+    }
+    None
 }
 
 /// 读取 dir 下所有完整的 4 帧 avatar set。dir 直接含 frame-XX.png 时返回单套;
@@ -475,6 +581,9 @@ fn read_avatar_set(dir: &Path, name: &str) -> Option<AvatarSet> {
     Some(AvatarSet {
         name: name.to_string(),
         frames,
+        aliases: Vec::new(),
+        background: None,
+        banner: None,
     })
 }
 
@@ -594,6 +703,7 @@ pub async fn spawn_session(
     // Kode xterm 当前主题。`light` / `dark`;缺省时回退到持久化 GUI 主题。
     term_theme: Option<String>,
     transport_kind: Option<String>,
+    system_prompt: Option<String>,
     memory_handle: State<'_, Arc<MemoryHandle>>,
     state: State<'_, AppState>,
 ) -> Result<SpawnedSession, String> {
@@ -675,6 +785,15 @@ pub async fn spawn_session(
     let structured = uses_structured_transport(&endpoint_id, acp_spec.as_ref(), transport_kind.as_deref());
     if structured {
         let mut backend = acp_backend.ok_or("Missing ACP Agent configuration")?;
+        if let Some(persona) = system_prompt.as_deref().filter(|s| !s.trim().is_empty()) {
+            if let Some(args) = kode_core::session::inject_persona(
+                &backend.args,
+                backend.protocol_key(&backend_key),
+                persona,
+            ) {
+                backend.args = args;
+            }
+        }
         let id = state.protocol_ctx.alloc_id();
         let cwd = cwd_path.as_deref().ok_or("Working directory is required")?;
         crate::workbench_state::connection().await.map_err(|e|e.to_string())?;
@@ -737,6 +856,7 @@ pub async fn spawn_session(
         permission_mode,
         model,
         memory_context,
+        system_prompt,
         terminal_dark: Some(crate::term_theme::resolve_terminal_dark(
             term_theme.as_deref(),
         )),

@@ -1,9 +1,73 @@
 /** Shared Kode backend documents. Browser storage and frontend lifetimes own no configuration. */
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { dirname } from 'node:path'
 import { AgentProfiles, normalizeModelDefaults } from './agent-profiles.js'
+
+export function isDocumentUnsupportedError(error) {
+  const message = String(error?.message ?? '')
+  return error?.status === 404 || /unknown workbench document/i.test(message)
+}
+
+export function isDocumentConflictError(error) {
+  const message = String(error?.message ?? '')
+  return error?.status === 409 || /configuration changed|\(409\)/i.test(message)
+}
+
 export class BackendDocument {
-  constructor(client, key) { this.client = client; this.key = key; this.revision = 0 }
-  async read() { const row = await this.client.call(`/api/v1/messaging/workbench/documents/${this.key}`); this.revision = row.revision; return row.value }
-  async write(value) { const row = await this.client.call(`/api/v1/messaging/workbench/documents/${this.key}`, { expected_revision: this.revision, value }); this.revision = row.revision; return row.value }
+  constructor(client, key, { fallbackFile = null, migrateFallback = false } = {}) {
+    this.client = client
+    this.key = key
+    this.revision = 0
+    this.fallbackFile = fallbackFile
+    this.migrateFallback = Boolean(fallbackFile && migrateFallback)
+    this.usingFallback = false
+  }
+  async readFallback() {
+    if (!this.fallbackFile) return null
+    try { return JSON.parse(await readFile(this.fallbackFile, 'utf8')) }
+    catch (error) { if (error?.code === 'ENOENT') return null; throw error }
+  }
+  async writeFallback(value) {
+    if (!this.fallbackFile) throw new Error(`Workbench document ${this.key} is unsupported by this Kode backend`)
+    await mkdir(dirname(this.fallbackFile), { recursive: true, mode: 0o700 })
+    const temporary = `${this.fallbackFile}.${process.pid}.${Date.now()}.tmp`
+    await writeFile(temporary, JSON.stringify(value, null, 2), { mode: 0o600 })
+    await rename(temporary, this.fallbackFile)
+    return value
+  }
+  async read() {
+    if (!this.client?.call) return this.readFallback()
+    try {
+      const row = await this.client.call(`/api/v1/messaging/workbench/documents/${this.key}`)
+      this.revision = row.revision ?? 0
+      this.usingFallback = false
+      if (row.value == null && this.revision === 0 && this.migrateFallback) {
+        const local = await this.readFallback().catch(() => null)
+        if (local != null) return local
+      }
+      return row.value
+    } catch (error) {
+      if (this.fallbackFile && isDocumentUnsupportedError(error)) {
+        this.usingFallback = true
+        return this.readFallback()
+      }
+      throw error
+    }
+  }
+  async write(value) {
+    if (!this.client?.call || this.usingFallback) return this.writeFallback(value)
+    try {
+      const row = await this.client.call(`/api/v1/messaging/workbench/documents/${this.key}`, { expected_revision: this.revision, value })
+      this.revision = row.revision ?? (this.revision + 1)
+      return row.value
+    } catch (error) {
+      if (this.fallbackFile && isDocumentUnsupportedError(error)) {
+        this.usingFallback = true
+        return this.writeFallback(value)
+      }
+      throw error
+    }
+  }
 }
 export class BackendAgentProfiles extends AgentProfiles {
   constructor(client, path) { super(path); this.document = new BackendDocument(client, 'agents'); this.usesSharedRegistry = true }

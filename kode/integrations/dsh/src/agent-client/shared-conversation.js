@@ -83,5 +83,6 @@
       return props.openFile(match[1],{...options,line:options?.line??line})
     },[props.openFile])
     const target = useSyncExternalStore(sharedStore.subscribe, sharedStore.getSnapshot)
+    if (target?.kind === 'remote-device') return h(RemoteDeviceConversation, { key: `remote:${target.device.device_id}:${target.session.id}`, target })
     return target ? h(SharedConversation, { key: `${target.host}:${target.session.id}`, target }) : h(native,{...props,openFile})
   }

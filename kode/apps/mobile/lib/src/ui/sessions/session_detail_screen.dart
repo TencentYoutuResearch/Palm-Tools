@@ -26,12 +26,12 @@ import 'package:speech_to_text/speech_to_text.dart';
 import '../../protocol/attachments.dart';
 import '../../protocol/protocol.dart';
 import '../../state/providers.dart';
-import '../../storage/session_images.dart';
 import '../theme.dart';
 import '../glass.dart';
 import 'attachment_views.dart';
 import 'session_images_view.dart';
 import 'backend_identity.dart';
+import 'session_appearance.dart';
 import 'composer_attachments.dart';
 import 'message_markdown.dart';
 import 'speech_locale.dart';
@@ -934,6 +934,7 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
 
     return GlassScaffold(
       resizeToAvoidBottomInset: false,
+      background: SessionBackgroundLayer(session: summary),
       body: AnimatedPadding(
         padding: EdgeInsets.only(bottom: keyboardInset),
         duration: reduceMotion
@@ -979,6 +980,7 @@ class _SessionDetailScreenState extends ConsumerState<SessionDetailScreen>
                   const SizedBox(width: 10),
                   Expanded(
                     child: _SessionHeaderTitle(
+                      session: summary,
                       backendKey: backendKey,
                       title: displayTitle,
                       status: sessionStatus,
@@ -1637,12 +1639,14 @@ class _VoiceInputRail extends StatelessWidget {
 }
 
 class _SessionHeaderTitle extends StatelessWidget {
+  final SessionDto? session;
   final String backendKey;
   final String title;
   final String status;
   final String? cwd;
 
   const _SessionHeaderTitle({
+    this.session,
     required this.backendKey,
     required this.title,
     required this.status,
@@ -1652,12 +1656,22 @@ class _SessionHeaderTitle extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
+    final botLabel = session?.botName?.trim();
+    final botTagline = session?.botTagline?.trim();
+    final headerTitle =
+        (botLabel != null && botLabel.isNotEmpty && session?.botKind == 'main')
+            ? botLabel
+            : title;
+    final subtitle = (botTagline != null && botTagline.isNotEmpty)
+        ? botTagline
+        : cwd;
     return Row(
       children: [
-        BackendStatusAvatar(
+        SessionStatusAvatar(
+          session: session,
           backendKey: backendKey,
           working: status == 'busy',
-          size: 32,
+          size: 34,
         ),
         const SizedBox(width: 9),
         Expanded(
@@ -1666,7 +1680,7 @@ class _SessionHeaderTitle extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                title,
+                headerTitle,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
@@ -1677,20 +1691,22 @@ class _SessionHeaderTitle extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 2),
-              if (cwd != null && cwd!.isNotEmpty)
+              if (subtitle != null && subtitle.isNotEmpty)
                 Tooltip(
-                  message: cwd!,
+                  message: cwd ?? subtitle,
                   child: Row(
                     children: [
-                      Icon(
-                        Icons.folder_outlined,
-                        size: 11,
-                        color: colors.onSurfaceVariant,
-                      ),
-                      const SizedBox(width: 4),
+                      if (botTagline == null || botTagline.isEmpty) ...[
+                        Icon(
+                          Icons.folder_outlined,
+                          size: 11,
+                          color: colors.onSurfaceVariant,
+                        ),
+                        const SizedBox(width: 4),
+                      ],
                       Expanded(
                         child: Text(
-                          cwd!,
+                          subtitle,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(

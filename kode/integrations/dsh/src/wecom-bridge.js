@@ -12,8 +12,10 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createHash } from 'node:crypto'
 import { accessSync, constants as fsConstants } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { admitHostRequest } from './host-admission.js'
-import { BackendDocument } from './backend-state.js'
+import { BackendDocument, isDocumentConflictError } from './backend-state.js'
 
 const execFileAsync = promisify(execFile)
 const MAX_BODY_BYTES = 32 * 1024
@@ -153,12 +155,13 @@ export function sanitizeWeComConfig(input, current = DEFAULT_WECOM_CONFIG) {
 }
 
 export class WeComBridge {
-  constructor(backend, { runner, binary, logger } = {}) {
+  constructor(backend, { runner, binary, logger, storageFile } = {}) {
     this.backend = backend
     this.binary = resolveWeComBinary(binary)
     this.runner = runner ?? ((args, signal) => execFileAsync(this.binary, args, { timeout: 15000, maxBuffer: 4 * 1024 * 1024, signal }))
     this.logger = logger ?? console
-    this.document = backend ? new BackendDocument(backend, 'wecom-bridge') : null
+    const fallbackFile = storageFile === undefined ? join(homedir(), '.config', 'kode', 'dsh-wecom-bridge.json') : storageFile
+    this.document = backend ? new BackendDocument(backend, 'wecom-bridge', { fallbackFile, migrateFallback: storageFile !== undefined }) : null
     this.config = { ...DEFAULT_WECOM_CONFIG }
     this.seen = new Set()
     this.seeded = false
@@ -201,7 +204,7 @@ export class WeComBridge {
         const current = await this.document.read() ?? {}
         const merged = { ...current, ...next, version: 1 }
         try { await this.document.write(merged); break } catch (error) {
-          if (attempt === 3 || !/configuration changed/.test(error.message)) throw error
+          if (attempt === 3 || !isDocumentConflictError(error)) throw error
         }
       }
     }
@@ -441,6 +444,10 @@ export function registerWeComApi(ctx, bridge) {
       }
       try {
         if (req.method === 'GET') {
+          const query = new URL(req.url ?? '/api/kode/wecom', 'http://host').searchParams
+          if (query.get('sessions') === '1') {
+            return send(200, await bridge.listSessions({ includeGroups: true }))
+          }
           await bridge.loadConfig()
           const status = await bridge.status()
           return send(200, {

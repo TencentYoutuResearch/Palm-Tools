@@ -193,7 +193,9 @@ export class RuntimeBridge {
       return { models: models.map(model => ({ id: model.id, label: model.name })), custom_allowed: true }
     }
     if (kind === 'create_session') {
+      const desktopIds = runtime.profiles.sharedState?.desktop_ids ?? {}
       const profile = runtime.profiles.list().find(profile => `dsh:${profile.id}` === payload.backend_key && runtime.hasRuntime(profile.type))
+        ?? runtime.profiles.list().find(profile => runtime.hasRuntime(profile.type) && (desktopIds[profile.id] === payload.backend_key || profile.type === payload.backend_key || profile.name === payload.backend_key))
       if (!profile) throw new Error('Agent configuration unavailable')
       if (!isAbsolute(payload.cwd ?? '') || !(await stat(payload.cwd)).isDirectory()) throw new Error('Choose an existing absolute directory on the execution Host')
       const provider = profileRoute(profile.id)
@@ -223,6 +225,9 @@ export class RuntimeBridge {
       agent.selectModel(route)
       if (selection.fast !== undefined && selectedModel.fastCapability.transport !== 'model-variant') appendFastPreference(agent.session, route, selection.fast, selectedModel.fastCapability.tier)
       await runtime.profiles.bind(agent.id, profile.id); runtime.recordBinding(agent, profile)
+      if (typeof payload.title === 'string' && payload.title.trim()) {
+        await controller.rename?.({ sessionId: agent.id, title: payload.title.trim().slice(0, 120) }).catch(() => {})
+      }
       await agent.ctx.sessions.flush(agent.session)
       await this.publish()
       let publicId = this.ids.get(created.sessionId)

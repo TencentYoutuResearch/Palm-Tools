@@ -11,6 +11,7 @@ mod ui;
 mod attention;
 mod progress;
 mod schedule;
+mod session_tools;
 mod tasks;
 mod watch_spec;
 mod watches;
@@ -230,6 +231,9 @@ pub(super) fn router(hub: Arc<Hub>) -> Router {
         .route("/api/v1/messaging/extensions/ui/stream", get(ui::stream))
         .route("/api/v1/messaging/extensions/tools", get(tools::list))
         .route("/api/v1/messaging/extensions/tools/call", post(tools::call))
+        .route("/api/v1/messaging/session-tools", get(session_tools::list))
+        .route("/api/v1/messaging/session-tools/catalog", get(session_tools::catalog))
+        .route("/api/v1/messaging/session-tools/call", post(session_tools::call))
         .route("/api/ext/v1/tools/next", get(tools::next))
         .route("/api/ext/v1/tools/:id/result", post(tools::result))
         .route("/api/ext/v1/events", get(events))

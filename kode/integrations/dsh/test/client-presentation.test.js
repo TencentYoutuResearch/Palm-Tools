@@ -68,7 +68,7 @@ test('Standalone Desktop registers the Kode Harness sidebar wordmark', () => {
   assert.equal(visibleText(brand()).trim(), 'Harness')
 })
 
-test('Sidebar Harness reuses only the native inverted badge from BrandWordmark, enlarged to 20px', () => {
+test('Sidebar Harness reuses only the native inverted badge from BrandWordmark at native 14px height', () => {
   const el = (type, props = {}) => ({ type, props })
   // Mirrors dsh-client-ui-primitives BrandWordmark: deepseek letters, the whale, then the badge plate and glyphs.
   const plate = el('rect', { x: '129.348', y: '5.5', width: '52', height: '14', rx: '2', fill: 'currentColor' })
@@ -85,10 +85,10 @@ test('Sidebar Harness reuses only the native inverted badge from BrandWordmark, 
   assert.equal(`${name.props.role}:${name.props['aria-label']}`, 'img:Harness')
   const badge = name.children[0]
   assert.equal(badge.props.className, 'kode-harness-badge')
-  assert.equal(JSON.stringify([badge.props.viewBox, badge.props.width, badge.props.height]), '["129.348 5.5 52 14",74.3,20]')
+  assert.equal(JSON.stringify([badge.props.viewBox, badge.props.width, badge.props.height]), '["129.348 5.5 52 14",52,14]')
   assert.equal(badge.props.children.length, 3); [plate, glyphs, defs].forEach((part, index) => assert.equal(badge.props.children[index], part))
   assert.doesNotMatch(JSON.stringify(badge), /deepseek|whale/)
-  assert.match(source, /\.kode-harness-badge\{display:block;flex:none;margin-inline:3px;overflow:hidden\}/)
+  assert.match(source, /\.kode-harness-badge\{display:block;flex:none;margin-inline:1px;overflow:hidden\}/)
   assert.match(source, /\.kode-brand-name-badge\{transform:none;color:var\(--dsw-alias-label-primary,#EDEFEB\)\}/)
 
   const without = el('svg', { children: [el('path', { d: 'deepseek-d' })] })
@@ -218,6 +218,14 @@ test('context wrappers collapse into fields while mixed user text and images kee
   assert.equal(native.props.node.data.content[1],image)
   assert.equal(JSON.stringify(node),before)
   assert.doesNotMatch(visibleText(tree),/INSTRUCTIONS|environment_context|查看原文/)
+})
+test('bot bootstrap prompts stay hidden while ordinary user messages remain visible',()=>{
+  const c=client()
+  const hidden=internalTree(c,'user','伙伴配置与首次见面提示',{source:{kind:'kode-bootstrap'}})
+  assert.equal(hidden.tree,null)
+  const visible=internalTree(c,'user','这是用户真正发来的第一句话',{source:{kind:'user'}})
+  assert.equal(visible.tree.type,c.native)
+  assert.equal(visible.tree.props.node.data.content[0].text,'这是用户真正发来的第一句话')
 })
 test('ordinary XML, inline tag mentions, fenced examples and incomplete wrappers are untouched',()=>{
   const c=client()
@@ -864,13 +872,13 @@ test('Kode sidebar brand registers the Kode mark and name inside desktop embed',
   const markEl = markEntry.component({ size: 24 })
   assert.equal(markEl.props.className, 'kode-sidebar-brand-mark')
   assert.equal(markEl.children[0].props.src, '/api/kode/avatars/media?type=kode&state=idle')
-  assert.deepEqual([markEl.children[0].props.width, markEl.children[0].props.height], [24, 24])
+  assert.deepEqual([markEl.children[0].props.width, markEl.children[0].props.height], [16, 16])
   assert.equal(markEl.children[0].props.className, 'kode-sidebar-app-icon')
   const wordmark = markEl.children[1]
   const mark = wordmark.type(wordmark.props)
   assert.equal(mark.type, 'span')
   assert.ok(mark.props.className.includes('kode-brand-mark'))
-  assert.deepEqual({ ...mark.props.style, '--kode-brand-ink': undefined }, { width: 58, height: 24, '--kode-brand-ink': undefined })
+  assert.deepEqual({ ...mark.props.style, '--kode-brand-ink': undefined }, { width: 39, height: 16, '--kode-brand-ink': undefined })
   assert.equal(mark.props.style['--kode-brand-ink'], 'url("/api/kode/avatars/media?type=brand-ink&state=idle")')
   assert.equal(mark.children[1].props.src, '/api/kode/avatars/media?type=brand-red&state=idle')
   const heroEntry = c.ctx.slots.entries('conversation.hero.brand.mark').find(row => row.options.name === 'conversation.hero.brand.mark')
@@ -887,8 +895,15 @@ test('Kode sidebar brand registers the Kode mark and name inside desktop embed',
   assert.ok(nameEl.props.className.includes('kode-brand-name'))
   assert.equal(visibleText(nameEl).trim(), 'Harness')
   assert.doesNotMatch(JSON.stringify(nameEl), /Kode|Powered by dsh/)
-  assert.match(source, /kode-sidebar-brand-mark\{[^}]*gap:8px;margin-inline-start:4px/)
+  assert.match(source, /kode-sidebar-brand-mark\{[^}]*gap:5px;margin-inline-start:0/)
   assert.doesNotMatch(source, /logoRow"\]:has\(\.kode-brand-name\)/)
+  // macOS embed narrows the expanded sidebar, places the brand below the traffic lights, blends the top header into the sidebar chrome, rounds the content card below it, and keeps the collapsed rail at its 56px icon width.
+  assert.match(source, /--kode-macos-topbar-height:38px;[\s\S]*--kode-macos-sidebar-trim:48px/)
+  assert.match(source, /html\[data-kode-platform=macos\][^{]*\[class\*="logoRow"\]\[data-window-drag\]\s*\{[^}]*padding:var\(--kode-macos-topbar-height\) 2px 6px 8px/)
+  assert.match(source, /html\[data-kode-platform=macos\][^{]*\[data-phase\] header\[data-window-drag\]\s*\{[^}]*background:var\(--dsw-specific-sidebar-fill\)[^}]*border-bottom:0/)
+  assert.match(source, /html\[data-kode-platform=macos\][^{]*\[data-sidebar-collapsed\]:not\(\[data-sidebar-drawer\]\) > \[class\$="_centerCol"\] \[data-phase\] header\[data-window-drag\][\s\S]*padding-inline-start:calc\(var\(--kode-traffic-lights-inset,78px\) - 56px \+ 10px\)/)
+  assert.match(source, /\[data-phase\] > \[data-conversation-content\][\s\S]*border-radius:16px 0 0 16px/)
+  assert.doesNotMatch(source, /min-width:var\(--kode-traffic-lights-inset/)
 })
 
 test('cross-host arrival waits for both catalogs and binds subscriptions before cancelling draft restoration', () => {
@@ -1654,7 +1669,9 @@ test('interface settings toggle the device service directly and report save fail
 test('settings group small preferences by task, preserve deep links, and keep deployment separate', () => {
  const scope = {}
  vm.runInNewContext(source.slice(source.indexOf('  const settingsSections ='), source.indexOf('  function KodeSettings(')) + '\nthis.categories = settingsSections', scope)
- assert.deepEqual(Array.from(scope.categories, row => row[1]), ['常规', '外观', 'Agent', '插件与集成', '手机与同步', '主机与服务'])
+ assert.deepEqual(Array.from(scope.categories, row => row[1]), ['账号与设备', '常规', '外观', 'Agent', '插件与集成', '手机与同步', '主机与服务'])
+ assert.equal(scope.resolveSettingsSection('account'), 'account')
+ assert.equal(scope.resolveSettingsSection('devices'), 'account')
  assert.equal(scope.resolveSettingsSection('notifications'), 'general')
  assert.equal(scope.resolveSettingsSection('personalization'), 'appearance')
  assert.equal(scope.resolveSettingsSection('appearance'), 'appearance')
@@ -2239,15 +2256,20 @@ test('the proposal card waits for the block to finish and creates once however o
 test('the 伙伴 page lists bots as an avatar rail and registers the kode-bot proposal card', () => {
   const scope = { h: (type, props, ...children) => ({ type, props: props ?? {}, children }), BotAvatar: 'avatar', IconPlusOutlineRegular: 'plus' }
   vm.runInNewContext(source.slice(source.indexOf('  // The roster as a row of avatars'), source.indexOf('  function BotProfilePopover')), scope)
-  const picks = []
-  let created = 0
-  const rail = scope.BotsRail({ bots: [{ id: 'b1', name: 'Kit', tagline: '审 PR' }, { id: 'b2', name: 'Rex' }], selected: 'b1', defaultBot: 'b2', unseen: { b2: 3 }, onSelect: (...args) => picks.push(args), onCreate: () => created++ })
+  const picks = [], hovers = []
+  let created = 0, hoverEnded = 0
+  const rail = scope.BotsRail({ bots: [{ id: 'b1', name: 'Kit', tagline: '审 PR' }, { id: 'b2', name: 'Rex' }], selected: 'b1', defaultBot: 'b2', unseen: { b2: 3 }, onSelect: (...args) => picks.push(args), onHover: (...args) => hovers.push(args), onHoverEnd: () => hoverEnded++, onCreate: () => created++ })
   assert.equal(rail.props['aria-label'], '我的伙伴')
   const [kit, rex, add] = rail.children
   assert.equal(kit.props['aria-pressed'], true)
   assert.equal(kit.props.title, 'Kit · 审 PR')
+  kit.props.onMouseEnter({ currentTarget: 'el' }); kit.props.onMouseLeave()
+  assert.deepEqual(hovers, [['b1', 'el']])
+  assert.equal(hoverEnded, 1)
   kit.props.onClick({ currentTarget: 'el' }); rex.props.onClick({ currentTarget: 'el2' })
   assert.deepEqual(picks, [[null, 'el'], ['b2', 'el2']], 'clicking the open bot closes its card')
+  assert.match(source, /kode-bot-popover\$\{floatingStyle \? ' is-floating' : ''\}/)
+  assert.match(source, /onMouseEnter: event => scheduleHoverOpen\(bot\.id, event\.currentTarget\)/)
   const rexAvatar = rex.children[1]
   assert.ok(rexAvatar.children.some(child => child?.props?.title === '默认伙伴'))
   assert.ok(rexAvatar.children.some(child => child?.props?.className === 'kode-bot-badge'))
@@ -2301,6 +2323,33 @@ test('a proposal keeps known routines and draft mode, and creation sets them up'
   watches.length = 0
   await scope.createBot(parsed.bot, [], undefined, { routines: parsed.routines, enableRoutines: false })
   assert.ok(watches.every(row => row.enabled === false), 'a template used as is starts with routines paused')
+})
+
+test('a proposal parses connectors, creation binds connectors and greets, and the 伙伴 page renders Kanban and Connectors', async () => {
+  const calls = []
+  const scope = botsUiScope({
+    publishBots: () => {}, botsSnapshot: { data: { bots: [] } },
+    botsCall: async body => {
+      calls.push(body)
+      if (body.action === 'upsert') return { bots: [{ id: 'bot_new', name: body.bot.name }] }
+      if (body.action === 'greet') return { sessionId: 'sess_greet_1' }
+      return { bots: [{ id: 'bot_new', name: 'Ops' }] }
+    },
+  })
+  const parsed = scope.botProposal(JSON.stringify({
+    name: 'Ops',
+    backend_key: 'claude',
+    connectors: [{ type: 'wecom', name: '企微值班', config: { chat_id: 'wr1' } }, 'webhook', { type: 'unknown' }],
+  }), [{ backend_key: 'claude' }])
+  assert.deepEqual(plain(parsed.connectors.map(row => [row.type, row.name])), [['wecom', '企微值班'], ['webhook', 'webhook']])
+  const result = await scope.createBot(parsed.bot, [], undefined, { connectors: parsed.connectors, greet: true })
+  assert.equal(result.sessionId, 'sess_greet_1')
+  assert.deepEqual(calls.map(row => row.action), ['upsert', 'connector_upsert', 'connector_upsert', 'greet'])
+  assert.match(source, /function BotsKanbanBoard/)
+  assert.match(source, /function BotConnectorsPanel/)
+  assert.match(source, /function BotQuickCreateForm/)
+  assert.match(source, /\['connectors', '连接器'\]/)
+  assert.match(source, /\['tasks', '看板'\]/)
 })
 
 test('the inbox gathers plans, drafted messages, tasks and runs that need the user', () => {
@@ -2396,6 +2445,53 @@ test('plugin switches drop the duplicate state label and Remove uses the native 
   assert.match(source, /!key && h\('span', null, '需更新服务'\)/)
   assert.match(source,/\.kode-source-remove\{--dsw-alias-button-primary-fill:var\(--dsw-alias-state-error-primary\)/)
   assert.doesNotMatch(source, /kode-mcp-manual/)
+})
+
+test('bot session sidebar registers kanban board and connectors and proposal parses discord/mcp and tone', () => {
+  assert.match(source, /id: 'kode-bot-board', order: 50, label: \(\) => '伙伴看板'/)
+  assert.match(source, /id: 'kode-bot-connectors', order: 60, label: \(\) => '连接器'/)
+  assert.match(source, /VALID_CONNECTOR_TYPES = new Set\(\['wecom', 'webhook', 'github', 'team', 'slack', 'discord', 'linear', 'google', 'mcp'\]\)/)
+  assert.match(source, /VALID_TONES = new Set\(\['colleague', 'direct', 'warm', 'humorous', 'butler', 'custom'\]\)/)
+  assert.match(source, /function BotTonePicker\(/)
+  assert.match(source, /action: 'greet', id: bot\.id, force: true/)
+
+  const scope = { h: (type, props, ...children) => ({ type, props: props ?? {}, children }) }
+  vm.runInNewContext(
+    `${source.slice(source.indexOf('  const CONNECTOR_CATEGORIES = ['), source.indexOf('  function connectorWebhookUrl('))}\nObject.assign(globalThis, { CONNECTOR_TYPES, DEFAULT_MCP_APPS, CONNECTOR_ICON_SPECS })`,
+    scope,
+  )
+  for (const item of scope.CONNECTOR_TYPES) {
+    assert.ok(scope.CONNECTOR_ICON_SPECS[item.type], `has vector icon spec for connector ${item.type}`)
+    const icon = scope.ConnectorIcon({ type: item.type, size: 28 })
+    assert.equal(icon.children[0]?.type, 'svg')
+    assert.equal(icon.children[0]?.props?.viewBox, '0 0 24 24')
+  }
+  for (const app of scope.DEFAULT_MCP_APPS) {
+    assert.ok(scope.CONNECTOR_ICON_SPECS[`mcp:${app.id}`], `has vector icon spec for MCP app ${app.id}`)
+    const icon = scope.ConnectorIcon({ type: 'mcp', appId: app.id, size: 28 })
+    assert.equal(icon.children[0]?.type, 'svg')
+  }
+  const chips = scope.BotConnectorChips({ connectors: [{ id: 'c1', type: 'github', name: 'GitHub', enabled: true }, { id: 'c2', type: 'mcp', name: 'Notion', config: { app_id: 'notion' }, enabled: true }] })
+  assert.equal(chips.children.length, 2)
+  assert.equal(chips.children[0].children[0].type, scope.ConnectorIcon)
+})
+
+test('right sidebar registers VS Code-style Git Changes guide entry, tab and shortcut', () => {
+  assert.match(source, /const GIT_TAB_ID = 'kode-git-changes'/)
+  assert.match(source, /commandId: 'kode\.gitChanges\.open'/)
+  const defaults = source.match(/id: 'kode\.gitChanges\.open',[\s\S]*?defaults: \{([\s\S]*?)\n          \},/)?.[1]
+  assert.ok(defaults)
+  assert.match(defaults, /'desktop:macos'/)
+  assert.doesNotMatch(defaults, /'web:/)
+  assert.match(source, /description: \(\) => '查看工作区 Git Graph、变更树、Diff 与暂存区'/)
+  assert.match(source, /function buildGitTree\(/)
+  assert.match(source, /function layoutGitGraph\(/)
+  assert.match(source, /function GraphRail\(/)
+  assert.match(source, /function ExpandedRail\(/)
+  assert.match(source, /installGitChangesSidebar\(ctx\)/)
+  assert.match(source, /function loadMoreCommits|loadMoreCommits = useCallback/)
+  assert.match(source, /status\?\.hasMoreCommits && h\('button'/)
+  assert.match(source, /More · 查看更多历史提交/)
 })
 
 test('current host requests and replies render as communication cards when they wake a turn', async () => {

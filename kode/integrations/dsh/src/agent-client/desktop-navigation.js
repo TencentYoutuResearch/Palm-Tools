@@ -14,15 +14,16 @@
     h('span', { className: 'kode-brand-ink' }),
     h('img', { src: BRAND_LAYER('red'), alt: '', draggable: false }))
   }
+  const SIDEBAR_BRAND_HEIGHT = 16
   function SidebarBrandMark() {
     return h('span', { className: 'kode-sidebar-brand-mark' },
-      h('img', { src: '/api/kode/avatars/media?type=kode&state=idle', width: 24, height: 24, className: 'kode-sidebar-app-icon', alt: '', draggable: false }),
-      h(KodeBrandMark, { height: 24 }))
+      h('img', { src: '/api/kode/avatars/media?type=kode&state=idle', width: SIDEBAR_BRAND_HEIGHT, height: SIDEBAR_BRAND_HEIGHT, className: 'kode-sidebar-app-icon', alt: '', draggable: false }),
+      h(KodeBrandMark, { height: SIDEBAR_BRAND_HEIGHT }))
   }
   // dsh draws its inverted Harness badge only inside BrandWordmark. Keep exactly that plate and
   // its glyphs (with their theme fills), drop the deepseek letters and whale outright, and frame
   // the viewBox on the plate; the text fallback covers primitives without the badge.
-  const HARNESS_BADGE_HEIGHT = 20
+  const HARNESS_BADGE_HEIGHT = 14
   function nativeHarnessBadge() {
     if (typeof BrandWordmark !== 'function') return null
     try {

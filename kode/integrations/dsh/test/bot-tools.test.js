@@ -130,3 +130,58 @@ test('the bots API proxies task actions and sends an approved draft once', async
   assert.equal((await post({ action: 'outbox_send', id: 'task-d' })).body.error, '这条草稿已经处理过了')
   assert.equal(sent.length, 1)
 })
+
+test('tui-originated bot main sessions and adopted subtasks are recognized seamlessly in dsh', async () => {
+  const { botsView } = await import('../src/bots-api.js')
+  const roster = {
+    default_bot: 'b1',
+    bots: [
+      { id: 'b1', name: 'Kit', backend_key: 'claude', main_session: { runtime: 'gui', session_id: 'uuid-tui-main' } },
+    ],
+    adopted: { 'uuid-tui-worker': 'b1' },
+    main_aliases: { b1: ['uuid-tui-main', 'dsh-imported-main'] },
+    adopted_aliases: { 'uuid-tui-worker': 'b1', 'dsh-imported-worker': 'b1' },
+    homes: { b1: '/bots/b1' },
+  }
+  const runtime = {
+    profiles: { list: () => [], sharedState: {} },
+    hasRuntime: () => true,
+    bindings: new Map([
+      ['dsh-bound-main', { threadId: 'uuid-tui-main' }],
+      ['dsh-bound-worker', { threadId: 'uuid-tui-worker' }],
+    ]),
+  }
+  const view = botsView(roster, {
+    runtime,
+    sessions: [
+      { sessionId: 'dsh-bound-main', title: 'Kit Main', updatedAt: 20 },
+      { sessionId: 'dsh-bound-worker', title: 'Worker Subtask', updatedAt: 10 },
+    ],
+    archived: new Set(),
+    workspaces: [],
+  })
+  assert.equal(view.bots[0].main_session_id, 'dsh-bound-main')
+  assert.deepEqual(
+    view.bots[0].sessions.map(s => [s.id, s.kind, s.adopted]),
+    [
+      ['dsh-bound-main', 'main', false],
+      ['dsh-bound-worker', 'subtask', true],
+    ],
+  )
+
+  const admin = { call: async () => roster }
+  const boundMainAgent = {
+    id: 'dsh-bound-main',
+    session: { header: { cwd: '/elsewhere' } },
+    ctx: { get: key => (key === 'kodeAgents' ? runtime : undefined) },
+  }
+  assert.equal((await ownerOf(admin, 'dsh-bound-main', '/elsewhere', undefined, ['uuid-tui-main'])).bot.id, 'b1')
+  assert.equal((await ownerOf(admin, 'dsh-imported-worker', '/elsewhere')).bot.id, 'b1')
+  // Verify bot_tasks_list works for the imported TUI main session inside DSH
+  const adminWithTasks = {
+    call: async path => (path.endsWith('/workbench/bots') ? roster : { tasks: [] }),
+  }
+  const listRes = await tool(adminWithTasks, boundMainAgent, 'bot_tasks_list')({})
+  assert.equal(listRes.bot, 'Kit')
+})
+

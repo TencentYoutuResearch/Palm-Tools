@@ -35,26 +35,26 @@ pub fn status_label(status: &str) -> &'static str {
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SessionRef {
-    runtime: String,
-    session_id: String,
+    pub(super) runtime: String,
+    pub(super) session_id: String,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields, default)]
 pub(super) struct Input {
-    id: Option<String>,
-    bot: Option<String>,
-    kind: Option<String>,
-    title: Option<String>,
-    detail: Option<String>,
-    status: Option<String>,
-    reason: Option<String>,
-    payload: Option<Value>,
+    pub(super) id: Option<String>,
+    pub(super) bot: Option<String>,
+    pub(super) kind: Option<String>,
+    pub(super) title: Option<String>,
+    pub(super) detail: Option<String>,
+    pub(super) status: Option<String>,
+    pub(super) reason: Option<String>,
+    pub(super) payload: Option<Value>,
     /// Milliseconds; `0` clears it.
-    due: Option<u64>,
-    session: Option<SessionRef>,
+    pub(super) due: Option<u64>,
+    pub(super) session: Option<SessionRef>,
     /// Drop the linked conversation.
-    unlink: bool,
+    pub(super) unlink: bool,
 }
 
 #[derive(Deserialize)]
@@ -163,8 +163,18 @@ pub(super) fn upsert(hub: &Hub, input: Input) -> Result<TaskRecord> {
             return Err(bad("要关联的会话无效"));
         }
         // A conversation created a moment ago may not be published yet; the
-        // link is kept and resolved on the next check.
-        task.session_id = hub.ctx.upgrade().and_then(|ctx| ctx.runtimes.find(&session.runtime, &session.session_id));
+        // link is kept and resolved on the next check (across TUI <-> DSH aliases).
+        task.session_id = hub.ctx.upgrade().and_then(|ctx| {
+            let snapshots = ctx.runtimes.snapshots();
+            let index = hub
+                .store
+                .document("dsh-session-index")
+                .map(|d| d["value"].clone())
+                .unwrap_or_default();
+            let aliases = crate::messaging::bot_prompt::build_session_aliases(&index, &snapshots);
+            let expanded = crate::messaging::bot_prompt::expand_session_key(&session.session_id, &aliases);
+            ctx.runtimes.resolve_any(&session.runtime, &session.session_id, &expanded)
+        });
         task.payload["session_runtime"] = json!(session.runtime);
         task.session_uuid = Some(session.session_id);
         task.last_activity = now;
@@ -299,9 +309,27 @@ pub(super) fn check(hub: &Hub, now: u64) {
     let store = &hub.ext.store;
     let Ok(tasks) = store.tasks(None, u64::MAX) else { return };
     let ctx = hub.ctx.upgrade();
+    let aliases = ctx.as_ref().map(|ctx| {
+        let snapshots = ctx.runtimes.snapshots();
+        let index = hub
+            .store
+            .document("dsh-session-index")
+            .map(|d| d["value"].clone())
+            .unwrap_or_default();
+        crate::messaging::bot_prompt::build_session_aliases(&index, &snapshots)
+    });
     for mut task in tasks.into_iter().filter(|t| t.kind == "task") {
         if task.session_id.is_none() {
-            let found = task.session_uuid.as_deref().zip(task.payload["session_runtime"].as_str()).zip(ctx.as_ref()).and_then(|((native, runtime), ctx)| ctx.runtimes.find(runtime, native));
+            let found = task
+                .session_uuid
+                .as_deref()
+                .zip(task.payload["session_runtime"].as_str())
+                .zip(ctx.as_ref())
+                .zip(aliases.as_ref())
+                .and_then(|(((native, runtime), ctx), aliases)| {
+                    let expanded = crate::messaging::bot_prompt::expand_session_key(native, aliases);
+                    ctx.runtimes.resolve_any(runtime, native, &expanded)
+                });
             if let Some(id) = found {
                 task.session_id = Some(id);
                 task.last_activity = now;

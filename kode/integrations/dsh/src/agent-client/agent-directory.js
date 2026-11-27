@@ -14,6 +14,17 @@
   }
   function ConversationNavigation({ native, ...props }) {
     const loading = useSyncExternalStore(sessionOpening.subscribe, sessionOpening.getSnapshot)
+    const devicesSnap = useSyncExternalStore(devicesStore.subscribe, devicesStore.getSnapshot)
+    const target = useSyncExternalStore(sharedStore.subscribe, sharedStore.getSnapshot)
+    if (devicesSnap.activeDeviceId) {
+      const activeDevice = devicesSnap.devices.find(d => d.device_id === devicesSnap.activeDeviceId)
+        ?? { device_id: devicesSnap.activeDeviceId, name: devicesSnap.activeDeviceId, online: false }
+      const body = target?.kind === 'remote-device' && target.device?.device_id === devicesSnap.activeDeviceId
+        ? h(RemoteDeviceConversation, { key: `remote:${target.device.device_id}:${target.session.id}`, target })
+        : h(RemoteDeviceEmptyState, { device: activeDevice })
+      return h('div', { className: 'kode-conversation-navigation' },
+        h('div', { className: 'kode-conversation-body' }, body))
+    }
     return h('div', { className: 'kode-conversation-navigation' },
       h('div', { className: 'kode-conversation-body', 'aria-busy': loading, inert: loading || undefined }, h(native, props)),
       loading && h('div', { className: 'kode-conversation-loading', role: 'status' },

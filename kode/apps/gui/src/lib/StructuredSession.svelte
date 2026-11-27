@@ -5,7 +5,7 @@
   import { currentLocale, t } from './i18n'
   const tr = (key: string) => { $currentLocale; return t(key) }
   type Event = { type: string; ts: number; payload: Record<string, any> }
-  let { sessionId, visible, agentName = 'Agent' }: { sessionId: number; visible: boolean; agentName?: string } = $props()
+  let { sessionId, visible, agentName = 'Agent', transparentBackground = false }: { sessionId: number; visible: boolean; agentName?: string; transparentBackground?: boolean } = $props()
   let events: Event[] = $state([]), draft = $state(''), sending = $state(false), error = $state('')
   let composer: HTMLTextAreaElement | undefined = $state()
   export function insertReference(text: string) {
@@ -104,7 +104,7 @@
     return p.source === 'acp_questions' ? {decision:action === 'accept' ? 'allow' : 'deny', ...(action === 'accept' ? {content:values[p.request_id]} : {})} : {action, ...(action === 'accept' ? {content:values[p.request_id]} : {})}
   }
 </script>
-<section class="structured-session" aria-hidden={!visible} aria-label={t('acp.conversation', { backend: agentName })}>
+<section class="structured-session" class:transparent-bg={transparentBackground} aria-hidden={!visible} aria-label={t('acp.conversation', { backend: agentName })}>
   <div class="transcript">
     {#each events.filter(e => ['message','tool_use','ask_user_question','plan_proposed','system'].includes(e.type)) as e (e.type + '-' + (e.payload.id ?? e.payload.tool_use_id ?? e.payload.question_id ?? e.payload.plan_id ?? e.ts))}
       {@const p = e.payload}
@@ -159,6 +159,9 @@
 </section>
 <style>
   .structured-session {height:100%;display:flex;flex-direction:column;color:var(--fg-primary);background:var(--bg-primary)}
+  .structured-session.transparent-bg {background:transparent}
+  .structured-session.transparent-bg article {background:color-mix(in srgb, var(--bg-secondary) 84%, transparent);backdrop-filter:blur(8px)}
+  .structured-session.transparent-bg article.user {background:color-mix(in srgb, var(--bg-primary) 84%, transparent)}
   .transcript {flex:1;min-height:0;overflow:auto;padding:24px}
   article {max-width:900px;margin:0 auto 20px;padding:20px;border:1px solid var(--bd-default);border-radius:16px;background:var(--bg-secondary)}
   article.user {background:var(--bg-primary)}

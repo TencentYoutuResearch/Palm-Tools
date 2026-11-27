@@ -17,6 +17,8 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   // @include desktop-navigation.js
   // @include bot-profile.js
   // @include bot-watches.js
+  // @include bot-connectors.js
+  // @include bot-board.js
   // @include bots-page.js
   // @include wecom-settings.js
   // @include memory-page.js
@@ -26,9 +28,11 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
   // @include workspace-sidebar.js
   // @include input-presentation.js
   // @include shared-conversation.js
+  // @include account-devices.js
   // @include internal-messages.js
   // @include session-messaging.js
   // @include session-panel.js
+  // @include git-changes.js
   return { inject: ['slots', 'sessions', 'remote', 'remote.agentPresets', 'kodeNotifications', 'uiSession', 'uiSession.sessionStatus'], apply(ctx) {
     ctx.provide('kodeActivity', globalActivity)
     installGlobalActivitySubscriptions(ctx)
@@ -87,6 +91,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({ name: 'conversation.input.dock', id: 'kode-goal-bar', order: 100, locale: 'goal', inject: sessionId => ({ sessionId, sessions: ctx.sessions }) }, GoalBar))
     ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({ name: 'sidebar.right.pane.tab', key: 'kode-goal', inject: sessionId => ({ sessionId, sessions: ctx.sessions }) }, GoalSidebar))
     ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register({ name: 'sidebar.right.pane.tab.title', key: 'kode-goal' }, () => h(React.Fragment, null, h(IconGoalOutlineRegular, { size: 16 }), 'Goal')))
+    installGitChangesSidebar(ctx)
     installSessionPanel(ctx)
     if (kodeEmbedded()) {
       // Kode's window buttons sit over the page; keep a titlebar strip for
@@ -98,6 +103,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       ctx.effect(() => () => titlebar.remove(), 'kode.embed-titlebar')
     }
     wrapSlot(ctx, 'main.conversation', entry => typeof entry.component === 'function', native => props => h(ConversationNavigation, { ...props, native }))
+    wrapSlot(ctx, 'settings.launcher', entry => typeof entry.component === 'function', native => props => h(KodeAccountLauncher, { ...props, native }))
     wrapSlot(ctx, 'shell.overlay', entry => entry.options.id === 'workspace.session-rename', native => props => h(RoutedRenameDialog, { ...props, native }))
     wrapSlot(ctx, 'conversation.session.header.actions', entry => entry.options.id === 'subagent-catalog', native => props => h(FilteredSubagentCatalog, { ...props, native }))
     wrapSlot(ctx, 'conversation.session.header.lineage', entry => typeof entry.component === 'function', native => props => h(FilteredSubagentCatalog, { ...props, native }))
@@ -196,6 +202,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
         return scope.slots.register({ name: 'main', key: 'kode-memory' }, KodeMemoryMainPage)
       })
       const openBotSession = async id => { scope.layout.selectPanel(null); await scope.get('uiWorkspace')?.openSession(id) }
+      openBotChat = openBotSession
       scope.slots.inject('sidebar.panellist.trailing', () => scope.slots.register({ name: 'sidebar.panellist.trailing', id: 'schedules' }, () => h('span', { className: 'kode-schedules-marker', hidden: true })))
       scope.slots.inject('sidebar.panellist.trailing', () => scope.slots.register({ name: 'sidebar.panellist.trailing', id: 'plugins' }, () => h('span', { className: 'kode-plugins-marker', hidden: true })))
       scope.slots.inject('sidebar.panellist.trailing', () => scope.slots.register({ name: 'sidebar.panellist.trailing', id: 'kode-bots' }, BotsNavTrailing))
@@ -222,6 +229,20 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
           const message = event.detail
           if (message?.type === 'kode-panels' && Array.isArray(message.panels)) showPanels(message.panels)
           if (message?.type === 'kode-panel-closed') scope.layout.selectPanel(null)
+          if (message?.type === 'kode-open-panel' && typeof message.panel === 'string') scope.layout.selectPanel(message.panel)
+          if (message?.type === 'kode-open-bot' && typeof message.botId === 'string') {
+            void botsCall({
+              action: 'greet',
+              id: message.botId,
+              idempotency_key: `bot-greet-${message.botId}-${Date.now()}`,
+            }).then(res => {
+              if (res?.sessionId) void openBotSession(res.sessionId)
+              else { requestedBotStart = message.botId; scope.layout.selectPanel('kode-bots') }
+            }).catch(() => {
+              requestedBotStart = message.botId
+              scope.layout.selectPanel('kode-bots')
+            })
+          }
         }
         window.addEventListener('kode-host', onHost)
         window.kodeHost.request('panels')
@@ -230,6 +251,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
           for (const dispose of panelSlots) dispose()
         }, 'kode.extension-panels')
       }
+      closeKodePanel = () => { scope.layout.selectPanel(null) }
       openBotsPage = () => { scope.layout.selectPanel('kode-bots') }
       openMemoryPage = () => { scope.layout.selectPanel('kode-memory') }
       openKodeSettings = section => {
@@ -245,6 +267,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       }
       window.addEventListener?.('keydown', onMemoryShortcut)
       scope.effect(() => () => {
+        closeKodePanel = undefined
         openKodeSettings = undefined
         openMemoryPage = undefined
         window.removeEventListener?.('keydown', onMemoryShortcut)

@@ -76,6 +76,7 @@
     sessionId: SessionId
     visible: boolean
     isDark?: boolean
+    transparentBackground?: boolean
     /// Phase 11.2:本 tab 跑哪个 transport 上。Local 走 sync write_input,Remote
     /// 走 async write_input_remote。**字节流接收路径不变** —— 远端 transport 已经
     /// 把 WS 上来的字节灌进 BridgeCtx::core_tx,这边订阅 byte_buffer Channel 一切
@@ -84,7 +85,7 @@
     /// Consecutive Ctrl+C confirmation closes the owning session directly.
     onCloseSession: () => void | Promise<void>
   }
-  let { sessionId, visible, isDark = true, endpointId, onCloseSession }: Props = $props()
+  let { sessionId, visible, isDark = true, transparentBackground = false, endpointId, onCloseSession }: Props = $props()
   const windowsPlatform = isWindowsUserAgent(navigator.userAgent)
 
   let containerEl: HTMLDivElement
@@ -248,6 +249,11 @@
     await import('@xterm/xterm/css/xterm.css')
     if (destroyed) return
 
+    function resolveXtermTheme(mode = appearance.themeMode) {
+      const base = buildXtermTheme(isDark, mode)
+      return transparentBackground ? { ...base, background: '#00000000' } : base
+    }
+
     // Theme values come from terminal_settings.ts and stay hardcoded there.
     // Do not read CSS variables here; App theme effects can race terminal init.
     term = new Terminal({
@@ -255,12 +261,13 @@
       fontSize: fontSize,
       cursorBlink: visible && document.hasFocus() && !document.hidden,
       allowProposedApi: true,
+      allowTransparency: transparentBackground,
       // Codex and other TUIs can enable mouse reporting, which makes xterm
       // send ordinary drags to the CLI instead of selecting text. On macOS,
       // Option+drag should always create a copyable terminal selection.
       macOptionClickForcesSelection: true,
       scrollback: 5000,
-      theme: buildXtermTheme(isDark, appearance.themeMode),
+      theme: resolveXtermTheme(),
       // 让 xterm 直接吃 UTF-8 二进制(避免 string 路径的 UTF-16 重编码)
       convertEol: false,
       // 强制最小对比度 —— 子进程常用 24-bit RGB 转义序列(\x1b[38;2;...)输出
@@ -1293,7 +1300,9 @@
     try {
       term.options.fontFamily = next.fontFamily
       term.options.fontSize = next.fontSize
-      term.options.theme = buildXtermTheme(isDark, next.themeMode)
+      term.options.allowTransparency = transparentBackground
+      const base = buildXtermTheme(isDark, next.themeMode)
+      term.options.theme = transparentBackground ? { ...base, background: '#00000000' } : base
       try { term.clearTextureAtlas?.() } catch {}
       term.refresh(0, term.rows - 1)
       window.setTimeout(() => scheduleResize(), 0)
@@ -1302,9 +1311,10 @@
     }
   }
 
-  // isDark 或 terminal appearance 变化时热更新 xterm。
+  // isDark / transparentBackground 或 terminal appearance 变化时热更新 xterm。
   $effect(() => {
     void isDark
+    void transparentBackground
     void appearance
     applyAppearance()
   })
@@ -1727,6 +1737,7 @@
 
 <div
   class="term-host"
+  class:transparent-bg={transparentBackground}
   class:cmd-held={cmdHeld}
   bind:this={containerEl}
 >
@@ -1798,6 +1809,12 @@
      * 与 App.svelte `.main { isolation: isolate }` 双重保险。
      */
     isolation: isolate;
+  }
+  .term-host.transparent-bg {
+    background: transparent;
+  }
+  .term-host.transparent-bg :global(.xterm .xterm-viewport) {
+    background-color: transparent !important;
   }
   /*
    * xterm.css 默认给 .xterm-viewport 设 background-color:#000(纯黑),

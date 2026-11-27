@@ -109,6 +109,8 @@ export interface NewTabOptions {
   model?: string | null
   /// Phase 11.2 endpoint。undefined / Local = 走本地 PTY 老路径。
   endpointId?: EndpointId
+  /// Optional bot persona injected onto `--append-system-prompt`.
+  systemPrompt?: string | null
 }
 
 /// 新建 tab。所有 spawn 路径(BackendChooser / restoreTabs / 命令面板 quick pick)都走这里。
@@ -117,7 +119,7 @@ export async function newTab(
   backendKey: string,
   opts: NewTabOptions = {},
 ): Promise<TabInfo> {
-  const { cwd, resumeSessionId, permissionMode, model, endpointId } = opts
+  const { cwd, resumeSessionId, permissionMode, model, endpointId, systemPrompt } = opts
   const launchModel = await resolveSessionLaunchModel(backendKey, model, () =>
     endpointId?.kind === 'remote'
       ? endpointIpc.discoverBackendModels(endpointId.id, backendKey)
@@ -134,6 +136,7 @@ export async function newTab(
     endpointId ?? null,
     currentTermTheme('pty'),
     opts.transportKind ?? 'pty',
+    systemPrompt ?? null,
   )
   const t: TabInfo = {
     id: s.id,

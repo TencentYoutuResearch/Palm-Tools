@@ -112,16 +112,24 @@ class GlassScaffold extends StatelessWidget {
     required this.body,
     this.appBar,
     this.resizeToAvoidBottomInset,
+    this.background,
   });
   final Widget body;
   final PreferredSizeWidget? appBar;
   final bool? resizeToAvoidBottomInset;
+  final Widget? background;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
     final highContrast = MediaQuery.highContrastOf(context);
+    final scaffold = Scaffold(
+      backgroundColor: Colors.transparent,
+      resizeToAvoidBottomInset: resizeToAvoidBottomInset,
+      appBar: appBar,
+      body: body,
+    );
     return DecoratedBox(
       decoration: BoxDecoration(
         color: theme.scaffoldBackgroundColor,
@@ -144,12 +152,15 @@ class GlassScaffold extends StatelessWidget {
                 ],
               ),
       ),
-      child: Scaffold(
-        backgroundColor: Colors.transparent,
-        resizeToAvoidBottomInset: resizeToAvoidBottomInset,
-        appBar: appBar,
-        body: body,
-      ),
+      child: background == null
+          ? scaffold
+          : Stack(
+              fit: StackFit.expand,
+              children: [
+                background!,
+                scaffold,
+              ],
+            ),
     );
   }
 }
