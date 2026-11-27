@@ -208,7 +208,7 @@ export async function apply(ctx, config = {}) {
       in_reply_to: { type: 'string' },
       ...(node.message_titles === true ? { title: messageTitleParameter } : {}),
     }
-    add('kode_sessions_send', (node.message_titles === true ? 'Write a concise title and put the description in content. ' : '') + 'Ask a named peer for help or send a requested result. Discover the peer from the session list first. Acceptance is not task completion: use read/wait to collect its answer. Reply with in_reply_to when answering a request; do not send acknowledgement-only replies or answer a completed reply again.', params, async (args, signal) => {
+    add('kode_sessions_send', (node.message_titles === true ? 'Write a concise title and put the description in content. ' : '') + 'Ask a named peer for help or send a requested result. Discover the peer from the session list first. A receipt confirms delivery only. For long tasks, ask the peer to send the result and end your turn when your own work is done. Its reply wakes your idle session. Reply with in_reply_to when answering a request; do not send acknowledgement-only replies or answer a completed reply again.', params, async (args, signal) => {
       const peerKey = `${args.node_id}/${args.session_id}`
       const inbound = entry.unansweredInbound.get(peerKey)
       const inReplyTo = args.in_reply_to ?? inbound?.id ?? null
@@ -240,7 +240,7 @@ export async function apply(ctx, config = {}) {
       message_id: { type: 'string', required: true }, offset: { type: 'integer' },
     }, async (args, signal) => messagePage(await client.call(`${PREFIX}messages/${encodeURIComponent(args.message_id)}`, undefined, signal), args.offset ?? 0))
     add('kode_sessions_read', 'Read bounded message and receipt previews after a durable cursor. Follow cursor until empty. Use the continuation tool for truncated content.', { after: { type: 'integer' } }, async (args, signal) => readEvents(args.after, signal))
-    add('kode_sessions_wait', 'Wait up to 30 seconds for a message or receipt event. Does not send or interrupt.', { after: { type: 'integer', required: true }, timeout_seconds: { type: 'integer' } }, async (args, signal) => {
+    add('kode_sessions_wait', 'Wait once for an imminent message or receipt (1–30 seconds, default 15). For longer work, ask the peer to send the result, continue independent work, then end your turn. The incoming reply wakes an idle Kode session. Avoid repeated waits, including scripted polling loops.', { after: { type: 'integer', required: true }, timeout_seconds: { type: 'integer' } }, async (args, signal) => {
       const until = Date.now() + Math.max(1, Math.min(30, args.timeout_seconds ?? 15)) * 1000
       entry.activeWaits++
       try {

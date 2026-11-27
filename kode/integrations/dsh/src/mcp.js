@@ -25,7 +25,7 @@ const object = (properties, optional = {}) => ({ type: 'object', additionalPrope
 const tools = [
   { name: 'kode_sessions_list', description: 'Find local and SSH sessions by name or partial title. Inspect matches and disambiguate duplicate names, then send using the returned address; never guess an ID.', inputSchema: { type: 'object', additionalProperties: false, properties: { query: { type: 'string', description: 'Name or keywords from the user; omit to list all.' } } } },
   { name: 'kode_sessions_send',
-    description: (capabilities.message_titles === true ? 'Write a concise title and put the description in content. ' : '') + 'Send to an agent; delivery is not task completion. Reuse idempotency_key only for a retry. Reply with in_reply_to.',
+    description: (capabilities.message_titles === true ? 'Write a concise title and put the description in content. ' : '') + 'Send to an agent; delivery is not task completion. For long tasks, ask the peer to send the result and end your turn when your own work is done. Its reply wakes your idle session. Reuse idempotency_key only for a retry. Reply with in_reply_to.',
     inputSchema: object({
       node_id: { type: 'string' }, session_id: { type: 'string' }, content: { type: 'string' }, idempotency_key: { type: 'string' },
     }, {
@@ -40,7 +40,7 @@ const tools = [
     { name: 'kode_sessions_cancellation_status', description: 'Read the persisted cancellation result. A stop request does not prove termination.', inputSchema: object({ message_id: { type: 'string' } }) },
   ] : []),
   { name: 'kode_sessions_read', description: 'Read bounded message and receipt previews. Follow cursor until empty. Use the continuation tool for truncated content.', inputSchema: object({ after: { type: 'integer', minimum: 0 } }) },
-  { name: 'kode_sessions_wait', description: 'Wait up to 30 seconds for this session\'s message or receipt events.', inputSchema: object({ after: { type: 'integer', minimum: 0 }, timeout_seconds: { type: 'integer', minimum: 1, maximum: 30 } }) },
+  { name: 'kode_sessions_wait', description: 'Wait once for an imminent message or receipt (1–30 seconds, default 15). For longer work, ask the peer to send the result, continue independent work, then end your turn. The incoming reply wakes an idle Kode session. Avoid repeated waits, including scripted polling loops.', inputSchema: object({ after: { type: 'integer', minimum: 0 }, timeout_seconds: { type: 'integer', minimum: 1, maximum: 30 } }) },
 ]
 async function execute(name, args, signal) {
   if (['kode_sessions_delivery_status', 'kode_sessions_cancel_input', 'kode_sessions_cancellation_status'].includes(name)) {
