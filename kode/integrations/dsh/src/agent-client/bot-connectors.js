@@ -12,7 +12,7 @@
     { id: 'custom', label: '自定义' },
   ]
   const CONNECTOR_TYPES = [
-    { type: 'wecom', name: '企业微信', badge: '企微', tone: 'green', category: 'chat', summary: '在企微单聊或群聊里直接呼叫伙伴，自动同步监听会话' },
+    { type: 'wecom', name: '企业微信', badge: '企微', tone: 'blue', category: 'chat', summary: '在企微单聊或群聊里直接呼叫伙伴，自动同步监听会话' },
     { type: 'github', name: 'GitHub', badge: 'GH', tone: 'slate', category: 'coding', summary: '结合本机 gh 账号操作 PR/Issue，监听仓库提交与 Webhook' },
     { type: 'slack', name: 'Slack', badge: 'Slack', tone: 'amber', category: 'chat', summary: '在 Slack 频道和私信里呼叫伙伴，通过专属 Webhook 接收事件' },
     { type: 'discord', name: 'Discord', badge: 'DC', tone: 'indigo', category: 'chat', summary: '在 Discord 频道、子区与私信中触发伙伴并同步回复' },
@@ -55,11 +55,18 @@
   // Brand & service vector marks (24x24 viewBox) for direct connectors and official MCP apps.
   const CONNECTOR_ICON_SPECS = {
     wecom: {
-      bg: '#07c160',
-      render: () => [
-        h('path', { key: 'b1', fill: '#fff', d: 'M9.5 4C5.36 4 2 6.84 2 10.35c0 1.95 1.05 3.69 2.7 4.86l-.68 2.18 2.38-1.19c.96.29 2 .45 3.1.45.28 0 .55-.01.82-.04A5.8 5.8 0 0 1 10 14.8c0-3.31 3.13-6 7-6 .17 0 .34.01.5.02C16.76 6.06 13.47 4 9.5 4Zm-2.4 4.3a.95.95 0 1 1 0 1.9.95.95 0 0 1 0-1.9Zm4.8 0a.95.95 0 1 1 0 1.9.95.95 0 0 1 0-1.9Z' }),
-        h('path', { key: 'b2', fill: '#fff', opacity: 0.94, d: 'M16.5 10c-3.04 0-5.5 2.1-5.5 4.7 0 2.6 2.46 4.7 5.5 4.7.82 0 1.6-.15 2.3-.43l1.88.94-.54-1.72C21.29 17.3 22 16.07 22 14.7c0-2.6-2.46-4.7-5.5-4.7Zm-1.85 3.2a.75.75 0 1 1 0 1.5.75.75 0 0 1 0-1.5Zm3.7 0a.75.75 0 1 1 0 1.5.75.75 0 0 1 0-1.5Z' }),
-      ],
+      bg: '#ffffff',
+      light: true,
+      render: () => {
+        const drop = 'M-1.25 0A1.25 1.25 0 1 1 1.25 0C1.25.9.45 2 .28 2.85A.3.3 0 0 1-.28 2.85C-.45 2-1.25.9-1.25 0Z'
+        return [
+          h('path', { key: 'bubble', d: 'M16.9 10.5A7.2 6.3 0 1 0 4.6 14.8L3.8 17.5L6.8 16.2A7.2 6.3 0 0 0 11.7 16.4', fill: 'none', stroke: '#0082ef', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' }),
+          h('g', { key: 'g', transform: 'translate(16.7 12.7) rotate(-45)' }, h('path', { fill: '#36b31a', d: drop })),
+          h('g', { key: 'b', transform: 'translate(19.9 16) rotate(45)' }, h('path', { fill: '#0082ef', d: drop })),
+          h('g', { key: 'o', transform: 'translate(16.7 19.3) rotate(135)' }, h('path', { fill: '#f35c04', d: drop })),
+          h('g', { key: 'y', transform: 'translate(13.5 16) rotate(-135)' }, h('path', { fill: '#ffbe00', d: drop })),
+        ]
+      },
     },
     github: {
       bg: '#24292f',
