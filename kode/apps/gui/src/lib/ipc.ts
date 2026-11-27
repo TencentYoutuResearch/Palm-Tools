@@ -50,6 +50,43 @@ export interface BackendListItem {
 export interface AvatarSet {
   name: string
   frames: string[]
+  aliases?: string[]
+  background?: string | null
+  banner?: string | null
+}
+
+export interface BotMainSession {
+  runtime: string
+  session_id: string
+}
+
+export interface BotRecord {
+  id: string
+  name: string
+  avatar?: string | null
+  banner?: string | null
+  persona?: string
+  tagline?: string | null
+  backend_key: string
+  model?: string | null
+  permission_ceiling?: string
+  default_cwd?: string | null
+  main_session?: BotMainSession | null
+  created_at?: number
+  updated_at?: number
+}
+
+export interface BotRoster {
+  bots: BotRecord[]
+  default_bot?: string | null
+  root?: string | null
+  adopted?: Record<string, string>
+  homes?: Record<string, string>
+  workspaces?: Record<string, string>
+  persona_prompts?: Record<string, string>
+  effective_prompts?: Record<string, string>
+  main_aliases?: Record<string, string[]>
+  adopted_aliases?: Record<string, string>
 }
 
 export interface AvatarLibrary {
@@ -103,7 +140,7 @@ export interface SpawnedSession {
 
 /// 用户视角 permission mode 简称(spawn 时传后端,后端把 'bypass' 翻译成 bypassPermissions)。
 /// 'default' 与 undefined / null 等价,均不注入 flag(子进程默认即 default)。
-export type PermissionMode = 'default' | 'bypass'
+export type PermissionMode = 'default' | 'bypass' | 'plan' | 'acceptEdits'
 
 export interface SessionMeta {
   id: SessionId
@@ -283,6 +320,8 @@ export const ipc = {
   /** Settings 面板用:返回全部 backend(含 disabled),带 enabled 字段 */
   listAllBackends: () => invoke<BackendListItem[]>('list_all_backends'),
   listAvatarLibrary: () => invoke<AvatarLibrary>('list_avatar_library'),
+  listBots: () => invoke<BotRoster>('list_bots'),
+  mutateBots: (change: Record<string, unknown>) => invoke<BotRoster>('mutate_bots', { change }),
   getAvatarGenerationPrompt: (locale?: 'en' | 'zh-CN') =>
     invoke<AvatarGenerationPrompt>('get_avatar_generation_prompt', { locale: locale ?? null }),
   spawnSession: (
@@ -301,6 +340,7 @@ export const ipc = {
     /// Kode xterm 当前主题,注入 TERM_THEME/COLORFGBG 给子 CLI。
     term_theme?: 'light' | 'dark' | null,
     transport_kind?: 'acp' | 'pty' | 'runtime' | null,
+    system_prompt?: string | null,
   ) =>
     invoke<SpawnedSession>('spawn_session', {
       backendKey: backend_key,
@@ -315,6 +355,7 @@ export const ipc = {
       endpointId: endpoint_id ?? null,
       termTheme: term_theme ?? null,
       transportKind: transport_kind ?? null,
+      systemPrompt: system_prompt ?? null,
     }),
   /// 写入 PTY。**按 endpoint 自动分流**:
   ///   - Local → sync command `write_input`(顺序保证,见 commands.rs 注释)
@@ -1761,5 +1802,11 @@ export type AccountDeviceSession = {
   cwd: string
   session_uuid?: string | null
   transport_kind?: string
+  bot_id?: string | null
+  bot_name?: string | null
+  bot_tagline?: string | null
+  bot_kind?: string | null
+  avatar_id?: string | null
+  banner?: string | null
 }
 export type AccountDeviceEvent = { type: string; ts: number; session_id?: number; payload: Record<string, any> }

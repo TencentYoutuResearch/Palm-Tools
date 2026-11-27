@@ -61,24 +61,59 @@ export function agentFor(runtime, backendKey) {
 function inside(path, folder) { return Boolean(path && folder) && (path === folder || path.startsWith(`${folder.replace(/\/$/, '')}/`)) }
 export function botsView(roster, { runtime, sessions, archived, workspaces, runs = [], templates = [], routines = [], connectors = [], connectorCatalog = CONNECTOR_CATALOG, mcpAppCatalog = MCP_APP_CATALOG, connectorEnv = null, voices = {}, tonePresets = TONE_PRESETS }) {
   const live = new Set(sessions.map(row => row.sessionId))
-  // One owner per session: a main conversation, one filed under a bot, then
-  // a folder, then a run.
+  const rowAliases = row => [
+    row.sessionId,
+    runtime?.bindings?.get?.(row.sessionId)?.threadId,
+    row.nativeThreadId,
+    row.sessionUuid,
+  ].filter(Boolean)
+  const mainAliasSets = new Map(roster.bots.map(bot => [
+    bot.id,
+    new Set([
+      ...(roster.main_aliases?.[bot.id] ?? []),
+      ...(bot.main_session?.session_id ? [bot.main_session.session_id] : []),
+    ]),
+  ]))
+  const adoptedMap = { ...(roster.adopted ?? {}), ...(roster.adopted_aliases ?? {}) }
+  const resolvedMainByBot = new Map()
+  // One owner per session: a main conversation (dsh or bridged tui), one filed
+  // under a bot, then a folder, then a run.
   const owner = new Map()
-  for (const bot of roster.bots) if (bot.main_session?.runtime === 'dsh') owner.set(bot.main_session.session_id, bot.id)
+  for (const bot of roster.bots) {
+    if (bot.main_session?.runtime === 'dsh') {
+      owner.set(bot.main_session.session_id, bot.id)
+      resolvedMainByBot.set(bot.id, bot.main_session.session_id)
+    }
+  }
+  for (const row of sessions) {
+    if (owner.has(row.sessionId)) continue
+    const keys = rowAliases(row)
+    const mainBot = roster.bots.find(bot => keys.some(k => mainAliasSets.get(bot.id)?.has(k)))
+    if (mainBot) {
+      owner.set(row.sessionId, mainBot.id)
+      if (!resolvedMainByBot.has(mainBot.id)) resolvedMainByBot.set(mainBot.id, row.sessionId)
+    }
+  }
   const known = new Set(roster.bots.map(bot => bot.id))
-  for (const [session, bot] of Object.entries(roster.adopted ?? {})) if (known.has(bot) && !owner.has(session)) owner.set(session, bot)
+  for (const [session, bot] of Object.entries(adoptedMap)) if (known.has(bot) && !owner.has(session)) owner.set(session, bot)
+  for (const row of sessions) {
+    if (owner.has(row.sessionId)) continue
+    const adoptedBot = rowAliases(row).map(k => adoptedMap[k]).find(botId => known.has(botId))
+    if (adoptedBot) owner.set(row.sessionId, adoptedBot)
+  }
   for (const row of sessions) for (const bot of roster.bots) if (!owner.has(row.sessionId) && inside(row.cwd, roster.homes?.[bot.id])) owner.set(row.sessionId, bot.id)
   for (const run of runs) if (run.session_uuid && !owner.has(run.session_uuid)) owner.set(run.session_uuid, run.bot)
   return {
     default_bot: roster.default_bot ?? null,
     bots: roster.bots.map(bot => {
-      const main = bot.main_session?.runtime === 'dsh' ? bot.main_session.session_id : null
+      const main = resolvedMainByBot.get(bot.id) ?? (bot.main_session?.runtime === 'dsh' ? bot.main_session.session_id : null)
       const agent = agentFor(runtime, bot.backend_key)
       const home = roster.homes?.[bot.id] ?? null
       const ran = new Set(runs.filter(run => run.bot === bot.id && run.session_uuid).map(run => run.session_uuid))
+      const isAdoptedRow = row => rowAliases(row).some(k => adoptedMap[k] === bot.id)
       const owned = sessions
         .filter(row => !archived.has(row.sessionId) && !row.blank && owner.get(row.sessionId) === bot.id)
-        .map(row => ({ id: row.sessionId, title: row.projections?.values?.title ?? row.title ?? '未命名会话', updated_at: row.updatedAt ?? row.updated_at ?? 0, kind: row.sessionId === main ? 'main' : ran.has(row.sessionId) ? 'watch' : roster.adopted?.[row.sessionId] === bot.id ? 'subtask' : 'side', adopted: roster.adopted?.[row.sessionId] === bot.id }))
+        .map(row => ({ id: row.sessionId, title: row.projections?.values?.title ?? row.title ?? '未命名会话', updated_at: row.updatedAt ?? row.updated_at ?? 0, kind: row.sessionId === main ? 'main' : ran.has(row.sessionId) ? 'watch' : isAdoptedRow(row) ? 'subtask' : 'side', adopted: isAdoptedRow(row) }))
         .sort((a, b) => (b.updated_at ?? 0) - (a.updated_at ?? 0))
       const botConnectors = connectors.filter(row => row.bot_id === bot.id)
       const voice = normalizeTone(voices?.[bot.id]?.tone ?? bot.tone ?? DEFAULT_TONE, voices?.[bot.id]?.tone_note ?? bot.tone_note ?? '')

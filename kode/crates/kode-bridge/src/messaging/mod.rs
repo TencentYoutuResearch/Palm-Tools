@@ -8,6 +8,7 @@ mod wire;
 mod extensions;
 pub mod ext;
 pub mod bots;
+pub mod bot_prompt;
 mod agent_updates;
 mod extension_auth;
 mod extension_files;
@@ -27,7 +28,7 @@ mod store;
 mod session_catalog;
 mod session_visibility;
 pub use session_visibility::filter_visible_runtime_sessions;
-pub(crate) use session_visibility::project_mobile_workspaces;
+pub(crate) use session_visibility::project_ctx_sessions;
 mod transcript;
 mod native_title;
 pub mod workspaces;
@@ -220,7 +221,7 @@ impl Hub {
         }
         Ok(all)
     }
-    fn send(&self, source: &str, req: SendRequest) -> Result<Message> {
+    pub(super) fn send(&self, source: &str, req: SendRequest) -> Result<Message> {
         if !integrations::settings(self)?.messaging_enabled {bail!("Session communication is disabled in Kode settings")}
         let _guard = self.gate.lock();
         if !valid_id(&req.target.node_id)

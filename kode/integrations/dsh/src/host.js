@@ -83,6 +83,8 @@ export async function apply(ctx, config = {}) {
   }
   if (ctx.inject) ctx.inject(['webServer', 'connection'], async webCtx => {
     webCtx.effect(() => registerIntegrationApi(webCtx, admin), 'kode.integration-api')
+    const { registerAccountApi } = await import('./account-api.js')
+    webCtx.effect(() => registerAccountApi(webCtx, admin), 'kode.account-api')
     const { registerMemoryApi } = await import('./memory-api.js')
     webCtx.effect(() => registerMemoryApi(webCtx, admin), 'kode.memory-api')
     webCtx.effect(() => registerModelUsageApi(webCtx, admin), 'kode.model-usage-api')
@@ -157,10 +159,45 @@ export async function apply(ctx, config = {}) {
       workspace_id: { type: 'string', description: 'Exact workspace identity returned for the selected Host; never copy one from a different Host.' },
       cwd: { type: 'string', description: 'Existing registered Kode workspace path on the selected Host. Does not create a workspace.' }, idempotency_key: { type: 'string', required: true },
       task_id: { type: 'string', description: 'A task on your bot task board that this conversation will do (local Host only); Kode then follows it for you.' },
+      runtime: { type: 'string', enum: ['dsh', 'tui'], description: "Target local runtime surface: 'dsh' (default structured chat view) or 'tui' (native Kode terminal tab)." },
     }, async (args, signal) => {
       const hosts = ctx.get?.('kodeProjectHosts')
+      const isRemoteHost = Boolean(args.host && !['local', '此计算机', '本机'].includes(args.host.trim()))
+      if (!isRemoteHost && (args.runtime === 'tui' || args.runtime === 'gui')) {
+        const mode = agent.ctx.get('sandboxPolicy')?.resolve({ session: agent.session })?.mode ?? 'read-only'
+        const mappedPerm = mode === 'read-only' ? 'plan' : 'acceptEdits'
+        const res = await admin.call(`${PREFIX}session-tools/call`, {
+          caller_session: String(agent.id),
+          name: 'kode_sessions_create',
+          arguments: {
+            title: args.title,
+            task: args.task,
+            idempotency_key: args.idempotency_key,
+            runtime: 'tui',
+            permission_mode: mappedPerm,
+            ...(args.agent ? { agent: args.agent } : {}),
+            ...(args.model ? { model: args.model } : {}),
+            ...(args.workspace_id || args.workspace ? { workspace: args.workspace_id ?? args.workspace } : {}),
+            ...(args.cwd ? { cwd: args.cwd } : {}),
+            ...(args.task_id ? { task_id: args.task_id } : {}),
+          },
+        }, signal)
+        entry.delegatedTo.set(`${res.target.node_id}/${res.target.session_id}`, {
+          assignmentId: res.message_id,
+          title: res.title,
+        })
+        return {
+          address: res.target,
+          title: res.title,
+          cwd: res.cwd,
+          agent: res.agent,
+          runtime: 'tui',
+          status: 'assigned',
+          assignment: { id: res.message_id, status: res.delivery_status },
+        }
+      }
       let created
-      if (args.host && !['local', '此计算机', '本机'].includes(args.host.trim())) {
+      if (isRemoteHost) {
         if (!hosts) throw new Error('SSH Host service is unavailable')
         await hosts.load()
         const normalize = text => text.normalize('NFKC').toLocaleLowerCase().replace(/[\p{P}\p{S}\s]+/gu, '')
@@ -186,8 +223,16 @@ export async function apply(ctx, config = {}) {
       })
       // If a bot's main session dispatched a local subtask, associate it under that bot in the sidebar.
       if (created.address.node_id === node.node_id) {
+        const threadId = ctx.get?.('kodeAgents')?.bindings?.get?.(agent.id)?.threadId
+        const keys = [String(agent.id), threadId].filter(Boolean)
         void admin.call(`${PREFIX}workbench/bots`, undefined, signal).then(roster => {
-          const ownerBot = roster?.bots?.find(bot => bot.main_session?.runtime === 'dsh' && bot.main_session?.session_id === String(agent.id))
+          const ownerBot = roster?.bots?.find(bot => {
+            const aliases = new Set([
+              ...(roster?.main_aliases?.[bot.id] ?? []),
+              ...(bot.main_session?.session_id ? [bot.main_session.session_id] : []),
+            ])
+            return keys.some(k => aliases.has(k))
+          })
           if (ownerBot) return admin.call(`${PREFIX}workbench/bots`, { action: 'adopt', session: created.address.session_id, id: ownerBot.id }, signal)
         }).catch(() => {})
       }

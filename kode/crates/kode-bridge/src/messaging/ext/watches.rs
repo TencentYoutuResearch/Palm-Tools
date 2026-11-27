@@ -571,13 +571,18 @@ async fn launch(hub: &Arc<Hub>, bot: &crate::messaging::bots::Bot, workspace: &P
         anyhow::bail!("Kode 和 dsh 都没有在运行，伙伴没法开始");
     }
     std::fs::create_dir_all(workspace)?;
-    let persona = bot.persona_prompt();
-    let payload = json!({"backend_key":bot.backend_key,"cwd":cwd,"model":bot.model,"permission_mode":permission,"system_prompt":persona});
+    let root = crate::messaging::bots::roster(hub)
+        .map(|(_, r)| r.root())
+        .unwrap_or_else(|_| crate::messaging::bots::default_root());
+    let _ = crate::messaging::bot_prompt::repair_bot_skill_links(&bot.home(&root), &bot.skills);
+    let persona = crate::messaging::bot_prompt::effective_prompt(hub, bot);
+    let payload = json!({"backend_key":bot.backend_key,"cwd":cwd,"model":bot.model,"permission_mode":permission,"system_prompt":persona,"title":title});
     let dto = request_patiently(&ctx, "gui", "create_session", payload, &rid).await?;
     let id = dto["id"].as_u64().ok_or_else(|| anyhow::anyhow!("runtime did not return a session"))?;
+    let uuid = dto["session_uuid"].as_str().or_else(|| dto["runtime_session_id"].as_str()).map(str::to_owned);
     let text = if dto["system_prompt"] == "applied" { text } else { format!("{persona}\n\n{text}") };
     tokio::spawn(deliver_initial(hub.clone(), ctx.clone(), id, text, format!("{rid}.in")));
-    Ok((id, None))
+    Ok((id, uuid))
 }
 
 /// Starting an Agent can outlast one runtime request (30 s). The same request
@@ -666,7 +671,7 @@ pub(super) async fn list(State(hub): State<Arc<Hub>>, h: HeaderMap, Query(q): Qu
     Ok(Json(view(&hub, q.bot.as_deref())?))
 }
 
-fn view(hub: &Hub, bot: Option<&str>) -> anyhow::Result<Value> {
+pub(super) fn view(hub: &Hub, bot: Option<&str>) -> anyhow::Result<Value> {
     let store = &hub.ext.store;
     let watches: Vec<Value> = store
         .watches()?
@@ -708,6 +713,10 @@ fn enabled() -> bool {
 
 pub(super) async fn change(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(change): Json<Change>) -> Result<Json<Value>> {
     super::admin(&hub, &h)?;
+    Ok(Json(apply_change(&hub, change)?))
+}
+
+pub(super) fn apply_change(hub: &Hub, change: Change) -> Result<Value> {
     let store = &hub.ext.store;
     let mut saved = None;
     let find = |id: &str| -> Result<WatchRecord> {
@@ -723,7 +732,7 @@ pub(super) async fn change(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(chang
                     *path = real.to_string_lossy().into_owned();
                 }
             }
-            crate::messaging::bots::resolve(&hub, &bot).map_err(|e| Error(StatusCode::NOT_FOUND, e.to_string()))?;
+            crate::messaging::bots::resolve(hub, &bot).map_err(|e| Error(StatusCode::NOT_FOUND, e.to_string()))?;
             let id = match id {
                 Some(id) => {
                     if find(&id)?.bot != bot {
@@ -749,24 +758,24 @@ pub(super) async fn change(State(hub): State<Arc<Hub>>, h: HeaderMap, Json(chang
         }
         Change::Run { id } => {
             find(&id)?;
-            ctx(&hub)?;
+            ctx(hub)?;
             // The dispatcher starts it, so its session is followed like any run.
             hub.ext.watches.manual.lock().push(id);
             hub.ext.watches.wake.notify_one();
-            return Ok(Json(view(&hub, None)?));
+            return Ok(view(hub, None)?);
         }
         Change::Seen { bot } => {
             store.mark_runs_seen(&bot)?;
             hub.ext.watches.changed();
-            return Ok(Json(view(&hub, None)?));
+            return Ok(view(hub, None)?);
         }
     }
     hub.ext.watches.reload();
-    let mut view = view(&hub, None)?;
+    let mut view = view(hub, None)?;
     if let Some(id) = saved {
         view["saved"] = json!(id);
     }
-    Ok(Json(view))
+    Ok(view)
 }
 
 #[cfg(test)]

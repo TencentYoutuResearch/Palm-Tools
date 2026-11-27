@@ -55,8 +55,8 @@
       h(Failure, { text: error }))
   }
   // Broad task categories; small preferences belong in a section within a page.
-  const settingsSections = [['general', '常规'], ['appearance', '外观'], ['agents', 'Agent'], ['integrations', '插件与集成'], ['mobile', '手机与同步'], ['ssh', '主机与服务']]
-  const settingsSectionAliases = { notifications: 'general', personalization: 'appearance' }
+  const settingsSections = [['account', '账号与设备'], ['general', '常规'], ['appearance', '外观'], ['agents', 'Agent'], ['integrations', '插件与集成'], ['mobile', '手机与同步'], ['ssh', '主机与服务']]
+  const settingsSectionAliases = { notifications: 'general', personalization: 'appearance', devices: 'account' }
   function resolveSettingsSection(section) {
     const id = settingsSectionAliases[section] ?? section
     return settingsSections.some(([key]) => key === id) ? id : 'general'
@@ -87,6 +87,7 @@
     const options = hosts.hosts.map(row => ({ value: row.id, label: row.name }))
     if (!options.some(row => row.value === agentHost)) options.push({ value: agentHost, label: '正在读取主机…' })
     const bodies = {
+      account: () => h(AccountSettingsBody),
       agents: () => h(React.Fragment, null,
         h('div', { className: 'kode-settings-group' },
           h('h3', { className: 'kode-settings-group-title' }, '配置主机'),

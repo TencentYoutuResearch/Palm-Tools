@@ -9,47 +9,9 @@ import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 
 import '../api/api_client.dart';
+import '../protocol/protocol.dart';
 
-/// `{ id, mime, size }` as carried in a `message` or `tool_use` payload.
-class SessionImageRef {
-  final String id;
-  final String mime;
-  final int size;
-
-  const SessionImageRef({
-    required this.id,
-    required this.mime,
-    required this.size,
-  });
-
-  static final _id = RegExp(r'^[0-9a-f]{32}$');
-
-  String get extension => switch (mime) {
-    'image/jpeg' => 'jpg',
-    'image/gif' => 'gif',
-    'image/webp' => 'webp',
-    _ => 'png',
-  };
-
-  String get name => 'kode-$id.$extension';
-
-  /// Valid refs in [raw]; anything else in the list is skipped, so a
-  /// malformed id can never name a path outside the cache.
-  static List<SessionImageRef> listFrom(Object? raw) {
-    if (raw is! List) return const [];
-    return [
-      for (final item in raw)
-        if (item is Map &&
-            item['id'] is String &&
-            _id.hasMatch(item['id'] as String))
-          SessionImageRef(
-            id: item['id'] as String,
-            mime: item['mime'] as String? ?? 'image/png',
-            size: (item['size'] as num?)?.toInt() ?? 0,
-          ),
-    ];
-  }
-}
+export '../protocol/protocol.dart' show SessionImageRef;
 
 class SessionImageStore {
   SessionImageStore._();

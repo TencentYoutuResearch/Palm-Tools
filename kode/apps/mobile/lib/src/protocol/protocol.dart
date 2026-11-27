@@ -52,6 +52,58 @@ class Envelope {
   String toString() => 'Envelope($type sid=$sessionId ts=$ts)';
 }
 
+/// `{ id, mime, size }` as carried in session DTOs, `message` or `tool_use` payloads.
+class SessionImageRef {
+  final String id;
+  final String mime;
+  final int size;
+
+  const SessionImageRef({
+    required this.id,
+    required this.mime,
+    required this.size,
+  });
+
+  static final _idPattern = RegExp(r'^[0-9a-f]{32}$');
+
+  String get extension => switch (mime) {
+    'image/jpeg' => 'jpg',
+    'image/gif' => 'gif',
+    'image/webp' => 'webp',
+    _ => 'png',
+  };
+
+  String get name => 'kode-$id.$extension';
+
+  static SessionImageRef? tryParse(Object? raw) {
+    if (raw is! Map) return null;
+    final id = raw['id'];
+    if (id is! String || !_idPattern.hasMatch(id)) return null;
+    return SessionImageRef(
+      id: id,
+      mime: raw['mime'] as String? ?? 'image/png',
+      size: (raw['size'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  /// Valid refs in [raw]; anything else in the list is skipped, so a
+  /// malformed id can never name a path outside the cache.
+  static List<SessionImageRef> listFrom(Object? raw) {
+    if (raw is! List) return const [];
+    return [for (final item in raw) ?tryParse(item)];
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is SessionImageRef &&
+      other.id == id &&
+      other.mime == mime &&
+      other.size == size;
+
+  @override
+  int get hashCode => Object.hash(id, mime, size);
+}
+
 /// 协议 §4.1 / §5.3 session 对象。
 class SessionDto {
   final int id;
@@ -67,6 +119,17 @@ class SessionDto {
   final String? runtimeBackendKey;
   final String? permissionMode;
   final List<Map<String, dynamic>>? permissionModes;
+  final String? botId;
+  final String? botName;
+  final String? botTagline;
+  final String? botKind;
+  final String? avatarId;
+  final String? banner;
+  final SessionImageRef? avatarImage;
+  final SessionImageRef? backgroundImage;
+  final SessionImageRef? bannerImage;
+
+  bool get isBot => botId != null && botId!.trim().isNotEmpty;
 
   SessionDto({
     required this.id,
@@ -82,6 +145,15 @@ class SessionDto {
     this.runtimeBackendKey,
     this.permissionMode,
     this.permissionModes,
+    this.botId,
+    this.botName,
+    this.botTagline,
+    this.botKind,
+    this.avatarId,
+    this.banner,
+    this.avatarImage,
+    this.backgroundImage,
+    this.bannerImage,
   });
 
   factory SessionDto.fromJson(Map<String, dynamic> j) => SessionDto(
@@ -102,6 +174,15 @@ class SessionDto {
     permissionModes: (j['permission_modes'] as List?)
         ?.map((option) => Map<String, dynamic>.from(option as Map))
         .toList(),
+    botId: j['bot_id'] as String?,
+    botName: j['bot_name'] as String?,
+    botTagline: j['bot_tagline'] as String?,
+    botKind: j['bot_kind'] as String?,
+    avatarId: j['avatar_id'] as String?,
+    banner: j['banner'] as String?,
+    avatarImage: SessionImageRef.tryParse(j['avatar_image']),
+    backgroundImage: SessionImageRef.tryParse(j['background_image']),
+    bannerImage: SessionImageRef.tryParse(j['banner_image']),
   );
 
   SessionDto copyWith({
@@ -125,6 +206,15 @@ class SessionDto {
     runtimeBackendKey: runtimeBackendKey,
     permissionMode: permissionMode,
     permissionModes: permissionModes,
+    botId: botId,
+    botName: botName,
+    botTagline: botTagline,
+    botKind: botKind,
+    avatarId: avatarId,
+    banner: banner,
+    avatarImage: avatarImage,
+    backgroundImage: backgroundImage,
+    bannerImage: bannerImage,
   );
 }
 

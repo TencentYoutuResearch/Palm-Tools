@@ -151,9 +151,9 @@
         children))
   }
   // The roster as a row of avatars; the selected one shows its profile card.
-  function BotsRail({ bots, selected, defaultBot, unseen, onSelect, onCreate }) {
+  function BotsRail({ bots, selected, defaultBot, unseen, onSelect, onHover, onHoverEnd, onCreate }) {
     return h('div', { className: 'kode-bot-rail', role: 'toolbar', 'aria-label': '我的伙伴' },
-      ...bots.map(bot => h('button', { key: bot.id, type: 'button', className: 'kode-bot-rail-item', 'aria-pressed': selected === bot.id, title: bot.tagline ? `${bot.name} · ${bot.tagline}` : bot.name, onClick: event => onSelect(selected === bot.id ? null : bot.id, event.currentTarget) },
+      ...bots.map(bot => h('button', { key: bot.id, type: 'button', className: 'kode-bot-rail-item', 'aria-pressed': selected === bot.id, title: bot.tagline ? `${bot.name} · ${bot.tagline}` : bot.name, onMouseEnter: event => onHover?.(bot.id, event.currentTarget), onMouseLeave: () => onHoverEnd?.(), onClick: event => onSelect(selected === bot.id ? null : bot.id, event.currentTarget) },
         h('span', { className: 'kode-bot-rail-pill', 'aria-hidden': true }),
         h('span', { className: 'kode-bot-rail-avatar' }, h(BotAvatar, { bot, size: 56 }),
           defaultBot === bot.id && h('span', { className: 'kode-bot-rail-star', title: '默认伙伴' }, '★'),
@@ -163,10 +163,10 @@
         h('span', { className: 'kode-bot-rail-avatar' }, h(IconPlusOutlineRegular, { size: 24 })),
         h('span', { className: 'kode-bot-rail-name' }, '新建')))
   }
-  function BotProfilePopover({ bot, data, anchor, busy, onMessage, onConnectors, onBoard, onEdit, onClose }) {
+  function BotProfilePopover({ bot, data, anchor, busy, floatingStyle = null, onMouseEnter, onMouseLeave, onMessage, onConnectors, onBoard, onEdit, onClose }) {
     const library = useAvatarLibrary(Boolean(bot.avatar)), ref = React.useRef(null)
     useEffect(() => {
-      const away = event => { if (ref.current && !ref.current.contains(event.target) && !event.target.closest?.('.kode-bot-rail-item')) onClose() }
+      const away = event => { if (ref.current && !ref.current.contains(event.target) && !event.target.closest?.('.kode-bot-rail-item, .kode-bot-line')) onClose() }
       const key = event => { if (event.key === 'Escape') onClose() }
       document.addEventListener('mousedown', away); document.addEventListener('keydown', key)
       return () => { document.removeEventListener('mousedown', away); document.removeEventListener('keydown', key) }
@@ -175,7 +175,15 @@
     const watches = watchData?.watches.filter(row => row.bot === bot.id && row.enabled).length ?? 0
     const open = watchData?.tasks?.filter(task => task.bot === bot.id && task.kind === 'task' && !task.closed).length ?? 0
     const conns = (bot.connectors ?? []).filter(row => row.enabled !== false).length
-    return h('div', { ref, className: 'kode-bot-popover', role: 'dialog', 'aria-label': `${bot.name} 的资料`, style: { '--kode-bot-anchor': `${anchor ?? 48}px` } },
+    return h('div', {
+      ref,
+      className: `kode-bot-popover${floatingStyle ? ' is-floating' : ''}`,
+      role: 'dialog',
+      'aria-label': `${bot.name} 的资料`,
+      style: floatingStyle ?? { '--kode-bot-anchor': `${anchor ?? 48}px` },
+      onMouseEnter,
+      onMouseLeave,
+    },
       h('div', { role: 'button', tabIndex: 0, className: 'kode-bot-popover-edit', title: '点击编辑资料', onClick: onEdit, onKeyDown: event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onEdit() } } },
         h(BotNameplate, { bot, library, live: true },
           h('p', { className: 'kode-secondary' }, `${data.default_bot === bot.id ? '默认伙伴 · ' : ''}${conns ? `已接 ${conns} 个连接器 · ` : ''}${open ? `跟踪 ${open} 个任务 · ` : ''}${watches ? `关注与定时 ${watches} 项 · ` : ''}${bot.sessions?.length ?? 0} 个会话`))),
@@ -354,10 +362,16 @@
   function KodeBotsPage({ ui, leave }) {
     const { data, error: loadError } = useBots(), watchState = useWatches()
     const openSession = async id => { leave?.(); await ui()?.openSession(id) }
-    const [selected, setSelected] = useState(null), [anchor, setAnchor] = useState(null), [settings, setSettings] = useState(null)
+    const [selected, setSelected] = useState(null), [hovered, setHovered] = useState(null), [anchor, setAnchor] = useState(null), [settings, setSettings] = useState(null)
     const [quickCreate, setQuickCreate] = useState(false), [quickTemplate, setQuickTemplate] = useState(null)
     const [starting, setStarting] = useState(null), [busy, setBusy] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState('')
     const createRef = React.useRef(null), rosterRef = React.useRef(null)
+    const railHoverOpen = React.useRef(null), railHoverClose = React.useRef(null)
+    const clearRailTimers = () => {
+      if (railHoverOpen.current) { clearTimeout(railHoverOpen.current); railHoverOpen.current = null }
+      if (railHoverClose.current) { clearTimeout(railHoverClose.current); railHoverClose.current = null }
+    }
+    useEffect(() => () => clearRailTimers(), [])
     const bot = id => data?.bots.find(row => row.id === id)
     // Requests from elsewhere: a session header opens a bot's settings, the
     // sidebar badge its 关注, a created proposal its profile card.
@@ -433,20 +447,42 @@
       else if (routines.length) setNotice(`伙伴已创建。${routines.map(row => row.name).join('、')} 已建好但先暂停，到伙伴设置 → 关注与定时里打开。`)
       if (result.sessionId) await openSession(result.sessionId)
     })
-    const selectedBot = bot(selected), settingsBot = settings && bot(settings.id)
-    if (settingsBot) return h(BotSettingsPage, { key: settingsBot.id, bot: settingsBot, data, initialTab: settings.tab, ui: () => ({ openSession: id => { setSettings(null); return openSession(id) } }), onClose: () => setSettings(null), onDeleted: () => setSelected(null) })
+    const activeBotId = selected ?? hovered
+    const selectedBot = bot(activeBotId), settingsBot = settings && bot(settings.id)
+    const scheduleRailHover = (id, element) => {
+      if (selected || starting || quickCreate) return
+      if (railHoverClose.current) { clearTimeout(railHoverClose.current); railHoverClose.current = null }
+      const nextAnchor = element ? element.offsetLeft + element.offsetWidth / 2 : null
+      if (hovered === id) { setAnchor(nextAnchor); return }
+      if (railHoverOpen.current) clearTimeout(railHoverOpen.current)
+      railHoverOpen.current = setTimeout(() => {
+        railHoverOpen.current = null
+        setHovered(id)
+        setAnchor(nextAnchor)
+      }, hovered ? 60 : 120)
+    }
+    const scheduleRailLeave = () => {
+      if (railHoverOpen.current) { clearTimeout(railHoverOpen.current); railHoverOpen.current = null }
+      if (selected) return
+      if (railHoverClose.current) clearTimeout(railHoverClose.current)
+      railHoverClose.current = setTimeout(() => {
+        railHoverClose.current = null
+        setHovered(null)
+      }, 220)
+    }
+    if (settingsBot) return h(BotSettingsPage, { key: settingsBot.id, bot: settingsBot, data, initialTab: settings.tab, ui: () => ({ openSession: id => { setSettings(null); return openSession(id) } }), onClose: () => setSettings(null), onDeleted: () => { setSelected(null); setHovered(null) } })
     return h('div', { className: 'kode-agent-settings kode-bots-page' },
       h('header', { className: 'kode-bots-hero' },
         h('div', { className: 'kode-bots-hero-row' },
           h('div', null,
             h('h2', null, '伙伴'),
-            h('p', { className: 'kode-agent-intro' }, '有名字、角色、连接器和专属看板的长期助手。点头像看资料，配好后会立刻向你打招呼。')),
+            h('p', { className: 'kode-agent-intro' }, '有名字、角色、连接器和专属看板的长期助手。悬停或点头像看资料，配好后会立刻向你打招呼。')),
           h('div', { className: 'kode-bots-hero-actions' },
             h(Button, { variant: 'outline', disabled: Boolean(busy) || !data.agents.length, onClick: () => { if (quickCreate && !quickTemplate) { setQuickCreate(false) } else { openQuickForm(null) } } }, h(IconPlusOutlineRegular, { size: 15 }), '快速创建'),
             h(Button, { variant: 'primary', disabled: Boolean(busy) || !data.agents.length, onClick: () => void build(null) }, busy === 'builder' ? '正在打开…' : '对话定制')))),
       h('section', { ref: rosterRef, className: 'kode-bots-section kode-bots-roster' },
         h('h3', { className: 'kode-bots-section-title' }, `我的伙伴${data.bots.length ? ` · ${data.bots.length}` : ''}`),
-        h(BotsRail, { bots: data.bots, selected, defaultBot: data.default_bot, unseen: Object.fromEntries(data.bots.map(bot => [bot.id, (watchState.data?.unseen?.[bot.id] ?? 0) + inboxItems(watchState.data).filter(item => item.bot === bot.id).length])), onSelect: (id, element) => { setSelected(id); setStarting(null); setQuickCreate(false); setQuickTemplate(null); setAnchor(element ? element.offsetLeft + element.offsetWidth / 2 : null) }, onCreate: () => openQuickForm(null) }),
+        h(BotsRail, { bots: data.bots, selected: activeBotId, defaultBot: data.default_bot, unseen: Object.fromEntries(data.bots.map(bot => [bot.id, (watchState.data?.unseen?.[bot.id] ?? 0) + inboxItems(watchState.data).filter(item => item.bot === bot.id).length])), onHover: scheduleRailHover, onHoverEnd: scheduleRailLeave, onSelect: (id, element) => { clearRailTimers(); setHovered(null); setSelected(selected === id ? null : id); setStarting(null); setQuickCreate(false); setQuickTemplate(null); setAnchor(element ? element.offsetLeft + element.offsetWidth / 2 : null) }, onCreate: () => { clearRailTimers(); setHovered(null); openQuickForm(null) } }),
         !data.bots.length && !quickCreate && h('p', { className: 'kode-secondary' }, '还没有伙伴。可以点右上角「快速创建」直接上手，或从下面的模板与「对话定制」开始。'),
         quickCreate && h(BotQuickCreateForm, { key: quickTemplate?.id ?? 'blank', data, busy: Boolean(busy), initialTemplate: quickTemplate, onSubmit: quickSave, onCancel: () => { setQuickCreate(false); setQuickTemplate(null) } }),
         selectedBot && h(BotProfilePopover, {
@@ -454,11 +490,13 @@
           data,
           anchor,
           busy: Boolean(busy),
-          onClose: () => setSelected(null),
+          onMouseEnter: () => { if (railHoverClose.current) { clearTimeout(railHoverClose.current); railHoverClose.current = null } },
+          onMouseLeave: scheduleRailLeave,
+          onClose: () => { clearRailTimers(); setSelected(null); setHovered(null) },
           onMessage: () => void message(selectedBot),
-          onBoard: () => setSettings({ id: selectedBot.id, tab: 'tasks' }),
-          onConnectors: () => setSettings({ id: selectedBot.id, tab: 'connectors' }),
-          onEdit: () => setSettings({ id: selectedBot.id, tab: 'profile' }),
+          onBoard: () => { clearRailTimers(); setHovered(null); setSettings({ id: selectedBot.id, tab: 'tasks' }) },
+          onConnectors: () => { clearRailTimers(); setHovered(null); setSettings({ id: selectedBot.id, tab: 'connectors' }) },
+          onEdit: () => { clearRailTimers(); setHovered(null); setSettings({ id: selectedBot.id, tab: 'profile' }) },
         }),
         starting && h('form', { className: 'kode-agent-editor kode-bot-start', onSubmit: event => { event.preventDefault(); void start() } },
           h(SelectField, { label: '工作区', value: starting.workspace, options: [{ value: starting.bot.workspace, label: starting.bot.default_cwd ? data.workspaces.find(row => row.path === starting.bot.workspace)?.title ?? starting.bot.workspace : `伙伴自己的空间（${starting.bot.workspace}）` }, ...data.workspaces.filter(row => row.path !== starting.bot.workspace).map(row => ({ value: row.path, label: row.title }))], disabled: Boolean(busy), onChange: value => setStarting({ ...starting, workspace: value }) }),

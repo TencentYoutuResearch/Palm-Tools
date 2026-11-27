@@ -59,10 +59,11 @@
   import BackendIcon from './lib/BackendIcon.svelte'
   import AvatarSprite from './lib/AvatarSprite.svelte'
   import AvatarPicker from './lib/AvatarPicker.svelte'
+  import BotRosterSection, { type BotEntry } from './lib/BotRosterSection.svelte'
   import EventCenter from './lib/EventCenter.svelte'
   import ToastHost from './lib/ToastHost.svelte'
   import ScreenshotEditor, { type ScreenshotDraft, type ScreenshotCrop } from './lib/ScreenshotEditor.svelte'
-  import { avatarLibrary, loadAvatarLibrary, type AvatarStatus } from './lib/avatars'
+  import { avatarLibrary, loadAvatarLibrary, resolveBackgroundMedia, type AvatarStatus } from './lib/avatars'
   import { absoluteOsDroppedPaths, composerPathReferences, hasExternalFileDrag, htmlDroppedPaths } from './lib/file_drop'
   import { insertRemoteAttachments, RemoteDropGuard, withRemoteUpload } from './lib/remote_attachments'
   import {
@@ -89,7 +90,7 @@
   import type { DndEvent } from 'svelte-dnd-action'
   import { longpressGate, TAB_DRAG_LONG_PRESS_MS } from './lib/longpress_gate'
   import { outsidePressClose } from './lib/outside_close'
-  import { ipc, endpointIpc, backendAdminIpc, type BackendInfo, type EndpointSummary, type PersistedTab, type SessionId, type SpecOpsSession, type ThemeMode, type LocaleMode, type WorkerDirectoryEntry, type WorkerSessionDto } from './lib/ipc'
+  import { ipc, endpointIpc, backendAdminIpc, type BackendInfo, type BotRecord, type BotRoster, type EndpointSummary, type PersistedTab, type SessionId, type SpecOpsSession, type ThemeMode, type LocaleMode, type WorkerDirectoryEntry, type WorkerSessionDto } from './lib/ipc'
   import { memoryIpc, memoryMcpIpc } from './lib/ipc'
   import { watchCloudStatus } from './lib/cloud_status_watch'
   import { shortModelName, compactModelName, modelAbbr, backendChip, formatTokens } from './lib/model_alias'
@@ -122,7 +123,165 @@
   })
 
   let backends: BackendInfo[] = $state([])
+  let botRoster: BotRoster = $state({ bots: [] })
   let bootError: string | null = $state(null)
+
+  async function refreshBots() {
+    try {
+      const data = await ipc.listBots()
+      if (data && Array.isArray(data.bots)) {
+        botRoster = data
+      }
+    } catch {
+      // Workbench service may still be booting or older; keep existing list.
+    }
+  }
+
+  function botMainAliases(bot: BotRecord): string[] {
+    const fromBackend = botRoster.main_aliases?.[bot.id] ?? []
+    const direct = bot.main_session?.session_id ? [bot.main_session.session_id] : []
+    return Array.from(new Set([...fromBackend, ...direct]))
+  }
+
+  function tabMatchesBot(tab: TabInfo, bot: BotRecord): boolean {
+    const keys = [tab.dshSessionId, tab.sessionId].filter((v): v is string => Boolean(v))
+    const mainAliases = botMainAliases(bot)
+    if (mainAliases.length > 0 && keys.some((k) => mainAliases.includes(k))) return true
+    const adoptedMap = botRoster.adopted_aliases ?? botRoster.adopted
+    if (adoptedMap && keys.some((k) => adoptedMap[k] === bot.id)) return true
+    const homePrefix = (
+      botRoster.homes?.[bot.id]
+      ?? (botRoster.root ? `${botRoster.root.replace(/\/+$/, '')}/${bot.id}` : null)
+    )?.replace(/\/+$/, '')
+    if (homePrefix && tab.cwd) {
+      if (tab.cwd === homePrefix || tab.cwd.startsWith(`${homePrefix}/`)) return true
+    }
+    return false
+  }
+
+  function buildBotPersonaPrompt(bot: BotRecord): string {
+    const fromBackend = botRoster.effective_prompts?.[bot.id] ?? botRoster.persona_prompts?.[bot.id]
+    if (fromBackend && fromBackend.trim().length > 0) {
+      return fromBackend
+    }
+    const safeName = (bot.name || bot.id).replace(/["<>]/g, '')
+    const scope = `bot:${bot.id}`
+    return `<kode-agent-persona name="${safeName}">\nYou are ${safeName}, a long-lived agent the user set up in Kode.\n${(bot.persona ?? '').trim()}\n\nYour own working knowledge belongs to the Kode memory scope \`${scope}\`: search it and propose facts about how you work there; keep project facts in the project scope.\n</kode-agent-persona>`
+  }
+
+  function mapBotCeilingToPermission(ceiling?: string): 'plan' | 'default' | 'acceptEdits' | 'bypass' {
+    if (ceiling === 'plan') return 'plan'
+    if (ceiling === 'acceptEdits') return 'acceptEdits'
+    if (ceiling === 'bypassPermissions' || ceiling === 'bypass') return 'bypass'
+    return 'default'
+  }
+
+  function mapTabStatusToAvatar(tab?: TabInfo): AvatarStatus {
+    if (!tab) return 'idle'
+    if (tab.status === 'busy' || tab.status === 'starting') return 'running'
+    if (tab.status === 'exited') return 'error'
+    return 'idle'
+  }
+
+  let botEntries = $derived.by((): BotEntry[] =>
+    (botRoster.bots ?? []).map((bot) => {
+      const owned = $tabs.filter((t) => tabMatchesBot(t, bot))
+      const mainAliases = botMainAliases(bot)
+      const mainTab = mainAliases.length > 0
+        ? owned.find((t) => [t.dshSessionId, t.sessionId].some((k) => Boolean(k) && mainAliases.includes(k!))) ?? owned[0]
+        : owned[0]
+      const status: AvatarStatus = owned.some((t) => t.status === 'busy' || t.status === 'starting')
+        ? 'running'
+        : mapTabStatusToAvatar(mainTab)
+      const active = !chooserOpen && !deviceView && !panelView && owned.some((t) => t.id === $activeId)
+      return { bot, active, status, sessionCount: owned.length }
+    }),
+  )
+
+  let activeBot = $derived.by(() => {
+    const tab = $activeTab
+    if (!tab) return null
+    return (botRoster.bots ?? []).find((bot) => tabMatchesBot(tab, bot)) ?? null
+  })
+
+  let activeSceneBackground = $derived.by(() => {
+    if (chooserOpen || deviceView || panelView || viewHome) return null
+    const tab = $activeTab
+    if (!tab || tab.sharedRuntime) return null
+    return resolveBackgroundMedia(
+      $avatarLibrary,
+      tab.avatarId ?? activeBot?.avatar ?? null,
+      activeBot?.banner ?? null,
+    )
+  })
+
+  async function openBot(bot: BotRecord) {
+    deviceView = null
+    panelView = null
+    chooserOpen = false
+    const existing = $tabs.find((t) => tabMatchesBot(t, bot))
+    if (existing) {
+      activateTab(existing.id)
+      if (existing.sharedRuntime && dshView && $uiMode !== 'view') {
+        await switchMode('view')
+      }
+      return
+    }
+    if (dshView && $uiMode === 'view') {
+      postToHost({ type: 'kode-open-bot', botId: bot.id })
+      return
+    }
+    try {
+      const prepared = await ipc.mutateBots({ action: 'prepare_home', id: bot.id }).catch(() => null)
+      if (prepared && Array.isArray(prepared.bots)) {
+        botRoster = prepared
+      }
+      const perm = mapBotCeilingToPermission(bot.permission_ceiling)
+      const fallbackRoot = botRoster.root?.replace(/\/+$/, '')
+      const botCwd = botRoster.workspaces?.[bot.id]
+        || bot.default_cwd?.trim()
+        || botRoster.homes?.[bot.id]
+        || (fallbackRoot ? `${fallbackRoot}/${bot.id}` : undefined)
+      const created = await newTab(bot.backend_key, {
+        cwd: botCwd,
+        model: bot.model ?? undefined,
+        permissionMode: perm,
+        systemPrompt: buildBotPersonaPrompt(bot),
+      })
+      if (bot.avatar) setTabAvatar(created.id, bot.avatar)
+      if (bot.name) renameTab(created.id, bot.name)
+      const sessionId = created.sessionId
+      if (sessionId) {
+        void ipc.mutateBots({
+          action: 'set_main_session',
+          id: bot.id,
+          session: {
+            runtime: 'gui',
+            session_id: sessionId,
+          },
+        }).then((next) => {
+          if (next && Array.isArray(next.bots)) botRoster = next
+          else void refreshBots()
+        }).catch((err) => {
+          console.warn('[bots] set_main_session failed:', err)
+        })
+      }
+    } catch (e) {
+      pushToast({
+        severity: 'error',
+        title: bot.name,
+        detail: e instanceof Error ? e.message : String(e),
+        durationMs: 5000,
+      })
+    }
+  }
+
+  async function manageBots() {
+    if (dshView) {
+      if ($uiMode !== 'view') await switchMode('view')
+      postToHost({ type: 'kode-open-panel', panel: 'kode-bots' })
+    }
+  }
   let bootLoading = $state(true)
   let bootStep = $state(0)
   let bootSessionProgress = $state('')
@@ -1429,6 +1588,16 @@
     if (!$sessionViews.some((v) => v.extension === event.extension && v.view.id === event.view)) return
     if (event.action === 'panels') return postPanels()
     if (event.action === 'panel-show' || event.action === 'panel-hide') return onEmbeddedPanel(event)
+    if (event.action === 'open-account') {
+      const tab = event.params?.tab === 'relay' ? 'relay' : 'account'
+      openSettings(tab)
+      return
+    }
+    if (event.action === 'bots-changed') {
+      void refreshBots()
+      void loadAvatarLibrary(true)
+      return
+    }
     // The view's way back to Kode's terminals switches the whole mode.
     if (event.action === 'leave') return switchMode('tui')
     if (event.action === 'switch-view' && event.params.to === 'tui') {
@@ -1758,6 +1927,7 @@
       }
 
       void loadAvatarLibrary()
+      void refreshBots()
       advanceBoot(2)
       await startEventSubscriptions()
       advanceBoot(3)
@@ -2660,8 +2830,12 @@
                 {#if !monitorGrouped || sidebarMode === 'compact' || !isMonitorGroupCollapsed(group.cwd)}
                   <div class="monitor-session-list">
                     {#each group.sessions as session (session.id)}
-                      {@const openable = accountDeviceSessions.some((s) => s.id === session.id)
+                      {@const accountFull = accountDeviceSessions.find((s) => s.id === session.id)}
+                      {@const openable = Boolean(accountFull)
                         || Boolean(monitorWorkerId && !accountDeviceId(monitorWorkerId))}
+                      {@const rowTitle = (accountFull?.bot_kind === 'main' && accountFull?.bot_name?.trim())
+                        ? accountFull.bot_name.trim()
+                        : (session.title || session.backend_key)}
                       <svelte:element
                         this={openable ? 'button' : 'div'}
                         class="monitor-session-row"
@@ -2671,14 +2845,24 @@
                         onclick={openable ? () => openMonitorSession(session) : undefined}
                       >
                         <span class="monitor-status" class:busy={session.status === 'busy'}></span>
-                        <span class="monitor-session-tile" title={`${session.title || session.backend_key} · ${session.model || session.backend_key}`}>
-                          <BackendIcon backendKey={session.backend_key} size={20} />
+                        <span class="monitor-session-tile" title={`${rowTitle} · ${session.model || session.backend_key}`}>
+                          {#if accountFull?.avatar_id}
+                            <AvatarSprite
+                              label={rowTitle}
+                              compact={true}
+                              status={session.status === 'busy' ? 'running' : 'idle'}
+                              avatarId={accountFull.avatar_id}
+                              backendKey={session.backend_key}
+                            />
+                          {:else}
+                            <BackendIcon backendKey={session.backend_key} size={20} />
+                          {/if}
                           <span class="monitor-tile-dot" class:busy={session.status === 'busy'}></span>
                         </span>
                         <span class="monitor-session-copy">
-                          <strong>{session.title || session.backend_key}</strong>
+                          <strong>{rowTitle}</strong>
                           <small>
-                            {session.model || session.backend_key}
+                            {accountFull?.bot_tagline || session.model || session.backend_key}
                             {#if session.cwd && !monitorGrouped} · {session.cwd}{/if}
                           </small>
                         </span>
@@ -2690,9 +2874,17 @@
             {/each}
           </div>
         {/if}
-      {:else if $tabs.length === 0}
-        <div class="placeholder">No sessions</div>
       {:else}
+        <BotRosterSection
+          entries={botEntries}
+          compact={sidebarMode === 'compact'}
+          canManage={Boolean(dshView)}
+          onSelect={(bot) => void openBot(bot)}
+          onManage={() => void manageBots()}
+        />
+        {#if $tabs.length === 0}
+          <div class="placeholder">No sessions</div>
+        {:else}
         <!-- 多 workspace 且非 compact:渲染可折叠的分组 header + 每组独立 dndzone。
              单 workspace / compact:跳过 header,直接堆叠各组 tab(语义不变)。
              compact 多 workspace:组间加 1px 细分隔线(VS Code/Slack 式),不占横向空间。
@@ -2771,6 +2963,7 @@
             </div>
           {/each}
         </div>
+        {/if}
       {/if}
     </div>
     </div>
@@ -2912,6 +3105,16 @@
       />
       {/key}
     {/if}
+    {#if activeSceneBackground}
+      <div
+        class="scene-bg-backdrop"
+        style={activeSceneBackground.image
+          ? `background-image: url("${activeSceneBackground.image}")`
+          : `background: ${activeSceneBackground.background}`}
+        aria-hidden="true"
+      ></div>
+      <div class="scene-bg-scrim" aria-hidden="true"></div>
+    {/if}
     {#each $mountedIds as id (id)}
       {@const isActive = id === $activeId && !chooserOpen && !deviceView && !panelView}
       {@const tab = $tabs.find((t) => t.id === id)}
@@ -2940,12 +3143,19 @@
             {/if}
           </div>
         {:else if tab?.transportKind === 'acp'}
-          <StructuredSession bind:this={structuredSessions[id]} sessionId={id} visible={isActive} agentName={tab?.backendKey === 'codebuddy' ? 'CodeBuddy' : tab?.backendKey ?? 'Agent'} />
+          <StructuredSession
+            bind:this={structuredSessions[id]}
+            sessionId={id}
+            visible={isActive}
+            transparentBackground={isActive && Boolean(activeSceneBackground)}
+            agentName={tab?.backendKey === 'codebuddy' ? 'CodeBuddy' : tab?.backendKey ?? 'Agent'}
+          />
         {:else}
         <Terminal
           sessionId={id}
           visible={isActive}
           isDark={theme === 'dark' || (theme === 'system' && systemPrefersDark)}
+          transparentBackground={isActive && Boolean(activeSceneBackground)}
           endpointId={tab?.endpointId}
           onCloseSession={() => closeTab(id)}
         />
@@ -5041,6 +5251,28 @@
     color: var(--fg-primary);
     white-space: pre-wrap;
     word-break: break-word;
+  }
+
+  .scene-bg-backdrop {
+    position: absolute;
+    inset: 0;
+    background-size: cover;
+    background-position: center;
+    opacity: 0.16;
+    filter: saturate(1.05);
+    pointer-events: none;
+    z-index: 0;
+  }
+  .scene-bg-scrim {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--bg-main, #101216) 76%, transparent) 0%,
+      color-mix(in srgb, var(--bg-main, #101216) 88%, transparent) 100%
+    );
+    pointer-events: none;
+    z-index: 0;
   }
 
   @media (forced-colors: active) {

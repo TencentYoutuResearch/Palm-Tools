@@ -5,6 +5,7 @@
     const response = await fetchHost('/api/kode/bots', body ? { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : { credentials: 'same-origin', cache: 'no-store' })
     const value = await parseHostJson(response)
     if (!response.ok) throw new Error(value.error ?? '伙伴暂不可用')
+    if (body && kodeEmbedded()) window.kodeHost?.request('bots-changed')
     return value
   }
   // One roster for the sidebar section and the Bots page.
@@ -218,8 +219,67 @@
     const collapsed = useBotsCollapsed()
     const { data } = useBots(), watches = useWatches().data, [expanded, setExpanded] = useState({})
     const library = useAvatarLibrary(Boolean(data?.bots?.some(bot => bot.avatar)))
+    const [hovered, setHovered] = useState(null)
+    const [hoverBusy, setHoverBusy] = useState(false)
+    const openTimer = useRef(null), closeTimer = useRef(null)
+    const clearHoverTimers = () => {
+      if (openTimer.current) { clearTimeout(openTimer.current); openTimer.current = null }
+      if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null }
+    }
+    useEffect(() => () => clearHoverTimers(), [])
+    useEffect(() => { if (collapsed) { clearHoverTimers(); setHovered(null) } }, [collapsed])
     if (!data || collapsed) return null
     const start = bot => { requestedBotStart = bot?.id ?? null; openBotsPage?.() }
+    const measurePopover = element => {
+      const rect = element?.getBoundingClientRect?.()
+      if (!rect) return null
+      const vw = typeof window !== 'undefined' ? window.innerWidth || 1200 : 1200
+      const vh = typeof window !== 'undefined' ? window.innerHeight || 800 : 800
+      return {
+        left: Math.min(Math.round(rect.right + 4), Math.max(8, vw - 372)),
+        top: Math.max(12, Math.min(Math.round(rect.top - 8), Math.max(12, vh - 440))),
+        maxHeight: Math.max(240, vh - 24),
+      }
+    }
+    const scheduleHoverOpen = (botId, element) => {
+      if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null }
+      const coords = measurePopover(element)
+      if (!coords) return
+      if (hovered?.id === botId) { setHovered({ id: botId, ...coords }); return }
+      if (openTimer.current) clearTimeout(openTimer.current)
+      openTimer.current = setTimeout(() => {
+        openTimer.current = null
+        setHovered({ id: botId, ...coords })
+      }, hovered ? 60 : 140)
+    }
+    const scheduleHoverClose = () => {
+      if (openTimer.current) { clearTimeout(openTimer.current); openTimer.current = null }
+      if (closeTimer.current) clearTimeout(closeTimer.current)
+      closeTimer.current = setTimeout(() => {
+        closeTimer.current = null
+        setHovered(null)
+      }, 220)
+    }
+    const hoveredBot = hovered && data.bots.find(row => row.id === hovered.id)
+    const openHoverChat = async target => {
+      clearHoverTimers(); setHovered(null)
+      if (target.main_session_id) { await openSession(target.main_session_id); return }
+      if (hoverBusy) return
+      setHoverBusy(true)
+      try {
+        const greeted = await botsCall({ action: 'greet', id: target.id, idempotency_key: `bot-greet-${target.id}-${Date.now()}` })
+        void refreshBots()
+        if (greeted?.sessionId) { await openSession(greeted.sessionId); return }
+      } catch { /* Fall back to opening the bot page if greet is unavailable. */ }
+      finally { setHoverBusy(false) }
+      start(target)
+    }
+    const openHoverTab = (eventName, setter) => {
+      clearHoverTimers(); setHovered(null)
+      setter()
+      openBotsPage?.()
+      window.dispatchEvent(new CustomEvent(eventName))
+    }
     return h('div', { className: 'kode-bots-list', onClick: event => event.stopPropagation() },
       ...data.bots.flatMap(bot => {
         const main = bot.main_session_id
@@ -235,8 +295,10 @@
           type: 'button',
           className: `kode-bot-row kode-bot-item${banner ? ` has-banner is-${banner.kind}` : ''}`,
           style: bannerStyle,
-          title: bot.persona || bot.name,
-          onClick: () => main ? openSession(main) : start(bot),
+          'aria-label': bot.name,
+          onMouseEnter: event => scheduleHoverOpen(bot.id, event.currentTarget),
+          onMouseLeave: scheduleHoverClose,
+          onClick: () => { clearHoverTimers(); setHovered(null); if (main) openSession(main); else start(bot) },
         },
           h('span', { className: 'kode-bot-avatar-frame' }, h(BotAvatar, { bot, size: 32 })),
           h('span', { className: 'kode-bot-meta' },
@@ -255,7 +317,20 @@
             // Filed here by hand: it can go back to its project.
             row.adopted && h('span', { className: 'kode-bot-release', role: 'button', title: '移回原来的项目', onClick: event => { event.stopPropagation(); void botsCall({ action: 'adopt', session: row.id, id: null }).then(value => publishBots({ data: value, error: '' }), () => {}) } }, '×'))) : [])]
       }),
-      h('button', { type: 'button', className: 'kode-bot-row kode-bot-new', onClick: () => start(null) }, h('span', { className: 'kode-bot-avatar' }, h(IconPlusOutlineRegular, { size: 12 })), h('span', { className: 'kode-bot-name' }, data.bots.length ? '新建伙伴' : '创建第一个伙伴')))
+      h('button', { type: 'button', className: 'kode-bot-row kode-bot-new', onClick: () => start(null) }, h('span', { className: 'kode-bot-avatar' }, h(IconPlusOutlineRegular, { size: 12 })), h('span', { className: 'kode-bot-name' }, data.bots.length ? '新建伙伴' : '创建第一个伙伴')),
+      hoveredBot && typeof BotProfilePopover === 'function' && typeof document !== 'undefined' && document.body && createPortal(h(BotProfilePopover, {
+        bot: hoveredBot,
+        data,
+        busy: hoverBusy,
+        floatingStyle: { position: 'fixed', left: `${hovered.left}px`, top: `${hovered.top}px`, maxHeight: `${hovered.maxHeight}px` },
+        onMouseEnter: () => { if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null } },
+        onMouseLeave: scheduleHoverClose,
+        onClose: () => { clearHoverTimers(); setHovered(null) },
+        onMessage: () => void openHoverChat(hoveredBot),
+        onBoard: () => openHoverTab('kode-bot-tasks', () => { requestedBotTasks = hoveredBot.id }),
+        onConnectors: () => openHoverTab('kode-bot-connectors', () => { requestedBotConnectors = hoveredBot.id }),
+        onEdit: () => openHoverTab('kode-bot-edit', () => { requestedBotEdit = hoveredBot.id }),
+      }), document.body))
   }
   function BotModelPicker({ profileId, model, disabled, onChange }) {
     const store = directory(undefined, 'local', true, profileId)

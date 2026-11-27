@@ -971,8 +971,18 @@ fn session_to_dto(s: &Session) -> SessionDto {
 }
 
 async fn list_sessions(Extension(ctx): Extension<Arc<Ctx>>) -> Json<Value> {
-    let mut sessions: Vec<Value> = ctx.sessions.lock().values().map(|s|serde_json::to_value(session_to_dto(s)).unwrap_or_default()).collect();
-    sessions.extend(ctx.runtimes.snapshots().into_iter().map(|s|s["dto"].clone()));
+    let mut snapshots: Vec<Value> = ctx
+        .sessions
+        .lock()
+        .values()
+        .map(|s| json!({ "local_id": s.id, "dto": serde_json::to_value(session_to_dto(s)).unwrap_or_default() }))
+        .collect();
+    snapshots.extend(ctx.runtimes.snapshots());
+    messaging::project_ctx_sessions(&ctx, &mut snapshots);
+    let sessions: Vec<Value> = snapshots
+        .into_iter()
+        .map(|mut s| s["dto"].take())
+        .collect();
     Json(json!({ "sessions": sessions }))
 }
 
@@ -1233,12 +1243,22 @@ fn resume_meta_snapshot(
 async fn get_session(
     Extension(ctx): Extension<Arc<Ctx>>,
     Path(id): Path<SessionId>,
-) -> Result<Json<SessionDto>, ApiError> {
-    let g = ctx.sessions.lock();
-    let s = g
-        .get(&id)
-        .ok_or_else(|| ApiError::NotFound(format!("session {id}")))?;
-    Ok(Json(session_to_dto(s)))
+) -> Result<Json<Value>, ApiError> {
+    let dto = if let Some(s) = ctx.sessions.lock().get(&id) {
+        serde_json::to_value(session_to_dto(s)).unwrap_or_default()
+    } else if let Some(snap) = ctx
+        .runtimes
+        .snapshots()
+        .into_iter()
+        .find(|snap| snap["local_id"].as_u64() == Some(id))
+    {
+        snap["dto"].clone()
+    } else {
+        return Err(ApiError::NotFound(format!("session {id}")));
+    };
+    let mut snapshots = [json!({ "local_id": id, "dto": dto })];
+    messaging::project_ctx_sessions(&ctx, &mut snapshots);
+    Ok(Json(snapshots[0]["dto"].take()))
 }
 
 /// Stop a session and publish `session.exited`. Shared by the local DELETE
@@ -3631,7 +3651,12 @@ async fn ws_session(ctx: Arc<Ctx>, mut socket: WebSocket) {
     loop {
         tokio::select! {
             ev = rx.recv() => match ev {
-                Ok(env) => {
+                Ok(mut env) => {
+                    if matches!(env.r#type.as_str(), "session.created" | "session.updated") {
+                        let mut snapshots = [json!({ "local_id": env.session_id, "dto": env.payload })];
+                        messaging::project_ctx_sessions(&ctx, &mut snapshots);
+                        env.payload = snapshots[0]["dto"].take();
+                    }
                     if !ws_send(&mut socket, &env).await {
                         break;
                     }

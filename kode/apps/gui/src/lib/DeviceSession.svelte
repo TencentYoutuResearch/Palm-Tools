@@ -18,8 +18,10 @@
     type DiscoveredModel,
   } from './ipc'
   import Icon from './Icon.svelte'
+  import AvatarSprite from './AvatarSprite.svelte'
   import LinkedText from './LinkedText.svelte'
   import ConfirmDialog from './ConfirmDialog.svelte'
+  import { avatarLibrary, resolveBackgroundMedia } from './avatars'
   import { currentLocale, t } from './i18n'
   import {
     buildTimeline,
@@ -77,8 +79,14 @@
   let status = $derived(liveStatus(events, session.status))
   let busy = $derived(status === 'busy')
   let exited = $derived(status === 'exited')
-  let agentName = $derived(session.backend_key)
-  let sessionTitle = $derived(localTitle || session.title?.trim() || session.backend_key)
+  let agentName = $derived(session.bot_name?.trim() || session.backend_key)
+  let sessionTitle = $derived(
+    localTitle ||
+      (session.bot_kind === 'main' && session.bot_name?.trim() ? session.bot_name.trim() : '') ||
+      session.title?.trim() ||
+      session.backend_key,
+  )
+  let remoteSceneBg = $derived(resolveBackgroundMedia($avatarLibrary, session.avatar_id ?? null, session.banner ?? null))
   let currentModel = $derived.by(() => {
     for (let index = events.length - 1; index >= 0; index--) {
       const event = events[index]
@@ -378,9 +386,27 @@
   }
 </script>
 
-<section class="device-session" aria-label={t('devices.sessionLabel', { device: device.name, session: sessionTitle })}>
+<section class="device-session" class:has-scene={!!remoteSceneBg} aria-label={t('devices.sessionLabel', { device: device.name, session: sessionTitle })}>
+  {#if remoteSceneBg}
+    <div
+      class="device-scene-bg"
+      style={remoteSceneBg.image ? `background-image: url("${remoteSceneBg.image}")` : `background: ${remoteSceneBg.background}`}
+      aria-hidden="true"
+    ></div>
+    <div class="device-scene-scrim" aria-hidden="true"></div>
+  {/if}
   <header>
-    <Icon name="monitor" size={14} />
+    {#if session.avatar_id || session.bot_id}
+      <AvatarSprite
+        label={sessionTitle}
+        compact={true}
+        status={busy ? 'running' : exited ? 'error' : 'idle'}
+        avatarId={session.avatar_id ?? null}
+        backendKey={session.backend_key}
+      />
+    {:else}
+      <Icon name="monitor" size={14} />
+    {/if}
     <div class="heading">
       {#if renameOpen}
         <form
@@ -401,7 +427,7 @@
       {:else}
         <strong>{sessionTitle}</strong>
       {/if}
-      <span>{device.name} · {session.cwd}</span>
+      <span>{device.name}{session.bot_tagline ? ` · ${session.bot_tagline}` : ''} · {session.cwd}</span>
     </div>
     <span class="status {status}">{tr(`devices.status.${['busy', 'idle', 'starting', 'exited'].includes(status) ? status : 'idle'}`)}</span>
     {#if workerScoped && !exited}
@@ -602,7 +628,10 @@
 {/if}
 
 <style>
-  .device-session { position: absolute; inset: 0; bottom: var(--bottom-terminal-h, 0px); z-index: 2; display: flex; flex-direction: column; padding-top: 44px; color: var(--fg-primary); background: var(--bg-base); font: var(--fs-md) var(--font-ui); }
+  .device-session { position: absolute; inset: 0; bottom: var(--bottom-terminal-h, 0px); z-index: 2; display: flex; flex-direction: column; padding-top: 44px; color: var(--fg-primary); background: var(--bg-base); font: var(--fs-md) var(--font-ui); isolation: isolate; }
+  .device-scene-bg { position: absolute; inset: 0; z-index: -2; background-size: cover; background-position: center; opacity: 0.22; pointer-events: none; }
+  .device-scene-scrim { position: absolute; inset: 0; z-index: -1; background: linear-gradient(180deg, color-mix(in srgb, var(--bg-base) 76%, transparent) 0%, color-mix(in srgb, var(--bg-base) 90%, transparent) 100%); pointer-events: none; }
+  .device-session.has-scene article { background: color-mix(in srgb, var(--bg-card) 86%, transparent); backdrop-filter: blur(8px); }
   header { display: flex; align-items: center; gap: 10px; padding: 8px 20px; border-bottom: 1px solid var(--bd-default); color: var(--fg-secondary); }
   .heading { display: grid; flex: 1; min-width: 0; }
   .heading strong { overflow: hidden; color: var(--fg-primary); text-overflow: ellipsis; white-space: nowrap; }

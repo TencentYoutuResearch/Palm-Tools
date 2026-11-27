@@ -54,6 +54,16 @@ pub async fn integration_action(action: String, payload: Option<Value>) -> Resul
     }
 }
 
+#[tauri::command]
+pub async fn list_bots() -> Result<Value, String> {
+    call("/workbench/bots", None).await
+}
+
+#[tauri::command]
+pub async fn mutate_bots(change: Value) -> Result<Value, String> {
+    call("/workbench/bots", Some(change)).await
+}
+
 fn event_key(event: &kode_bridge::EventEnvelope) -> String {
     let bytes = serde_json::to_vec(event).unwrap_or_default();
     let hash = bytes.iter().fold(0xcbf29ce484222325u64, |hash, byte| {

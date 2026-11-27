@@ -2030,17 +2030,7 @@ fn dedupe_session_snapshots(snapshots: Vec<Value>) -> Vec<Value> {
 }
 
 fn project_mobile_workspaces(ctx: &crate::Ctx, snapshots: &mut [Value]) {
-    let store = ctx.runtimes.workbench_store.lock().upgrade();
-    if let Some(store) = store {
-        match (store.document("workspaces"), store.document("session-index")) {
-            (Ok(workspaces), Ok(index)) => {
-                crate::messaging::project_mobile_workspaces(snapshots, &workspaces, &index);
-            }
-            (Err(error), _) | (_, Err(error)) => {
-                tracing::warn!(%error, "mobile workspace projection unavailable");
-            }
-        }
-    }
+    crate::messaging::project_ctx_sessions(ctx, snapshots);
 }
 
 fn snapshot_session_ids(sessions: &[Value]) -> HashSet<u64> {

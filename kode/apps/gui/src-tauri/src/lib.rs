@@ -207,6 +207,8 @@ pub fn run() {
             commands::specops_close,
             commands::get_pairing_payload,
             backend_runtime::integration_action,
+            backend_runtime::list_bots,
+            backend_runtime::mutate_bots,
             backend_runtime::shared_runtime_sessions,
             backend_runtime::native_transcript_available,
             backend_runtime::shared_runtime_request,

@@ -261,6 +261,10 @@
     useEffect(() => () => resumeRequest.current?.abort(), [])
     const source = props.useSessions(state => state), workspaceSource = props.useWorkspaces(state => state)
     const bots = useBots()
+    const accountDevices = useSyncExternalStore(devicesStore.subscribe, devicesStore.getSnapshot)
+    const activeRemoteDevice = accountDevices.activeDeviceId
+      ? accountDevices.devices.find(d => d.device_id === accountDevices.activeDeviceId) ?? { device_id: accountDevices.activeDeviceId, name: accountDevices.activeDeviceId, online: false }
+      : null
     const archivedFilter = props.useStore?.(state => state.archivedFilter) ?? 'default'
     const liveSessionKey = source.ids.filter(id => !source.byId[id]?.blank).join('\0')
     useEffect(() => { void refreshWorkspaceDirectory() }, [workspaceSource.archivedSessionIds, liveSessionKey])
@@ -474,12 +478,15 @@
       return `${selector}{font-size:0;visibility:hidden}${selector}::after{content:"已保存";font-size:12px;visibility:visible}`
     }).join('\n')
     return h('div', { className: 'kode-unified-workspaces', 'aria-busy': busy, ref: treeRoot },
-      h(SessionStatusAvatars, { root: treeRoot, rows: merged.sessions.byId, workspaces: merged.workspaces.items, statuses: sessionStatuses,
+      h(DeviceSwitcherBar, { wide: props.wide !== false }),
+      !activeRemoteDevice && h(SessionStatusAvatars, { root: treeRoot, rows: merged.sessions.byId, workspaces: merged.workspaces.items, statuses: sessionStatuses,
         archivedSessionIds: merged.workspaces.archivedSessionIds }),
-      h('style', null, remoteCss + savedCss),
+      !activeRemoteDevice && h('style', null, remoteCss + savedCss),
       notice && h(Toast, { key: notice.id, text: notice.text, icon: notice.warning ? h(IconWarningOutlineRegular) : undefined,
         onDone: () => setNotice(current => current?.id === notice.id ? null : current) }),
-      h(native, { ...props, useSessions: selector => selector(merged.sessions), useWorkspaces: selector => selector(merged.workspaces), open, renderSlot, requestSessionRename: requestRename,
+      activeRemoteDevice
+        ? h(RemoteDeviceSidebar, { device: activeRemoteDevice, wide: props.wide !== false })
+        : h(native, { ...props, useSessions: selector => selector(merged.sessions), useWorkspaces: selector => selector(merged.workspaces), open, renderSlot, requestSessionRename: requestRename,
         startSession: (id, options) => {
           const route = merged.routes.get(id)
           if (route?.placeholder) return void navigate(route.hostId, { create: true })

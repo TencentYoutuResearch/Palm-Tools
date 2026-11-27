@@ -5,7 +5,6 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kode_mobile/src/api/api_client.dart';
 import 'package:kode_mobile/src/protocol/protocol.dart';
-import 'package:kode_mobile/src/storage/session_images.dart';
 
 const _id = '0123456789abcdef0123456789abcdef';
 

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { avatarLibrary, loadAvatarLibrary, type AvatarStatus } from './avatars'
+  import { avatarLibrary, findGalleryAvatar, loadAvatarLibrary, type AvatarStatus } from './avatars'
   import BackendIcon from './BackendIcon.svelte'
 
   type Props = {
@@ -28,22 +28,19 @@
   let windowFocused = $state(true)
   let motionAllowed = $state(true)
 
+  // gallery fallback (also resolves renamed `.dsh-gallery.json` aliases)
+  let gallerySet = $derived(findGalleryAvatar($avatarLibrary, avatarId))
+  let canonicalId = $derived(gallerySet?.name ?? avatarId)
+
   // 当前 status 下可用的 fold set，包含两部分:
   // 1) 匹配 avatarId 的 gallery 专用 sets("gallery/panda/running/"→name"gallery/panda")
   // 2) 共享的通用 status sets("running/01"、"running/02")
   // 排除其他 gallery 的 status sets(如"gallery/fox"不属于当前 avatar)
   let allSets = $derived(
-    avatarId
+    canonicalId
       ? ($avatarLibrary[status] ?? []).filter((s) =>
-          s.name.startsWith(avatarId) || s.name.startsWith(status + '/'))
+          s.name === canonicalId || s.name.startsWith(canonicalId + '/') || s.name.startsWith(status + '/'))
       : [],
-  )
-
-  // gallery fallback
-  let gallerySet = $derived(
-    avatarId
-      ? ($avatarLibrary.gallery ?? []).find((s) => s.name.startsWith(avatarId)) ?? null
-      : null,
   )
 
   // 当前选中的 fold 下标

@@ -9,22 +9,34 @@ const BOTS = `${PREFIX}workbench/bots`
 const STATUSES = ['planned', 'in_progress', 'waiting', 'needs_user', 'done', 'cancelled']
 const inside = (path, folder) => Boolean(path && folder) && (path === folder || path.startsWith(`${folder.replace(/\/$/, '')}/`))
 
-export async function ownerOf(admin, sessionId, cwd, signal) {
+export async function ownerOf(admin, sessionId, cwd, signal, extraAliases = []) {
   const roster = await admin.call(BOTS, undefined, signal)
-  const id = String(sessionId)
-  let bot = roster.bots.find(row => row.main_session?.runtime === 'dsh' && row.main_session.session_id === id)
-    ?? roster.bots.find(row => roster.adopted?.[id] === row.id)
+  const keys = Array.from(new Set([String(sessionId), ...extraAliases.filter(Boolean).map(String)]))
+  const adoptedMap = { ...(roster.adopted ?? {}), ...(roster.adopted_aliases ?? {}) }
+  let bot = roster.bots.find(row => {
+    const mainAliases = new Set([
+      ...(roster.main_aliases?.[row.id] ?? []),
+      ...(row.main_session?.session_id ? [row.main_session.session_id] : []),
+    ])
+    return keys.some(k => mainAliases.has(k))
+  })
+    ?? roster.bots.find(row => keys.some(k => adoptedMap[k] === row.id))
   if (!bot) {
     const runs = (await admin.call(WATCHES, undefined, signal).catch(() => null))?.runs ?? []
-    const run = runs.find(row => row.session_uuid === id)
+    const run = runs.find(row => keys.includes(row.session_uuid))
     bot = run && roster.bots.find(row => row.id === run.bot)
   }
   bot ??= roster.bots.find(row => inside(cwd, roster.homes?.[row.id]))
   return { roster, bot }
 }
 
+function agentAliases(agent) {
+  const threadId = agent?.ctx?.get?.('kodeAgents')?.bindings?.get?.(agent.id)?.threadId
+  return threadId ? [threadId] : []
+}
+
 async function mine(admin, agent, signal) {
-  const { bot } = await ownerOf(admin, agent.id, agent.session?.header?.cwd, signal)
+  const { bot } = await ownerOf(admin, agent.id, agent.session?.header?.cwd, signal, agentAliases(agent))
   if (!bot) throw new Error('这个会话不属于任何伙伴：任务板、计划和定时只在伙伴自己的会话里可用。')
   return bot
 }
@@ -80,7 +92,12 @@ export function botTools(admin, agent) {
         ...(args.task_id ? { id: args.task_id } : {}), bot: bot.id,
         ...Object.fromEntries(['title', 'detail', 'status', 'reason'].filter(key => args[key] !== undefined).map(key => [key, args[key]])),
         ...(due !== undefined ? { due } : {}),
-        ...(args.link_session ? { session: { runtime: 'dsh', session_id: String(args.link_session) } } : {}),
+        ...(args.link_session ? {
+          session: {
+            runtime: String(args.link_session).startsWith('kode:runtime:gui:') ? 'gui' : 'dsh',
+            session_id: String(args.link_session),
+          },
+        } : {}),
         ...(args.unlink_session ? { unlink: true } : {}),
       } }, signal)
       if (task.bot !== bot.id) throw new Error('这个任务属于别的伙伴')
@@ -101,7 +118,7 @@ export function botTools(admin, agent) {
       since_hours: { type: 'number', description: 'Look back this many hours (default 24, at most 336).' },
       workspace: { type: 'string', description: 'Only this folder and below.' },
     }, async (args, signal) => {
-      const { bot } = await ownerOf(admin, agent.id, agent.session?.header?.cwd, signal)
+      const { bot } = await ownerOf(admin, agent.id, agent.session?.header?.cwd, signal, agentAliases(agent))
       const hours = Math.min(336, Math.max(0.25, Number(args.since_hours) || 24))
       const query = new URLSearchParams({ since: String(Date.now() - hours * 3_600_000) })
       if (args.workspace) query.set('workspace', String(args.workspace))
@@ -143,7 +160,7 @@ export function botTools(admin, agent) {
 
 /** A WeCom message from a bot that drafts outbound messages waits for the user. */
 export async function draftOutbound(admin, agent, args, signal) {
-  const { bot } = await ownerOf(admin, agent.id, agent.session?.header?.cwd, signal)
+  const { bot } = await ownerOf(admin, agent.id, agent.session?.header?.cwd, signal, agentAliases(agent))
   if (bot?.outbound !== 'draft') return null
   const content = String(args.content ?? '')
   const { task } = await admin.call(TASKS, { action: 'upsert', task: {
