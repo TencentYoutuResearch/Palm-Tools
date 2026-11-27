@@ -497,15 +497,7 @@ export function registerBotsApi(ctx, backend, { fetcher = globalThis.fetch, weco
         return send(res, 200, await backend.call(TASKS, { ...rest, action: action.slice('task_'.length) }))
       }
       if (input?.action === 'outbox_send') { await sendDraft(input); return send(res, 200, { sent: true }) }
-      if (WATCH_ACTIONS.includes(input?.action)) {
-        const result = await backend.call(WATCHES, { ...input, action: input.action.slice('watch_'.length) })
-        if (input.action === 'watch_toggle' && input.id) {
-          await connectorsStore.syncByWatchToggle(input.id, input.enabled).catch(() => {})
-        } else if (input.action === 'watch_delete' && input.id) {
-          await connectorsStore.removeByWatchId(input.id).catch(() => {})
-        }
-        return send(res, 200, result)
-      }
+      if (WATCH_ACTIONS.includes(input?.action)) return send(res, 200, await backend.call(WATCHES, { ...input, action: input.action.slice('watch_'.length) }))
       if (input?.action === 'forget') {
         await backend.call(BOTS, { action: 'set_main_session', id: input.id, session: null })
         return send(res, 200, await view())

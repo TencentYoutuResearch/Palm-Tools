@@ -143,12 +143,17 @@
   function BotWatches({ bot, workspaces, ui, routines = [], onOpenConnectors }) {
     const { data, error: loadError } = useWatches()
     const [draft, setDraft] = useState(null), [busy, setBusy] = useState(false), [error, setError] = useState('')
-    const connectorWatchIds = new Set((bot.connectors ?? []).map(row => row.watch_id).filter(Boolean))
-    const act = async (body, syncBots = false) => {
+    const connectorByWatchId = new Map((bot.connectors ?? []).filter(row => row.watch_id).map(row => [row.watch_id, row]))
+    const act = async body => {
+      setBusy(true); setError('')
+      try { await watchAct(body); return true } catch (failure) { setError(failure.message); return false } finally { setBusy(false) }
+    }
+    const connectorAct = async body => {
       setBusy(true); setError('')
       try {
-        await watchAct(body)
-        if (syncBots && typeof refreshBots === 'function') void refreshBots()
+        const value = await botsCall(body)
+        if (Array.isArray(value?.bots)) publishBots({ data: value, error: '' })
+        publishWatches({ data: await watchesCall(), error: '' })
         return true
       } catch (failure) { setError(failure.message); return false } finally { setBusy(false) }
     }
@@ -164,11 +169,19 @@
         h('span', { className: 'kode-secondary' }, '常用节奏：'),
         ...routines.map(routine => h('button', { key: routine.id, type: 'button', className: 'kode-banner-chip', title: `${routine.when} · ${routine.summary}`, disabled: busy, onClick: () => setDraft(routineDraft(routine)) }, routine.name))),
       watches.length ? h('ul', { className: 'kode-watch-list' }, ...watches.map(watch => {
-        const fromConnector = connectorWatchIds.has(watch.id)
+        const linkedConnector = connectorByWatchId.get(watch.id)
+        const fromConnector = Boolean(linkedConnector)
         return draft?.id === watch.id
           ? h('li', { key: watch.id }, h(WatchEditor, { draft, workspaces, busy, onChange: setDraft, onSave: save, onCancel: () => setDraft(null) }))
           : h('li', { key: watch.id, className: 'kode-watch-row', 'data-enabled': watch.enabled },
-            h(FastSwitch, { checked: watch.enabled, disabled: busy, label: watch.enabled ? '暂停' : '启用', onChange: enabled => void act({ action: 'watch_toggle', id: watch.id, enabled }, fromConnector) }),
+            h(FastSwitch, {
+              checked: watch.enabled,
+              disabled: busy,
+              label: watch.enabled ? '暂停' : '启用',
+              onChange: enabled => void (linkedConnector
+                ? connectorAct({ action: 'connector_toggle', id: linkedConnector.id, enabled })
+                : act({ action: 'watch_toggle', id: watch.id, enabled })),
+            }),
             h('div', { className: 'kode-watch-text' },
               h('span', { className: 'kode-agent-name' }, watch.spec.name, fromConnector && h('span', { className: 'kode-agent-tag', style: { marginInlineStart: '6px' } }, '连接器自动绑定')),
               h('span', { className: 'kode-secondary' }, watchSummary(watch.spec))),
@@ -176,7 +189,15 @@
             fromConnector && onOpenConnectors
               ? h(Button, { disabled: busy || !!draft, onClick: onOpenConnectors }, '去连接器配置')
               : h(Button, { disabled: busy || !!draft, onClick: () => setDraft(watchDraft(watch)) }, '编辑'),
-            h(Button, { disabled: busy, onClick: () => { if (confirm(fromConnector ? `删除此关注会同时移除对应的连接器「${watch.spec.name.replace(/^连接器 · /, '')}」，确定删除？` : `删除关注「${watch.spec.name}」？已有的动态会保留。`)) void act({ action: 'watch_delete', id: watch.id }, fromConnector) } }, '删除'))
+            h(Button, {
+              disabled: busy,
+              onClick: () => {
+                if (!confirm(fromConnector ? `删除此关注会同时移除连接器「${linkedConnector.name}」，确定删除？` : `删除关注「${watch.spec.name}」？已有的动态会保留。`)) return
+                void (linkedConnector
+                  ? connectorAct({ action: 'connector_delete', id: linkedConnector.id })
+                  : act({ action: 'watch_delete', id: watch.id }))
+              },
+            }, '删除'))
       })) : null,
       draft && !draft.id ? h(WatchEditor, { draft, workspaces, busy, onChange: setDraft, onSave: save, onCancel: () => setDraft(null) })
         : h(Button, { variant: 'outline', className: 'kode-agent-add', disabled: busy || !!draft, onClick: () => setDraft(watchDraft(null)) }, h(IconPlusOutlineRegular, { size: 16 }), '添加关注'),
