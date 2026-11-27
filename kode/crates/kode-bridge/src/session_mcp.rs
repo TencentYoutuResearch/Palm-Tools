@@ -219,7 +219,7 @@ fn tool_definitions(message_titles: bool, queued_messages: bool) -> Vec<Value> {
         "node_id":{"type":"string"},"session_id":{"type":"string"},"content":{"type":"string"},
         "idempotency_key":{"type":"string"},"in_reply_to":{"type":"string"}
     });
-    let mut send_description = "Send a request or reply to another conversation. Delivery is not task completion. Reuse idempotency_key only for a retry; reply with in_reply_to.".to_owned();
+    let mut send_description = "Send a request or reply to another conversation. Delivery is not task completion. For long tasks, ask the peer to send the result and end your turn when your own work is done. Its reply wakes your idle session. Reuse idempotency_key only for a retry; reply with in_reply_to.".to_owned();
     if queued_messages {
         send_properties["interrupt"] = json!({"type":"boolean","description":"Set false to queue until the recipient finishes its current turn. Defaults to true."});
     }
@@ -238,7 +238,7 @@ fn tool_definitions(message_titles: bool, queued_messages: bool) -> Vec<Value> {
     definition("kode_sessions_cancel_input","Request cancellation of your own message. Queue removal is not proof of stopping execution; the result may remain cancel_unconfirmed.",json!({"message_id":{"type":"string"}}),&["message_id"]),
     definition("kode_sessions_cancellation_status","Read the persisted cancellation result. A stop request does not prove termination.",json!({"message_id":{"type":"string"}}),&["message_id"]),
     definition("kode_sessions_read","Read bounded message and receipt previews. Follow cursor until empty. Use the continuation tool for truncated content.",json!({"after":{"type":"integer","minimum":0}}),&[]),
-    definition("kode_sessions_wait","Wait up to 30 seconds for this conversation's messages or receipts.",json!({"after":{"type":"integer","minimum":0},"timeout_seconds":{"type":"integer","minimum":1,"maximum":30}}),&["after"]),
+    definition("kode_sessions_wait","Wait once for an imminent message or receipt (1–30 seconds, default 15). For longer work, ask the peer to send the result, continue independent work, then end your turn. The incoming reply wakes an idle Kode session. Avoid repeated waits, including scripted polling loops.",json!({"after":{"type":"integer","minimum":0},"timeout_seconds":{"type":"integer","minimum":1,"maximum":30}}),&["after"]),
     definition("memory_search","Search reviewed memory on this Host's Kode backend.",json!({"query":{"type":"string"},"scope":{"type":"string"},"top_k":{"type":"integer"}}),&["query"]),
     definition("memory_read","Read one reviewed Kode memory fact and its backlinks.",json!({"id":{"type":"string"}}),&["id"]),
     definition("memory_list_recent","Read recently reviewed Kode memories.",json!({"scope":{"type":"string"},"since_hours":{"type":"integer"},"limit":{"type":"integer"}}),&[]),

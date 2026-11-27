@@ -1,6 +1,7 @@
 import { admitHostRequest } from './host-admission.js'
 /** Owner-only Agent configuration API over dsh's existing authenticated Web carrier. */
 import { HistoryEditor } from './history-edit.js'
+import { findExecutable } from './agent-defaults.js'
 import { AGENT_TYPES } from './agent-profiles.js'
 import { profileRoute } from './agent-runtime.js'
 import { SUPPORTED_AGENT_TYPES } from './native-session.js'
@@ -49,11 +50,19 @@ export function registerAgentApi(ctx, service) {
         const storedRow = sessionId && !agent ? (await controller().list?.({}))?.items.find(row => row.sessionId === sessionId) : undefined
         const stored = storedRow?.projections?.values?.modelSelection
         const selection = agent ? selected(agent) : stored?.pending ?? stored?.next ?? stored?.lastUsed ?? ctx.agentDefaultModel.currentSelection()
-        const inferred = profiles.list().find(p => profileRoute(p.id) === selection?.provider)
-        const configuredDefault = profiles.list().find(p => p.id === profiles.defaultProfileId && available(p))
+        const canChangeAgent = agent ? agent.status === 'idle' && !(positionOf(agent)?.lastTurn > 0) : storedRow?.blank === true
+        const choosing = !configurationOnly && (!sessionId || canChangeAgent)
+        const presented = (service.appearance?.profilesView() ?? profiles.list()).filter(available)
+        const cwd = agent?.session.header?.cwd ?? storedRow?.cwd
+        const installed = choosing ? (await Promise.all(presented.map(async p =>
+          p.type === 'dsh' || await findExecutable(p.executable, p.env?.PATH, cwd) ? p : null
+        ))).filter(Boolean) : presented
+        const candidates = choosing ? installed : profiles.list()
+        const inferred = candidates.find(p => profileRoute(p.id) === selection?.provider)
+        const configuredDefault = candidates.find(p => p.id === profiles.defaultProfileId && available(p))
         const requestedProfileId = configurationOnly && !sessionId ? query.get('profile_id') : null
         if (requestedProfileId && !profiles.list().some(profile => profile.id === requestedProfileId)) throw new Error('unknown Agent profile')
-        const selectedProfileId = binding?.profile.id ?? requestedProfileId ?? (!sessionId ? configuredDefault?.id : undefined) ?? inferred?.id ?? profiles.list().find(p => p.type === 'dsh')?.id
+        const selectedProfileId = binding?.profile.id ?? requestedProfileId ?? (!sessionId ? configuredDefault?.id : undefined) ?? inferred?.id ?? candidates.find(p => p.type === 'dsh')?.id ?? installed[0]?.id
         const profile = binding?.profile ?? profiles.list().find(p => p.id === selectedProfileId)
         const catalog = { groups: [] }
         if (query.get('refresh') === '1' && profile) adapter.invalidateModels?.(profileRoute(profile.id))
@@ -66,7 +75,6 @@ export function registerAgentApi(ctx, service) {
           catch (error) { modelError = error.message }
         }
         const policy = agent?.ctx?.get('sandboxPolicy')?.resolve({ session: agent.session })
-        const installed = (service.appearance?.profilesView() ?? profiles.list()).filter(available)
         const visibleProfile = profile && (service.appearance?.profileView(profile, sessionId, appearanceIndex) ?? profile)
         const skills = query.get('skills') === '1' && profile && available(profile) ? await adapter.listSkills(profileRoute(profile.id), profile, agent?.session.header.cwd ?? (await controller().list({})).items.find(row => row.sessionId === sessionId)?.cwd) : undefined
         const fastState = agent ? ctx.sessionProjections.stateOf(agent.session, 'kodeFast') : storedRow?.projections?.values?.kodeFast
@@ -75,7 +83,7 @@ export function registerAgentApi(ctx, service) {
         const fast = effectiveFast(fastState, selection, selectedModel)
         json(res, 200, { types: service.types ?? AGENT_TYPES, profiles: installed, defaultProfileId: configuredDefault?.id ?? installed.find(p => p.type === 'codex')?.id ?? installed[0]?.id, configuredDefaultProfileId: configuredDefault?.id ?? null, currentProfile: profile && available(profile) ? visibleProfile : null, unavailableRuntime: Boolean(profile && !available(profile)), binding: binding ? { profileId: binding.profile.id, name: visibleProfile.name, type: binding.profile.type } : null,
           selectedProfileId, selection: displaySelection, defaultModelSelection, catalog, models, modelError, ...(fast === undefined ? {} : { fast }), ...(skills ? { skills: skills.skills, skillErrors: skills.errors } : {}),
-          canChangeAgent: agent ? agent.status === 'idle' && !(positionOf(agent)?.lastTurn > 0) : storedRow?.blank === true,
+          canChangeAgent,
           workspace: agent?.session.header?.cwd, policy, supportedTypes: SUPPORTED_AGENT_TYPES })
         return
       }

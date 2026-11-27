@@ -67,12 +67,17 @@
   // The projection's answered flag wins; otherwise only a received relay that names a sent request in its reply-to answers it. Delivery receipts never do.
   // Sent lines fly out on the paper plane; received ones arrive as mail, opened once they answer us.
   const relayKinds = {
-    waiting: { label: '等待对方回复', icon: IconClockOutlineRegular, tone: 'waiting' },
-    answered: { label: '已收到回复', icon: IconCheckOutlineRegular, tone: 'answered' },
+    waiting: { label: '等待对方回复', icon: IconPaperPlaneOutlineRegular, badge: IconClockOutlineRegular, tone: 'waiting' },
+    answered: { label: '已收到回复', icon: IconPaperPlaneOutlineRegular, badge: IconCheckOutlineRegular, tone: 'answered' },
     sent: { label: '已发送', icon: IconPaperPlaneOutlineRegular },
     replied: { label: '已回复对方', icon: IconPaperPlaneOutlineRegular },
     reply: { label: '收到对方回复', icon: IconMailReadOutlineRegular },
     incoming: { label: '收到消息', icon: IconMailUnreadOutlineRegular },
+  }
+  function relayIcon(key) {
+    const {icon,badge} = relayKinds[key]
+    return h('span', { className:'kode-relay-icon', 'data-relay-kind':key, 'aria-hidden':true },
+      h(icon,{size:16}), badge && h('span',{className:'kode-relay-badge'},h(badge,{size:7})))
   }
   // Agent prose reads as Markdown, but a panel body must stay quiet: images become
   // links (MarkdownText would fetch remote ones), single newlines keep their line
@@ -122,7 +127,7 @@
   // disclosure chevron; time, delivery and body live in the expanded detail.
   function RelayToggle({ from, to, title, open, onToggle, kind, failed }) {
     return h('button', { type: 'button', className: 'kode-relay-toggle', 'aria-expanded': open, onClick: onToggle },
-      h('span', { className: 'kode-relay-heading' }, h('span', { className: 'kode-relay-icon', 'data-relay-kind': kind }, h(relayKinds[kind].icon, { size: 16 })), h('strong', { title: from.title }, from.name), h('span', { className: 'kode-secondary', 'aria-label': '发往' }, '→'), h('strong', { title: to.title }, to.name)),
+      h('span', { className: 'kode-relay-heading' }, relayIcon(kind), h('strong', { title: from.title }, from.name), h('span', { className: 'kode-secondary', 'aria-label': '发往' }, '→'), h('strong', { title: to.title }, to.name)),
       failed && h('span', { className: 'kode-relay-failed kode-error', role: 'img', 'aria-label': '通信未成功', title: '通信未成功' }, h(IconWarningOutlineRegular, { size: 14 })),
       h(IconChevronDownOutlineRegular, { size: 12 }),
       h('span', { className: 'kode-relay-title' }, title))

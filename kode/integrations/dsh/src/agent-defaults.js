@@ -1,13 +1,22 @@
 /** Resolve defaults on the executing Host; never use a GUI launcher as a CLI. */
-import { access } from 'node:fs/promises'
+import { access, stat } from 'node:fs/promises'
 import { constants } from 'node:fs'
-import { delimiter, join, isAbsolute } from 'node:path'
+import { delimiter, resolve, sep, extname } from 'node:path'
 import { AGENT_TYPES } from './agent-profiles.js'
 
-export async function findExecutable(command, path = process.env.PATH ?? '') {
-  const candidates = isAbsolute(command) ? [command] : path.split(delimiter).filter(Boolean).map(directory => join(directory, command))
-  for (const candidate of candidates) {
-    try { await access(candidate, constants.X_OK); return candidate } catch { /* keep searching PATH */ }
+export async function findExecutable(command, path = process.env.PATH ?? '', cwd = process.cwd()) {
+  if (!command) return
+  const explicitPath = command.includes('/') || command.includes(sep)
+  const directories = explicitPath ? [''] : path.split(delimiter).filter(Boolean)
+  const suffixes = process.platform === 'win32' && !extname(command) ? ['.exe', '.com'] : ['']
+  for (const directory of directories) {
+    for (const suffix of suffixes) {
+      const candidate = resolve(cwd, directory, command + suffix)
+      try {
+        await access(candidate, constants.X_OK)
+        if ((await stat(candidate)).isFile()) return candidate
+      } catch { /* try the next candidate */ }
+    }
   }
 }
 export async function agentDefaults(path = process.env.PATH ?? '') {

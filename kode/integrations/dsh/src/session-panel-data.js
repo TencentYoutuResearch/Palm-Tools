@@ -3,14 +3,15 @@ import { z } from 'zod'
 import { readRelayEnvelope, validMessageTitle } from './message-pages.js'
 
 const recentLimit = 24
-const reviewSchema = z.object({ url: z.string(), repo: z.string(), number: z.string(), kind: z.enum(['PR', 'MR']) })
+const reviewStatus = z.enum(['open', 'merged', 'closed', 'draft'])
+const reviewSchema = z.object({ url: z.string(), repo: z.string(), number: z.string(), kind: z.enum(['PR', 'MR']), status: reviewStatus.optional() })
 const relaySchema = z.object({
   id: z.string(), nodeId: z.string(), sessionId: z.string(), content: z.string(),
   direction: z.enum(['received', 'sent']), reply: z.boolean(), status: z.string().optional(),
   title: z.string().optional(), replyTo: z.string().optional(), answered: z.literal(true).optional(),
 })
 const viewSchema = z.object({ reviews: z.array(reviewSchema), relays: z.array(relaySchema) })
-const stateSchema = viewSchema.extend({ pendingTools: z.array(z.object({ callId: z.string(), kind: z.enum(['create', 'send', 'read', 'wait']) })) })
+const stateSchema = viewSchema.extend({ reviewStates: z.record(z.string(),reviewStatus), pendingTools: z.array(z.object({ callId: z.string(), kind: z.enum(['create', 'send', 'read', 'wait']) })) })
 const blocksText = (blocks, limit) => {
   if (!Array.isArray(blocks)) return ''
   let text = ''
@@ -38,6 +39,33 @@ function reviewsIn(text) {
   const urls = text.match(/https?:\/\/[^\s<>"'`()[\]{}]+/gi) ?? []
   return urls.flatMap(value => reviewReference(value.replace(/[.,;:!?，。；：！？]+$/u, '')) ?? [])
 }
+
+// Only accept provider records with a stable review URL. Search results may include
+// unrelated reviews: remember their status, but only pin links mentioned in chat.
+function observedReviews(message) {
+  if (message.isError) return []
+  const result = []
+  for (const block of message.content ?? []) {
+    if (block.type !== 'text' || typeof block.text !== 'string' || block.text.length > 1_000_000) continue
+    const call = parseJson(block.text)
+    if (!call || !['gongfeng','github','codex_apps'].includes(call.server) || call.status !== 'completed') continue
+    const payload = call.result?.structuredContent ?? parseJson(blocksText(call.result?.content, 1_000_000))
+    for (const row of Array.isArray(payload) ? payload : [payload]) {
+      const project = call.arguments?.tool_args?.project_id ?? call.arguments?.project_id
+      const gongfengUrl = call.server === 'gongfeng' && typeof project === 'string' && /^[\w.-]+(?:\/[\w.-]+)+$/.test(project) && row?.iid
+        ? `https://git.woa.com/${project}/-/merge_requests/${row.iid}` : undefined
+      const ref = reviewReference(row?.web_url ?? row?.html_url ?? row?.url ?? gongfengUrl)
+      if (!ref || String(row.iid ?? row.number) !== ref.number) continue
+      const phase = String(row.state).toLowerCase()
+      const status = row.merged === true || row.merged_at || phase === 'merged' ? 'merged'
+        : phase === 'closed' ? 'closed' : ['opened','open','reopened'].includes(phase) ? (row.draft || row.work_in_progress ? 'draft' : 'open') : null
+      if (status) result.push([reviewKey(ref.url),status])
+    }
+  }
+  return result
+}
+
+const reviewKey = url => url.replace(/^https?:\/\//,'').replace('/-/merge_requests/','/merge_requests/')
 
 function relayFor(message) {
   if (message.source?.kind !== 'agent-message' || !message.source.senderSessionId?.startsWith('kode:')) return
@@ -110,9 +138,9 @@ function addRecentRelays(rows, items) {
 
 export const sessionPanelProjection = {
   key: 'kodeSessionPanel',
-  stateVersion: 3,
+  stateVersion: 4,
   stateSchema,
-  init: () => ({ reviews: [], relays: [], pendingTools: [] }),
+  init: () => ({ reviewStates: {}, reviews: [], relays: [], pendingTools: [] }),
   apply(state, event) {
     if (event.type === 'tool/call') {
       const kind = relayTool(event.data)
@@ -123,6 +151,12 @@ export const sessionPanelProjection = {
     }
     if (event.type === 'tool/result') {
       const result = event.data.message
+      const updates = observedReviews(result)
+      if (updates.length) {
+        const states = new Map(Object.entries(state.reviewStates))
+        for (const [key,status] of updates) { states.delete(key); states.set(key,status) }
+        state = {...state,reviewStates:Object.fromEntries([...states].slice(-128))}
+      }
       const callId = result.source?.callId
       const tool = state.pendingTools.find(row => row.callId === callId)
       if (!tool) return state
@@ -143,5 +177,5 @@ export const sessionPanelProjection = {
     return { ...state, reviews: reviews.length ? addRecent(state.reviews, reviews, row => row.url) : state.reviews,
       relays: relay ? addRecentRelays(state.relays, [relay]) : state.relays }
   },
-  wire: { viewSchema, view: ({ reviews, relays }) => ({ reviews, relays }) },
+  wire: { viewSchema, view: ({ reviews, relays, reviewStates }) => ({ reviews:reviews.map(row => reviewStates?.[reviewKey(row.url)] ? {...row,status:reviewStates[reviewKey(row.url)]} : row), relays }) },
 }

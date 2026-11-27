@@ -124,7 +124,7 @@ Then start `dsh web`. Open/resume a session and ask the model to use:
 | `kode_sessions_list` | List local and connected-peer addresses and availability |
 | `kode_sessions_send` | Send content using an explicit target and a stable idempotency key |
 | `kode_sessions_read` | Read this session's communication events after a cursor |
-| `kode_sessions_wait` | Wait up to 30 seconds for communication events |
+| `kode_sessions_wait` | Wait once for an imminent event (up to 30 seconds). For long tasks, ask the peer to reply, finish independent work, and end the current turn. Kode delivers the reply to the idle session. |
 
 A reply is another send with `in_reply_to` set to the original message ID. The backend checks both participants. Delivery acceptance does not mean task completion.
 
