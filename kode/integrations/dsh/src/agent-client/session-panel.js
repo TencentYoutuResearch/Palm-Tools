@@ -158,47 +158,37 @@
     const messages = props.useProjection('kodeSessionPanel', state => state?.relays)
     return messages?.length ? h(CommunicationRows, { ...props, messages }) : null
   }
-  // Public GitHub links may be pasted without any provider tool result. Read
-  // only github.com PRs from its fixed API origin, without user credentials.
-  const publicReviewCache = new Map()
-  function publicReviewStatus(url) {
-    const match = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)$/.exec(url)
-    if (!match) return
-    const cached = publicReviewCache.get(url)
-    if (cached && cached.until > Date.now()) return cached.promise
-    const [,owner,repo,number] = match
-    const promise = fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${number}`, {
-      credentials:'omit',referrerPolicy:'no-referrer',signal:AbortSignal.timeout(8000),
-    }).then(response => response.ok ? response.json() : null).then(row => {
-      if (row?.merged_at) return 'merged'
-      if (row?.state === 'closed') return 'closed'
-      if (row?.state === 'open') return row.draft ? 'draft' : 'open'
-    }).catch(() => undefined)
-    publicReviewCache.delete(url)
-    publicReviewCache.set(url,{until:Date.now()+300000,promise})
-    if (publicReviewCache.size > 128) publicReviewCache.delete(publicReviewCache.keys().next().value)
-    return promise
-  }
   function SessionReviewLinks({ sessionId, useProjection, renderFactorySlot, nativeChanges }) {
     const reviews = useProjection('kodeSessionPanel', state => state?.reviews)
     const tracked = new Set((nativeChanges ?? []).map(entry => entry.url?.split(/[?#]/)[0].replace(/\/$/, '')))
     const rows = reviews?.filter(row => /^https?:\/\//i.test(row.url) && !tracked.has(row.url)).toReversed()
-    const [githubStates,setGithubStates] = useState({})
-    const githubUrls = (rows ?? []).map(row => row.url).filter(url => url.startsWith('https://github.com/')).join('\n')
+    const host = transport?.current ?? 'local'
+    const [provider,setProvider] = useState({host,states:{}})
+    const urls = (rows ?? []).map(row => row.url).filter(url => /^https:\/\/github\.com\/|^https?:\/\/git\.woa\.com\//.test(url)).join('\n')
     useEffect(() => {
-      if (!githubUrls) return
-      let active = true
+      if (!urls) return
+      let active=true, busy=false
+      const stop=new AbortController()
       async function refresh() {
-        if (document.visibilityState === 'hidden') return
-        const entries = await Promise.all(githubUrls.split('\n').map(async url => [url, await publicReviewStatus(url)]))
-        if (active) setGithubStates(Object.fromEntries(entries))
+        if (busy || document.visibilityState === 'hidden') return
+        busy=true
+        try {
+          const links=urls.split('\n')
+          for(let i=0;i<links.length && active;i+=20) {
+            const params=new URLSearchParams(links.slice(i,i+20).map(u=>['url',u]))
+            const response=await fetchHost('/api/kode/review-status?'+params,{credentials:'same-origin',signal:stop.signal},host)
+            if (!response.ok) continue
+            const states=await response.json()
+            if(active) setProvider(prior=>({host,states:{...(prior.host===host?prior.states:{}),...states}}))
+          }
+        } catch {} finally { busy=false }
       }
-      refresh()
-      const timer = setInterval(refresh,300000)
+      void refresh()
+      const timer=setInterval(refresh,60000)
       document.addEventListener('visibilitychange',refresh)
-      return () => {active=false;clearInterval(timer);document.removeEventListener('visibilitychange',refresh)}
-    },[githubUrls])
-    const resolved = rows?.map(row => githubStates[row.url] ? {...row,status:githubStates[row.url]} : row)
+      return ()=>{active=false;stop.abort();clearInterval(timer);document.removeEventListener('visibilitychange',refresh)}
+    },[host,urls])
+    const resolved = rows?.map(row => provider.host===host && provider.states[row.url] ? {...row,status:provider.states[row.url]} : row)
     const finished = row => row.status === 'merged' || row.status === 'closed'
     const labels = {open:'打开',closed:'已关闭',merged:'已合入',draft:'草稿'}
     const ordered = resolved && [...resolved.filter(row => !finished(row)), ...resolved.filter(finished)]
