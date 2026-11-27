@@ -22,9 +22,10 @@
 [data-kode-panel-row][data-kode-compact] [data-row-part=content]{flex:0 1 auto}
 [data-kode-panel-row][data-kode-compact] [data-row-part=content]{min-width:2em}
 .kode-sr-only{position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
-.kode-relay-icon{display:inline-flex;color:var(--dsw-alias-label-secondary)}
-[data-kode-tone=waiting] .kode-relay-icon{color:#d29922}
-[data-kode-tone=answered] .kode-relay-icon{color:#3fae7a}
+.kode-relay-icon{position:relative;display:inline-flex;color:var(--dsw-alias-label-secondary)}
+.kode-relay-badge{position:absolute;right:-2px;bottom:-1px;width:9px;height:9px;display:grid;place-items:center;border-radius:50%;corner-shape:round;clip-path:circle(50%);background:#19753a;color:white}
+[data-relay-kind=waiting]>.kode-relay-badge{background:#efbe45;color:#493100}
+.kode-relay-icon>.kode-relay-badge>svg{display:block;width:7px;height:7px;max-width:7px;max-height:7px}
 .kode-panel-meta{color:var(--dsw-alias-label-tertiary)}
 [data-kode-panel-row][data-kode-compact] [data-row-part=detail]{flex:1 1 0;min-width:0}
 [data-kode-panel-row][data-kode-compact] [data-row-part=detail]:has(>.kode-relay-peer){flex:0 1 auto;min-width:min(7em,45%);max-width:55%;font-size:12px;color:var(--dsw-alias-label-secondary)}

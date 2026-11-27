@@ -135,8 +135,8 @@
     const nameOf = useNames(sessions)
     return h(DisclosurePanelRows, { key: cardKey(sessionId), rows: messages.toReversed(), renderFactorySlot,
       rowProps: row => {
-        const kind = relayKinds[relayKind(row, messages)], peer = relayPeer(row, nameOf), title = relayTitle(row)
-        return { icon: h('span', { className: 'kode-relay-icon', 'data-relay-kind': relayKind(row, messages) }, h(kind.icon, { size: 16 })),
+        const key = relayKind(row, messages), kind = relayKinds[key], peer = relayPeer(row, nameOf), title = relayTitle(row)
+        return { icon: relayIcon(key),
           label: title, hint: kind.label, tone: kind.tone,
           preview: [title, peer.direction + ' ' + peer.name + ' · ' + kind.label],
           detail: h('span', { className: 'kode-relay-peer' }, h('span', { className: 'kode-relay-direction' }, peer.direction), ' ', peer.name),

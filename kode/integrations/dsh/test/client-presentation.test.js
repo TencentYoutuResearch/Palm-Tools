@@ -1931,7 +1931,8 @@ test('communication rows show only a title and tell waiting from answered by the
   const request = { nodeId: 'n', sessionId: 'peer', id: 'theirs', direction: 'received', reply: false, content: '# 帮我看看\n细节' }
   const rows = [ask, delivered, answer, reply, request]
   assert.deepEqual(rows.map(row => scope.relayKind(row, rows)), ['answered', 'waiting', 'reply', 'replied', 'incoming'])
-  assert.deepEqual(rows.map(row => scope.relayKinds[scope.relayKind(row, rows)].icon), ['check', 'clock', 'mail-read', 'plane', 'mail-unread'], 'sent, received requests and received replies each keep their own native glyph')
+  assert.deepEqual(rows.map(row => scope.relayKinds[scope.relayKind(row, rows)].icon), ['plane', 'plane', 'mail-read', 'plane', 'mail-unread'], 'sent, received requests and received replies each keep their own native glyph')
+  assert.deepEqual(rows.map(row => scope.relayKinds[scope.relayKind(row, rows)].badge), ['check','clock',undefined,undefined,undefined])
   assert.deepEqual(Object.values(scope.relayKinds).map(kind => kind.label), ['等待对方回复', '已收到回复', '已发送', '已回复对方', '收到对方回复', '收到消息'])
   assert.doesNotMatch(source, /data-inbound|scaleX\(-1\)/, 'no glyph is mirrored to fake a direction')
   assert.equal(scope.relayKind(ask, [ask]), 'waiting', 'an accepted receipt is not a reply')
