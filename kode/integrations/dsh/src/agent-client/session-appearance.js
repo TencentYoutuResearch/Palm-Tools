@@ -81,10 +81,11 @@
     useEffect(() => setFailed(false), [profile?.avatar?.id, profile?.type])
     const url = source && (transport ? transport.path(source, 'local') : source)
     const art = source && !failed ? !profile?.avatar?.id && profile?.type === 'cursor' ? h('span', { className: 'kode-agent-mask', style: { maskImage: `url("${url}")`, WebkitMaskImage: `url("${url}")` } }) : h('img', { src: url, alt: '', loading: 'lazy', onError: () => setFailed(true) }) : h(profile?.type === 'dsh' ? FishLogo : IconAgentPresetOutlineRegular, { size })
-    // The face clips the artwork to a circle and carries the state ring; the dot sits beside it so the clip never hides it.
+    // The artwork always fills exactly the avatar box. The state ring and dot are separate absolute layers outside it,
+    // so switching state (or rounding the ring's stroke to device pixels) never moves or resizes the picture.
     const marked = status === 'running' || status === 'awaiting' || status === 'done'
     return h('span', { ref: element, className: 'kode-agent-avatar', style: { width: size, height: size, '--kode-avatar-dot': `${size <= 24 ? 7 : size <= 32 ? 9 : 11}px` }, 'data-avatar-state': status, 'data-avatar-artwork': profile?.avatar?.id ? 'gallery' : 'icon', 'aria-hidden': true },
-      h('span', { className: 'kode-agent-avatar-face' }, h('span', { className: 'kode-agent-avatar-art' }, art)), marked && h('span', { className: 'kode-agent-avatar-dot' }))
+      h('span', { className: 'kode-agent-avatar-art' }, art), marked && h('span', { className: 'kode-agent-avatar-face' }), marked && h('span', { className: 'kode-agent-avatar-dot' }))
   }
   async function stageAvatarPrompt(sessionId, host, backgroundOnly, avatarId, forBot) {
     if ((host ?? transport?.current ?? 'local') !== 'local' || (transport?.current ?? 'local') !== 'local') throw new Error('请先切换到此计算机的会话；头像和背景保存在此计算机的共享素材库。')

@@ -206,15 +206,16 @@ body[data-ds-dark-theme] .kode-relay-badge[data-badge=ring]{box-shadow:0 0 0 1.5
 .kode-trigger:disabled{color:var(--dsw-alias-label-dimmed);cursor:default}
 .kode-agent-trigger{color:var(--dsw-alias-label-primary)}
 .kode-chevron-open{transform:rotate(180deg)}
-.kode-unified-workspaces [data-kode-status-avatar]{position:relative;width:20px;height:20px;flex:0 0 20px}
-.kode-unified-workspaces [data-kode-status-avatar]>[data-state]{visibility:hidden}
-.kode-unified-workspaces [data-kode-status-avatar]>[data-state] *{animation:none}
+/* The native seat keeps its own 16x20 box in every state; the hidden StateDot leaves layout, so the overlay lands where the idle avatar sits. */
+.kode-unified-workspaces [data-kode-status-avatar]{position:relative}
+.kode-unified-workspaces [data-kode-status-avatar]>[data-state]{display:none}
 .kode-status-avatar-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
-.kode-status-avatar-body{display:inline-flex;position:relative;width:20px;height:20px;flex:none}
-/* Session state: a 1.5px ring over a fixed 1px gap around the circular face, plus a corner dot that notches face and ring locally.
+.kode-status-avatar-body{display:inline-flex;position:relative;flex:none}
+/* Session state: the artwork always fills exactly the avatar box; a 1.5px ring over a fixed 1px gap and a corner dot are absolute layers outside it
+   and notch art and ring locally. Neither takes part in layout, so idle and marked avatars sit on the same pixels.
    Awaiting is dashed ring + hollow dot so color is not the only cue; running only fades, nothing grows. */
-.kode-agent-avatar-face{position:absolute;inset:-2.5px;box-sizing:border-box;padding:1px;border:1.5px solid transparent;border-radius:50%}
-.kode-agent-avatar-art{position:relative;display:flex;align-items:center;justify-content:center;width:100%;height:100%;overflow:hidden;border-radius:50%}
+.kode-agent-avatar-art{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;overflow:hidden;border-radius:50%}
+.kode-agent-avatar-face{position:absolute;inset:-2.5px;box-sizing:border-box;border:1.5px solid transparent;border-radius:50%;pointer-events:none}
 .kode-agent-avatar[data-avatar-artwork=gallery] .kode-agent-avatar-art::after{content:"";position:absolute;inset:0;border-radius:inherit;box-shadow:inset 0 0 0 .5px var(--dsw-alias-border-l2);pointer-events:none}
 .kode-agent-avatar[data-avatar-artwork=gallery] img{object-fit:cover;object-position:50% 35%}
 /* DSH gives every element a superellipse corner-shape; circles must opt back into round arcs or 50% renders as a squircle. */
@@ -224,7 +225,9 @@ body[data-ds-dark-theme] .kode-relay-badge[data-badge=ring]{box-shadow:0 0 0 1.5
 .kode-agent-avatar[data-avatar-state=done]{--kode-avatar-ring:var(--dsw-alias-state-success-primary,#22c55e)}
 body[data-ds-dark-theme] .kode-agent-avatar[data-avatar-state=awaiting]{--kode-avatar-ring:var(--dsw-static-amber-400,#f7ad31)}
 body[data-ds-dark-theme] .kode-agent-avatar[data-avatar-state=done]{--kode-avatar-ring:var(--dsw-alias-state-success-secondary,#4ed17e)}
+/* One notch centred on the dot (3px outside the avatar box less half the dot), expressed in each layer's own box. */
 .kode-agent-avatar[data-avatar-state=running]>.kode-agent-avatar-face,.kode-agent-avatar[data-avatar-state=awaiting]>.kode-agent-avatar-face,.kode-agent-avatar[data-avatar-state=done]>.kode-agent-avatar-face{--kode-avatar-notch:radial-gradient(circle at calc(100% - var(--kode-avatar-dot) / 2 + .5px) calc(100% - var(--kode-avatar-dot) / 2 + .5px),transparent calc(var(--kode-avatar-dot) / 2 + 2px),#000 calc(var(--kode-avatar-dot) / 2 + 2.5px));border-color:var(--kode-avatar-ring);-webkit-mask:var(--kode-avatar-notch);mask:var(--kode-avatar-notch)}
+.kode-agent-avatar:is([data-avatar-state=running],[data-avatar-state=awaiting],[data-avatar-state=done])>.kode-agent-avatar-art{--kode-avatar-notch:radial-gradient(circle at calc(100% - var(--kode-avatar-dot) / 2 + 3px) calc(100% - var(--kode-avatar-dot) / 2 + 3px),transparent calc(var(--kode-avatar-dot) / 2 + 2px),#000 calc(var(--kode-avatar-dot) / 2 + 2.5px));-webkit-mask:var(--kode-avatar-notch);mask:var(--kode-avatar-notch)}
 .kode-agent-avatar[data-avatar-state=awaiting]>.kode-agent-avatar-face{border-style:dashed}
 .kode-agent-avatar-dot{position:absolute;right:-3px;bottom:-3px;width:var(--kode-avatar-dot);height:var(--kode-avatar-dot);border-radius:50%;background:var(--kode-avatar-ring)}
 .kode-agent-avatar[data-avatar-state=awaiting]>.kode-agent-avatar-dot{background:transparent;box-shadow:inset 0 0 0 1.75px var(--kode-avatar-ring)}
