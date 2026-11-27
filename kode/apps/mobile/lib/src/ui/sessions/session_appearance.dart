@@ -124,6 +124,12 @@ class _SyncedImageState extends ConsumerState<_SyncedImage> {
 
   @override
   Widget build(BuildContext context) {
+    ref.listen<ApiClient?>(apiClientProvider, (prev, next) {
+      if (next != null && next != prev && (_file == null || _failed)) {
+        _failed = false;
+        _load();
+      }
+    });
     final file = _file;
     if (file == null || _failed) return widget.fallback(context);
     return Image.file(

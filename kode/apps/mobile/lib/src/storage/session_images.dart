@@ -6,6 +6,7 @@
 // again. The OS may purge the cache early; a missing copy is fetched again.
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../api/api_client.dart';
@@ -14,17 +15,23 @@ import '../protocol/protocol.dart';
 export '../protocol/protocol.dart' show SessionImageRef;
 
 class SessionImageStore {
-  SessionImageStore._();
+  SessionImageStore._([Future<Directory> Function()? baseDir])
+    : _baseDir = baseDir ?? getApplicationCacheDirectory;
 
   static final instance = SessionImageStore._();
 
+  @visibleForTesting
+  SessionImageStore.withCacheDirectory(Directory dir)
+    : _baseDir = (() async => dir);
+
   static const retention = Duration(days: 7);
 
+  final Future<Directory> Function() _baseDir;
   final Map<String, Future<File>> _inflight = {};
   Future<Directory>? _dir;
 
   Future<Directory> _directory() => _dir ??= () async {
-    final base = await getApplicationCacheDirectory();
+    final base = await _baseDir();
     final dir = Directory('${base.path}/kode-session-images');
     await dir.create(recursive: true);
     // Before any download starts, so a fresh `.part` is never swept.
@@ -34,10 +41,11 @@ class SessionImageStore {
 
   /// The local copy of [ref], downloading it through [api] on first use.
   Future<File> fetch(SessionImageRef ref, ApiClient api) {
-    return _inflight[ref.id] ??= _fetch(
-      ref,
-      api,
-    ).whenComplete(() => _inflight.remove(ref.id));
+    return _inflight[ref.id] ??= _fetch(ref, api).whenComplete(() {
+      // Block body is mandatory: `Map.remove` returns the `Future<File>` value
+      // itself, which would make `whenComplete` await itself forever.
+      _inflight.remove(ref.id);
+    });
   }
 
   Future<File> _fetch(SessionImageRef ref, ApiClient api) async {
