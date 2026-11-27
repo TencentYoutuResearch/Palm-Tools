@@ -99,3 +99,20 @@ test('review status is keyed by provider URL and survives later mentions', () =>
   assert.equal(project(event,assistant(url)).reviews[0].status,'merged')
   assert.equal(project(event,assistant(url.replace('/org/','/other/'))).reviews[0].status,undefined)
 })
+
+test('delivery evidence keeps the newest peer receipt separate from a reply and the send-time status', () => {
+  const target = {node_id:'peer',session_id:'s'}
+  const message = {id:'m',target,content:'hello',status:'queued'}
+  const tool = (name,payload) => [
+    {type:'tool/call',data:{name,callId:'call'}},
+    {type:'tool/result',data:{message:{source:{callId:'call'},content:text(JSON.stringify(payload))}}},
+  ]
+  const view = project(...tool('kode_sessions_send',{message}),...tool('kode_sessions_read',{events:[
+    {seq:3,message:{...message,status:'accepted'}},{seq:1,message},
+    {seq:4,message:{...message,status:'expired',target:{...target,session_id:'another'}}}
+  ]}),...tool('kode_sessions_send',{message}))
+  const [row] = view.relays
+  assert.equal(row.status,'queued')
+  assert.equal(row.deliveryStatus,'accepted')
+  assert.equal(row.answered,undefined)
+})
