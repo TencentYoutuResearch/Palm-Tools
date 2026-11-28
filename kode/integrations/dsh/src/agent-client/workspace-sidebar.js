@@ -478,7 +478,6 @@
       return `${selector}{font-size:0;visibility:hidden}${selector}::after{content:"已保存";font-size:12px;visibility:visible}`
     }).join('\n')
     return h('div', { className: 'kode-unified-workspaces', 'aria-busy': busy, ref: treeRoot },
-      h(DeviceSwitcherBar, { wide: props.wide !== false }),
       !activeRemoteDevice && h(SessionStatusAvatars, { root: treeRoot, rows: merged.sessions.byId, workspaces: merged.workspaces.items, statuses: sessionStatuses,
         archivedSessionIds: merged.workspaces.archivedSessionIds }),
       !activeRemoteDevice && h('style', null, remoteCss + savedCss),

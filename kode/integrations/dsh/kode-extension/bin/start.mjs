@@ -123,7 +123,8 @@ async function ensurePlugin(dsh) {
   const stampFile = join(data, 'plugin.stamp')
   const installStamp = `${dshVersion}:${stamp}`
   const pluginManifest = join(dshHome, 'profiles', PROFILE, 'node_modules', '@kode', 'dsh', 'package.json')
-  if (existsSync(pluginManifest) && existsSync(stampFile) && (await readFile(stampFile, 'utf8')).trim() === installStamp) return
+  const updating = existsSync(pluginManifest)
+  if (updating && existsSync(stampFile) && (await readFile(stampFile, 'utf8')).trim() === installStamp) return
   await rm(stampFile, { force: true })
   progress(3, '正在安装 Kode 会话整合')
   log('installing the vendored @kode/dsh integration')
@@ -133,8 +134,22 @@ async function ensurePlugin(dsh) {
   await mkdir(packages, { recursive: true })
   const copy = join(packages, `kode-dsh-${stamp.slice(0, 12)}.tgz`)
   await copyFile(tgz, copy)
+  const args = ['plugin', '--profile', PROFILE, 'add', copy, '--reporter=append-only']
+  const started = performance.now()
   try {
-    run(dsh, ['plugin', '--profile', PROFILE, 'add', copy])
+    if (updating) {
+      // Most bundled updates change only Kode's files. Keep dsh's normal
+      // installation and validation, using pnpm's local cache first.
+      try {
+        run(dsh, [...args, '--offline'])
+      } catch (error) {
+        log('offline integration update failed; retrying online:', error.message)
+        progress(3, '正在联网安装 Kode 会话整合')
+        run(dsh, args)
+      }
+    } else {
+      run(dsh, args)
+    }
   } catch (error) {
     const profileLock = join(dshHome, 'profiles', PROFILE, 'package.json.lock')
     if (existsSync(profileLock)) {
@@ -144,6 +159,7 @@ async function ensurePlugin(dsh) {
   }
   await writeFile(stampFile + '.tmp', installStamp + '\n')
   await rename(stampFile + '.tmp', stampFile)
+  log(`installed the vendored @kode/dsh integration in ${Math.round(performance.now() - started)} ms`)
 }
 
 function serve() {

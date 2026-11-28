@@ -365,7 +365,7 @@
     const [selected, setSelected] = useState(null), [hovered, setHovered] = useState(null), [anchor, setAnchor] = useState(null), [settings, setSettings] = useState(null)
     const [quickCreate, setQuickCreate] = useState(false), [quickTemplate, setQuickTemplate] = useState(null)
     const [starting, setStarting] = useState(null), [busy, setBusy] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState('')
-    const createRef = React.useRef(null), rosterRef = React.useRef(null)
+    const rosterRef = React.useRef(null)
     const railHoverOpen = React.useRef(null), railHoverClose = React.useRef(null)
     const clearRailTimers = () => {
       if (railHoverOpen.current) { clearTimeout(railHoverOpen.current); railHoverOpen.current = null }
@@ -390,15 +390,6 @@
       for (const name of events) window.addEventListener(name, take)
       return () => { for (const name of events) window.removeEventListener(name, take) }
     }, [data])
-    // Arrived from the sidebar: open that bot, or show where to create one.
-    useEffect(() => {
-      if (!data || requestedBotStart === undefined) return
-      const wanted = requestedBotStart && bot(requestedBotStart)
-      requestedBotStart = undefined
-      if (wanted) void message(wanted)
-      else { setQuickCreate(true); createRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'center' }) }
-    }, [data])
-    if (!data) return h('div', { className: 'kode-agent-settings kode-bots-page' }, h('h2', null, '伙伴'), !loadError && h('p', { className: 'kode-secondary', role: 'status' }, '正在读取伙伴…'), h(Failure, { text: loadError }))
     const task = async (label, work) => {
       if (busy) return
       setBusy(label); setError('')
@@ -437,6 +428,25 @@
       setStarting(null)
       requestAnimationFrame(() => rosterRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' }))
     }
+    // The sidebar can request a conversation or the creation form while this page is already open.
+    useEffect(() => {
+      if (!data) return
+      const take = () => {
+        if (busy || requestedBotStart === undefined) return
+        const id = requestedBotStart
+        requestedBotStart = undefined
+        setSettings(null)
+        if (id === null) openQuickForm()
+        else {
+          const wanted = bot(id)
+          if (wanted) void message(wanted)
+        }
+      }
+      take()
+      window.addEventListener('kode-bot-start', take)
+      return () => window.removeEventListener('kode-bot-start', take)
+    }, [data, busy])
+    if (!data) return h('div', { className: 'kode-agent-settings kode-bots-page' }, h('h2', null, '伙伴'), !loadError && h('p', { className: 'kode-secondary', role: 'status' }, '正在读取伙伴…'), h(Failure, { text: loadError }))
     const use = template => task('template', async () => {
       const { id, glyph, skills, routines: wanted = [], outbound, tone, ...fields } = template
       const routines = wanted.map(key => (data.routines ?? []).find(row => row.id === key)).filter(Boolean)
@@ -504,7 +514,7 @@
           h('div', { className: 'kode-settings-footer' }, h(Button, { type: 'button', disabled: Boolean(busy), onClick: () => setStarting(null) }, '取消'), h(Button, { type: 'submit', variant: 'primary', disabled: Boolean(busy) || !starting.message.trim() || !starting.workspace }, '发送')))),
       h(BotsKanbanBoard, { data, ui: () => ({ openSession }) }),
       h(BotTemplates, { templates: data.templates, routines: data.routines ?? [], busy: Boolean(busy) || !data.agents.length, onConfigure: template => openQuickForm(template), onBuild: template => void build(template), onUse: template => void use(template) }),
-      h('section', { ref: createRef, className: 'kode-bots-section kode-bot-create' },
+      h('section', { className: 'kode-bots-section kode-bot-create' },
         h('span', { className: 'kode-bot-create-icon', 'aria-hidden': true }, h(IconPlusOutlineRegular, { size: 28 })),
         h('div', { className: 'kode-bot-create-text' },
           h('h3', null, '对话引导创建伙伴'),

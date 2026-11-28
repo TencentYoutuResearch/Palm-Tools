@@ -1,4 +1,4 @@
-  const PANEL_GLYPH = 'M2.5 2.5h4.5v4.5h-4.5zM9 2.5h4.5v4.5H9zM2.5 9h4.5v4.5h-4.5zM9 9h4.5v4.5H9z'
+  const PANEL_GLYPH = 'M1.75 1.75h5.25v5.25H1.75zM9 1.75h5.25v5.25H9zM1.75 9h5.25v5.25H1.75zM9 9h5.25v5.25H9z'
   // A Kode extension panel (team channels, …). Kode draws the panel's own
   // page over this area; dsh only lends the space and reports where it is.
   function KodePanelPage({ panel }) {

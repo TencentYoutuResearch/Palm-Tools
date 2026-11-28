@@ -37,8 +37,8 @@
           "antigravity"
         ],
         "dragRegion": {
-          "selector": "html[data-kode-platform=\"macos\"] [data-window-drag]",
-          "exclude": "[data-window-drag-controls], [role=\"menuitem\"], [role=\"switch\"], [draggable=\"true\"]"
+          "selector": "html[data-kode-platform=\"macos\"] :is([data-window-drag], :has(> [data-shell-overlay]) > [class$=\"_centerCol\"]:has(> [data-global-panel]))",
+          "exclude": "[data-window-drag-controls], [data-global-panel], [role=\"menuitem\"], [role=\"switch\"], [draggable=\"true\"]"
         }
       }
     ]
