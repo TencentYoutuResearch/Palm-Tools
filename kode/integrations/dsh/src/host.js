@@ -18,6 +18,7 @@ import { registerSharedSessionApi } from './shared-session-api.js'
 import { installSessionRecovery } from './session-recovery.js'
 import { installNativeStartupBarrier } from './native-startup.js'
 import { registerSessionNotifications, registerNotificationSettings } from './session-notifications.js'
+import { registerReviewStatusApi } from './review-status-api.js'
 import { registerModelUsageApi } from './model-usage-api.js'
 import { installSessionCreator, sessionNamingPolicy } from './session-create.js'
 import { WeComBridge, registerWeComApi, wecomTools, runWeComTool } from './wecom-bridge.js'
@@ -87,6 +88,7 @@ export async function apply(ctx, config = {}) {
     webCtx.effect(() => registerAccountApi(webCtx, admin), 'kode.account-api')
     const { registerMemoryApi } = await import('./memory-api.js')
     webCtx.effect(() => registerMemoryApi(webCtx, admin), 'kode.memory-api')
+    webCtx.effect(() => registerReviewStatusApi(webCtx), 'kode.review-status-api')
     webCtx.effect(() => registerModelUsageApi(webCtx, admin), 'kode.model-usage-api')
     webCtx.effect(() => registerSessionNotifications(webCtx), 'kode.session-notifications')
     webCtx.effect(() => registerNotificationSettings(webCtx), 'kode.notification-settings')

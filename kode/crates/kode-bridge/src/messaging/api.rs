@@ -884,8 +884,16 @@ async fn cloud_palm_cancel(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<
     Ok(Json(json!({})))
 }
 
-async fn integration_status(State(hub): State<Arc<Hub>>, h: HeaderMap)->Result<Json<super::integrations::Settings>> {
-    auth(&hub,&h)?;Ok(Json(super::integrations::settings(&hub)?))
+#[derive(serde::Serialize)]
+struct IntegrationStatus {
+    #[serde(flatten)]
+    settings: super::integrations::Settings,
+    kode_version: &'static str,
+}
+
+async fn integration_status(State(hub): State<Arc<Hub>>, h: HeaderMap) -> Result<Json<IntegrationStatus>> {
+    auth(&hub, &h)?;
+    Ok(Json(IntegrationStatus { settings: super::integrations::settings(&hub)?, kode_version: env!("CARGO_PKG_VERSION") }))
 }
 async fn integration_configure(State(hub): State<Arc<Hub>>, h: HeaderMap,Json(value):Json<super::integrations::Change>)->Result<Json<super::integrations::Settings>> {
     admin(&hub,&h)?;Ok(Json(super::integrations::change(&hub,value)?))

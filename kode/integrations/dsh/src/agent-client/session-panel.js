@@ -16,7 +16,7 @@
     }
   }
   // `hint` names what the leading icon shows: a tooltip for pointers and hidden text for screen readers.
-  function SessionPanelRow({ icon, label, hint, preview, detail, detailTitle = detail, trailing, actionLabel, onClick, expanded, href, compact, tone }) {
+  function SessionPanelRow({ icon, label, hint, preview, detail, detailTitle = detail, trailing, actionLabel, onClick, expanded, href, compact }) {
     const body = [
       h('span', { key: 'icon', 'data-row-part': 'icon', 'aria-hidden': true, title: preview ? undefined : hint }, icon),
       h('span', { key: 'label', 'data-row-part': 'lines' },
@@ -27,7 +27,7 @@
     const anchor = href ? h('a', { 'data-row-part': 'body', className: 'kode-panel-link', href, target: '_blank', rel: 'noopener noreferrer', 'aria-label': actionLabel }, body) :
         onClick ? h('button', { type: 'button', 'data-row-part': 'body', 'aria-label': actionLabel, 'aria-expanded': expanded, onClick }, body) :
           h('span', { 'data-row-part': 'body' }, body)
-    return h('div', { 'data-session-panel-row': '', 'data-kode-panel-row': '', 'data-kode-compact': compact ? '' : undefined, 'data-kode-tone': tone },
+    return h('div', { 'data-session-panel-row': '', 'data-kode-panel-row': '', 'data-kode-compact': compact ? '' : undefined },
       preview ? h(Tooltip, { label: h('span', {style:{display:'grid',gap:3,whiteSpace:'normal',overflowWrap:'anywhere'}}, h('strong',null,preview[0]), ...preview.slice(1).map((line,i) => h('span',{key:i},line))), side: 'bottom', maxWidth: 360, delayMs: 350, portal: true }, anchor) : anchor,
       trailing && h('span', { 'data-row-part': 'trailing' }, trailing))
   }
@@ -117,7 +117,7 @@
     })
   }
   function relayKind(row, rows) {
-    if (row.direction !== 'sent') return row.reply ? 'reply' : 'incoming'
+    if (row.direction !== 'sent') return row.reply ? 'reply' : answeredBy(rows, row.id, row.nodeId, row.sessionId) ? 'responded' : 'incoming'
     if (row.reply) return 'replied'
     if (row.answered === true) return 'answered'
     return rows.some(other => other.direction === 'received' && other.replyTo === row.id && other.nodeId === row.nodeId && other.sessionId === row.sessionId) ? 'answered' : 'waiting'
@@ -136,15 +136,16 @@
     return h(DisclosurePanelRows, { key: cardKey(sessionId), rows: messages.toReversed(), renderFactorySlot,
       rowProps: row => {
         const key = relayKind(row, messages), kind = relayKinds[key], peer = relayPeer(row, nameOf), title = relayTitle(row)
-        return { icon: relayIcon(key),
-          label: title, hint: kind.label, tone: kind.tone,
-          preview: [title, peer.direction + ' ' + peer.name + ' · ' + kind.label],
+        const { badge, label: delivery } = relayBadge(row, key), state = [kind.label, delivery].filter(Boolean).join('，')
+        return { icon: relayIcon(key, badge),
+          label: title, hint: state,
+          preview: [title, peer.direction + ' ' + peer.name + ' · ' + state],
           detail: h('span', { className: 'kode-relay-peer' }, h('span', { className: 'kode-relay-direction' }, peer.direction), ' ', peer.name),
-          detailTitle: `${peer.direction} ${peer.name}`, actionLabel: `${title}，${kind.label}，${peer.direction} ${peer.name}`,
+          detailTitle: `${peer.direction} ${peer.name}`, actionLabel: `${title}，${state}，${peer.direction} ${peer.name}`,
           trailing: h(IconChevronDownOutlineRegular, { size: 14, 'aria-hidden': true }) }
       },
       content: row => {
-        const kind = relayKinds[relayKind(row, messages)], status = row.direction === 'sent' && deliveryStatusLabels[row.status]
+        const kind = relayKinds[relayKind(row, messages)], status = row.direction === 'sent' && deliveryStatusLabels[row.deliveryStatus ?? row.status]
         const peer = relayPeer(row, nameOf), here = `本会话 ${nameOf(undefined, sessionId)}`
         const route = row.direction === 'sent' ? `${here} → ${peer.name}` : `${peer.name} → ${here}`
         return h(React.Fragment, null,
@@ -157,53 +158,43 @@
     const messages = props.useProjection('kodeSessionPanel', state => state?.relays)
     return messages?.length ? h(CommunicationRows, { ...props, messages }) : null
   }
-  // Public GitHub links may be pasted without any provider tool result. Read
-  // only github.com PRs from its fixed API origin, without user credentials.
-  const publicReviewCache = new Map()
-  function publicReviewStatus(url) {
-    const match = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)$/.exec(url)
-    if (!match) return
-    const cached = publicReviewCache.get(url)
-    if (cached && cached.until > Date.now()) return cached.promise
-    const [,owner,repo,number] = match
-    const promise = fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${number}`, {
-      credentials:'omit',referrerPolicy:'no-referrer',signal:AbortSignal.timeout(8000),
-    }).then(response => response.ok ? response.json() : null).then(row => {
-      if (row?.merged_at) return 'merged'
-      if (row?.state === 'closed') return 'closed'
-      if (row?.state === 'open') return row.draft ? 'draft' : 'open'
-    }).catch(() => undefined)
-    publicReviewCache.delete(url)
-    publicReviewCache.set(url,{until:Date.now()+300000,promise})
-    if (publicReviewCache.size > 128) publicReviewCache.delete(publicReviewCache.keys().next().value)
-    return promise
-  }
   function SessionReviewLinks({ sessionId, useProjection, renderFactorySlot, nativeChanges }) {
     const reviews = useProjection('kodeSessionPanel', state => state?.reviews)
     const tracked = new Set((nativeChanges ?? []).map(entry => entry.url?.split(/[?#]/)[0].replace(/\/$/, '')))
     const rows = reviews?.filter(row => /^https?:\/\//i.test(row.url) && !tracked.has(row.url)).toReversed()
-    const [githubStates,setGithubStates] = useState({})
-    const githubUrls = (rows ?? []).map(row => row.url).filter(url => url.startsWith('https://github.com/')).join('\n')
+    const host = transport?.current ?? 'local'
+    const [provider,setProvider] = useState({host,states:{}})
+    const urls = (rows ?? []).map(row => row.url).filter(url => /^https:\/\/github\.com\/|^https?:\/\/git\.woa\.com\//.test(url)).join('\n')
     useEffect(() => {
-      if (!githubUrls) return
-      let active = true
+      if (!urls) return
+      let active=true, busy=false
+      const stop=new AbortController()
       async function refresh() {
-        if (document.visibilityState === 'hidden') return
-        const entries = await Promise.all(githubUrls.split('\n').map(async url => [url, await publicReviewStatus(url)]))
-        if (active) setGithubStates(Object.fromEntries(entries))
+        if (busy || document.visibilityState === 'hidden') return
+        busy=true
+        try {
+          const links=urls.split('\n')
+          for(let i=0;i<links.length && active;i+=20) {
+            const params=new URLSearchParams(links.slice(i,i+20).map(u=>['url',u]))
+            const response=await fetchHost('/api/kode/review-status?'+params,{credentials:'same-origin',signal:stop.signal},host)
+            if (!response.ok) continue
+            const states=await response.json()
+            if(active) setProvider(prior=>({host,states:{...(prior.host===host?prior.states:{}),...states}}))
+          }
+        } catch {} finally { busy=false }
       }
-      refresh()
-      const timer = setInterval(refresh,300000)
+      void refresh()
+      const timer=setInterval(refresh,60000)
       document.addEventListener('visibilitychange',refresh)
-      return () => {active=false;clearInterval(timer);document.removeEventListener('visibilitychange',refresh)}
-    },[githubUrls])
-    const resolved = rows?.map(row => githubStates[row.url] ? {...row,status:githubStates[row.url]} : row)
+      return ()=>{active=false;stop.abort();clearInterval(timer);document.removeEventListener('visibilitychange',refresh)}
+    },[host,urls])
+    const resolved = rows?.map(row => provider.host===host && provider.states[row.url] ? {...row,status:provider.states[row.url]} : row)
     const finished = row => row.status === 'merged' || row.status === 'closed'
     const labels = {open:'打开',closed:'已关闭',merged:'已合入',draft:'草稿'}
     const ordered = resolved && [...resolved.filter(row => !finished(row)), ...resolved.filter(finished)]
     return rows?.length ? h(PanelList, { key: cardKey(sessionId), rows:ordered, visibleLimit:Math.min(3,resolved.filter(row => !finished(row)).length), renderFactorySlot,
       renderRow: row => h(SessionPanelRow, { key: row.url, href: row.url, compact: true, icon: h('span',{className:'kode-review-symbol'},h(IconBranchOutlineRegular, { size: 16 }),
-          row.status && h('i',{'data-review-status':row.status},({open:'✓',closed:'×'})[row.status])),
+          row.status && h('i',{'data-review-status':row.status})),
         preview: [`${row.repo} · ${row.kind} #${row.number}`, labels[row.status] ?? '状态未知', row.url],
         label: `${row.kind} #${row.number}`, detail: row.repo, actionLabel: `打开 ${row.repo} 的 ${row.kind} #${row.number}，${labels[row.status] ?? '状态未知'}`,
         trailing: h(IconChevronRightOutlineRegular, { size: 14, 'aria-hidden': true }) }),
@@ -422,14 +413,15 @@
     const entries = useSyncExternalStore(fn => props.slots.subscribe('conversation.chat.node', fn), () => props.slots.entries('conversation.chat.node'))
     const nameOf = useNames(props.sessions)
     const relay = parseRelay(props.node.data)
-    if (relay) return h(RelayCard, { relay, time: props.node.data.time, nameOf, sessionId: props.sessionId, node: props.node, useChat: props.useChat })
+    if (relay) return h(RelayCard, { relay, time: props.node.data.time, nameOf, sessionId: props.sessionId, node: props.node, useChat: props.useChat, useProjection: props.useProjection })
     // Preserve the native presentation of schedules, goals, and other triggers.
     const original = entries.find(entry => entry.options.key === 'turn-trigger' && entry.component !== RelayTrigger)
     return original ? h(original.component, props) : null
   }
-  function MessagingTool({ toolName, block, phase, useDisclosure, sessions, sessionId }) {
+  function MessagingTool({ toolName, block, phase, useDisclosure, sessions, sessionId, useProjection }) {
     const { expanded: open, setExpanded: setOpen } = useDisclosure()
     const nameOf = useNames(sessions)
+    const relays = useProjection?.('kodeSessionPanel', state => state?.relays)
     const args = block.args, content = args?.text('content') ?? '', target = [args?.text('node_id'), args?.text('session_id')].filter(Boolean).join('/')
     const raw = textContent(block.content)
     let result
@@ -438,8 +430,12 @@
     const status = block.isError ? '调用失败' : phase !== 'result' ? '进行中' : result?.message ? `发送时：${deliveryStatusLabels[result.message.status] ?? result.message.status}` : result?.timed_out ? '暂未收到新消息' : '已返回'
     if (toolName === 'kode_sessions_send' && target) {
       const peer = nameOf(args?.text('node_id'), args?.text('session_id'))
+      // Prefer the projected row (it carries later receipts and the answered flag); the call's own result is the fallback.
+      const sent = result?.message?.id && relays?.find(row => row.direction === 'sent' && row.id === result.message.id && row.nodeId === args?.text('node_id') && row.sessionId === args?.text('session_id'))
+      const kind = sent ? relayKind(sent, relays) : args?.text('in_reply_to') ? 'replied' : 'sent'
+      const outcome = block.isError ? { badge: 'fail', label: '未送达：通信未成功' } : phase !== 'result' ? {} : relayBadge(sent || { direction: 'sent', status: result?.message?.status }, kind)
       return h('section', { className: 'kode-relay', 'aria-label': title, 'data-open': open ? '' : undefined },
-        h(RelayToggle, { from: currentEnd(nameOf(undefined, sessionId)), to: { name: peer, title: peer }, title: relayTitle({ title: args?.text('title') ?? result?.message?.title ?? relayTitlePrefix(content).title, replyTo: args?.text('in_reply_to') }), open, onToggle: () => setOpen(!open), kind: args?.text('in_reply_to') ? 'replied' : 'sent', failed: block.isError }),
+        h(RelayToggle, { from: currentEnd(nameOf(undefined, sessionId)), to: { name: peer, title: peer }, title: relayTitle({ title: args?.text('title') ?? result?.message?.title ?? relayTitlePrefix(content).title, replyTo: args?.text('in_reply_to') }), open, onToggle: () => setOpen(!open), kind, badge: outcome.badge, state: [relayKinds[kind].label, outcome.label].filter(Boolean).join('，') }),
         open && h('div', { className: 'kode-relay-detail' }, h('p', { className: 'kode-panel-meta' }, `${title} · `, h('span', { className: block.isError ? 'kode-error' : undefined }, status)), h(PanelMarkdown, { text: relayTitlePrefix(content).content, className: 'kode-relay-body' }), h('p', { className: 'kode-config-note' }, '投递状态不代表目标任务已完成。'), block.isError && h(Failure, { text: '通信未成功，可在轨迹中查看原因。' })),
       )
     }

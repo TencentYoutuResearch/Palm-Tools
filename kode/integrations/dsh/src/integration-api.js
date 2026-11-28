@@ -12,7 +12,8 @@ export function registerIntegrationApi(ctx, backend) {
       if (req.method === 'GET') {
         // The built-in naming rule lives in this Host; show it so the settings page can display and edit it.
         const { prompt: defaultPrompt, maxWords } = sessionNamingPolicy()
-        return send(200, { settings: await backend.call('/api/v1/messaging/integrations'), cloud: await backend.call('/api/v1/messaging/cloud/status'), sessionNaming: { defaultPrompt, maxWords } })
+        const { kode_version: kodeVersion, ...settings } = await backend.call('/api/v1/messaging/integrations')
+        return send(200, { settings, kodeVersion, cloud: await backend.call('/api/v1/messaging/cloud/status'), sessionNaming: { defaultPrompt, maxWords } })
       }
       if (req.method !== 'POST') return send(405, { error: 'GET or POST required' })
       let body = ''

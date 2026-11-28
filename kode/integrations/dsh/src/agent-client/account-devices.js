@@ -494,142 +494,150 @@
     const syncInfo = kodeSyncStateLabel(status)
     const methodItems = [['email', '邮箱验证码'], ['palmx', 'PalmX 扫码'], ['palm', '手机掌纹接力']]
       .filter(([id]) => supportedMethods.includes(id))
+    const failure = error || loadError
+    const relayHost = (() => { const url = activeBackend?.server_url || status?.server_url || ''; try { return new URL(url).host } catch { return url } })()
+    const linkedMethods = linked.length ? linked : (status?.account_method ? [status.account_method] : [])
+    const embeddedAction = label => kodeEmbedded() && h(Button, { size: 'sm', variant: 'outline', onClick: () => window.kodeHost?.request('open-account', { tab: 'account' }) }, label)
+    const cancelButton = h(Button, { size: 'sm', variant: 'outline', onClick: () => void cancelQr() }, '取消')
+    const qrBox = (alt, note) => h('div', { className: 'kode-account-qr', 'data-state': qrFlow.state === 'scanned' ? 'scanned' : 'pending' },
+      h('span', { className: 'kode-account-qr-frame' },
+        qrFlow.qr_data_url && h('img', { src: qrFlow.qr_data_url, alt }),
+        qrFlow.state === 'scanned' && h(AccountScannedIcon, { size: 40, 'aria-hidden': true })),
+      h('p', { className: 'kode-config-note', role: 'status' }, note),
+      cancelButton)
+
+    const signedOutCard = () => h('div', { className: 'kode-settings-card' },
+      h(AccountRow, { title: '账号中继', note: '登录后在多台电脑与手机之间同步会话、伙伴、头像与背景' },
+        h('input', { type: 'url', className: 'kode-account-input kode-account-relay', 'aria-label': '账号中继地址', value: relayUrl, placeholder: 'https://relay.example.com', onChange: e => setRelayUrl(e.target.value) })),
+      h(AccountRow, { title: '登录方式' },
+        h('span', { className: 'kode-account-seg', role: 'tablist', 'aria-label': '登录方式' },
+          ...methodItems.map(([id, label]) => h('button', {
+            key: id, type: 'button', role: 'tab', 'aria-selected': method === id,
+            onClick: () => { setMethod(id); setError(''); setMessage(''); if (qrFlow) void cancelQr() },
+          }, label)))),
+      method === 'email' && h('form', { className: 'kode-account-form', onSubmit: verifyCode },
+        h(AccountRow, { title: '邮箱', note: '验证码发送到此邮箱' },
+          h('input', { type: 'email', className: 'kode-account-input', 'aria-label': '邮箱', value: email, placeholder: 'name@example.com', disabled: busy, onChange: e => setEmail(e.target.value) }),
+          h(Button, { type: 'button', size: 'sm', variant: 'outline', disabled: busy || !email.trim() || !relayUrl.trim(), onClick: () => void sendCode() }, codeSent ? '重新发送' : '发送验证码')),
+        codeSent && h(AccountRow, { title: '验证码', note: failure ? '' : `已发送到 ${email.trim()}`, error: failure },
+          h('input', { className: 'kode-account-input kode-account-code', 'aria-label': '验证码', inputMode: 'numeric', autoComplete: 'one-time-code', value: code, placeholder: '6 位验证码', disabled: busy, onChange: e => setCode(e.target.value) }),
+          h(Button, { type: 'submit', size: 'sm', variant: 'primary', disabled: busy || !code.trim() }, busy ? '登录中…' : '登录'))),
+      method !== 'email' && (qrFlow && qrFlow.kind !== 'bind'
+        ? qrBox('登录二维码', qrFlow.state === 'scanned' ? '已扫码，请在手机上确认登录' : (method === 'palm' ? '用 Kode 手机 App 扫码，并在手机上完成掌纹验证' : '用 PalmX 扫码确认登录'))
+        : h(AccountRow, { title: method === 'palm' ? '掌纹接力' : 'PalmX 扫码', note: method === 'palm' ? '用已登录的手机 App 扫码，掌纹验证后此电脑自动登录' : '用 PalmX 扫码登录，无需验证码' },
+            embeddedAction('在 Kode 窗口登录'),
+            h(Button, { size: 'sm', variant: 'primary', disabled: busy || !relayUrl.trim(), onClick: () => void startQr(method) }, '生成二维码'))),
+      failure && !(method === 'email' && codeSent) && h(AccountError, { text: failure, standalone: true }))
+
+    const signedInCard = () => h('div', { className: 'kode-settings-card' },
+      h(AccountRow, {
+        lead: h('span', { className: 'kode-account-avatar kode-account-avatar-lg', 'aria-hidden': true },
+          status?.account_picture ? h('img', { src: status.account_picture, alt: '' }) : accountInitial(displayName)),
+        title: editingName
+          ? h('form', { className: 'kode-account-inline-field', onSubmit: saveName },
+              h('input', { className: 'kode-account-input', 'aria-label': '显示名称', value: nameDraft, autoFocus: true, placeholder: '显示名称', onChange: e => setNameDraft(e.target.value) }),
+              h(Button, { type: 'submit', size: 'sm', variant: 'primary', disabled: busy || !nameDraft.trim() }, '保存'),
+              h(Button, { type: 'button', size: 'sm', variant: 'ghost', onClick: () => setEditingName(false) }, '取消'))
+          : [displayName || 'Kode 用户', h(SettingsTag, { key: 'sync', tone: syncTones[syncInfo.tone] ?? 'kind' }, syncInfo.text)],
+        note: [status?.account_email, relayHost].filter(Boolean).join(' · '),
+        error: failure || status?.last_error,
+      },
+        !editingName && embeddedAction('在 Kode 窗口管理'),
+        !editingName && h(Button, { size: 'sm', variant: 'outline', onClick: () => { setNameDraft(displayName); setEditingName(true) } }, '修改名称'),
+        !editingName && h(Button, { size: 'sm', variant: 'outline', className: 'kode-account-danger', disabled: busy, onClick: () => void signOut() }, '退出登录')),
+      activeBackend && activeBackend.active === false && h(AccountRow, {
+        title: ['账号同步', h(SettingsTag, { key: 'off', tone: 'warning' }, '未启用')],
+        note: '此电脑已登录但未参与同步，其他设备看不到它',
+      }, h(Button, { size: 'sm', variant: 'primary', disabled: busy, onClick: () => void activateBackend() }, '启用同步')),
+      h(AccountRow, {
+        title: '登录方式',
+        note: linkedMethods.length ? h('span', { className: 'kode-account-tags' }, ...linkedMethods.map(id => h(SettingsTag, { key: id, tone: 'kind' }, accountMethodLabels[id] ?? id))) : '默认',
+      }, linked.includes('palmx')
+        ? h(Button, { size: 'sm', variant: 'outline', disabled: busy, onClick: () => void unbindPalmx() }, '解绑 PalmX')
+        : h(Button, { size: 'sm', variant: 'outline', disabled: busy || qrFlow?.kind === 'bind', onClick: () => void startQr('bind') }, '绑定 PalmX')),
+      qrFlow?.kind === 'bind' && qrBox('PalmX 绑定二维码', qrFlow.state === 'scanned' ? '已扫码，请在手机上确认绑定' : '用 PalmX 扫码完成绑定'))
+
+    const devices = devicesSnap.devices
+    const deviceRow = device => {
+      const isSelf = device.device_id === devicesSnap.selfDeviceId
+      const online = isSelf || Boolean(device.online)
+      const viewing = isSelf ? !devicesSnap.activeDeviceId : devicesSnap.activeDeviceId === device.device_id
+      return h(AccountRow, {
+        key: device.device_id,
+        lead: h('span', { className: 'kode-account-device-icon', 'aria-hidden': true }, h(AccountComputerIcon), h('i', { 'data-online': online ? '' : undefined })),
+        title: [device.name || device.device_id, isSelf && h(SettingsTag, { key: 'self', tone: 'kind' }, '此设备'), viewing && h(SettingsTag, { key: 'viewing', tone: 'info' }, '正在查看')],
+        note: isSelf ? '此电脑的本地工作台' : online ? '在线 · 可查看会话并对话' : '离线 · 上线后可切换查看',
+        'data-device': device.device_id,
+      }, !viewing && h(Button, { size: 'sm', variant: 'outline', disabled: !online, onClick: () => selectAccountDevice(isSelf ? null : device.device_id) }, isSelf ? '切回此设备' : '查看'))
+    }
+    const devicesBody = () => {
+      if (devicesSnap.loading && devices.length === 0) return h('p', { className: 'kode-account-loading', role: 'status' }, h(IconLoadingOutlineRegular, { size: 14, className: 'kode-spin', 'aria-hidden': true }), '正在读取账号下的设备…')
+      if (devices.length <= 1) return h(AccountRow, {
+        lead: h('span', { className: 'kode-account-device-icon', 'aria-hidden': true }, h(AccountComputerIcon), h('i', { 'data-online': '' })),
+        title: [devices[0]?.name || '此电脑', h(SettingsTag, { key: 'self', tone: 'kind' }, '此设备')],
+        note: '只有此电脑登录了该账号。在另一台电脑登录同一账号后可在这里切换查看',
+      })
+      return devices.map(deviceRow)
+    }
 
     return h('div', { className: 'kode-account-settings' },
-      h('div', { className: 'kode-settings-group' },
-        h('h3', { className: 'kode-settings-group-title' }, 'Kode 主账号'),
-        signedIn
-          ? h('div', { className: 'kode-settings-card kode-settings-card-padded' },
-              h('div', { className: 'kode-account-profile-head' },
-                h('span', { className: 'kode-account-avatar kode-account-avatar-lg' },
-                  status?.account_picture ? h('img', { src: status.account_picture, alt: '' }) : h('span', null, accountInitial(displayName)),
-                  h('span', { className: `kode-account-dot kode-dot-${syncInfo.tone}` }),
-                ),
-                h('div', { className: 'kode-account-profile-meta' },
-                  editingName
-                    ? h('form', { className: 'kode-inline-edit', onSubmit: saveName },
-                        h('input', { value: nameDraft, autoFocus: true, placeholder: '显示名称', onChange: e => setNameDraft(e.target.value) }),
-                        h(Button, { type: 'submit', size: 'sm', variant: 'primary', disabled: busy || !nameDraft.trim() }, '保存'),
-                        h(Button, { type: 'button', size: 'sm', variant: 'outline', onClick: () => setEditingName(false) }, '取消'),
-                      )
-                    : h('div', { className: 'kode-account-title-row' },
-                        h('strong', null, displayName || 'Kode 用户'),
-                        h('span', { className: `kode-pill kode-pill-${syncInfo.tone}` }, syncInfo.text),
-                        h(Button, { size: 'sm', variant: 'outline', onClick: () => { setNameDraft(displayName); setEditingName(true) } }, '修改名称'),
-                      ),
-                  h('p', { className: 'kode-config-note' }, [status?.account_email, activeBackend?.server_url || status?.server_url].filter(Boolean).join(' · ')),
-                ),
-                h('div', { className: 'kode-account-profile-actions' },
-                  activeBackend && activeBackend.active === false && h(Button, { size: 'sm', variant: 'primary', disabled: busy, onClick: () => void activateBackend() }, '启用此账号同步'),
-                  kodeEmbedded() && h(Button, { size: 'sm', variant: 'outline', onClick: () => window.kodeHost?.request('open-account', { tab: 'account' }) }, '在 Kode 窗口管理'),
-                  h(Button, { size: 'sm', variant: 'outline', className: 'kode-delete', disabled: busy, onClick: () => void signOut() }, '退出登录'),
-                ),
-              ),
-              h('div', { className: 'kode-account-linked-row' },
-                h('span', { className: 'kode-config-note' }, `已绑定方式：${linked.length ? linked.join('、') : (status?.account_method || '默认')}`),
-                linked.includes('palmx')
-                  ? h(Button, { size: 'sm', variant: 'outline', disabled: busy, onClick: () => void unbindPalmx() }, '解绑 PalmX')
-                  : h(Button, { size: 'sm', variant: 'outline', disabled: busy, onClick: () => void startQr('bind') }, '绑定 PalmX 扫码'),
-              ),
-              qrFlow?.kind === 'bind' && h('div', { className: 'kode-qr-box' },
-                qrFlow.qr_data_url && h('img', { src: qrFlow.qr_data_url, alt: 'PalmX 绑定二维码', className: 'kode-qr-image' }),
-                h('p', { className: 'kode-config-note' }, qrFlow.state === 'scanned' ? '已扫码，请在手机端确认绑定…' : '请使用 PalmX 扫码完成绑定…'),
-                h(Button, { size: 'sm', variant: 'outline', onClick: () => void cancelQr() }, '取消'),
-              ),
-            )
-          : h('div', { className: 'kode-settings-card kode-settings-card-padded' },
-              h('p', { className: 'kode-config-note' }, '登录 Kode 账号后，可在多台桌面设备与手机 App 之间同步会话、伙伴、头像与背景，并在侧边栏直接切换查看其他设备。'),
-              h('label', { className: 'kode-field' }, '账号中继地址',
-                h('input', { type: 'url', value: relayUrl, placeholder: 'https://relay.example.com', onChange: e => setRelayUrl(e.target.value) })),
-              h('div', { className: 'kode-method-tabs', role: 'tablist' },
-                ...methodItems.map(([id, label]) =>
-                  h('button', {
-                    key: id, type: 'button', role: 'tab', 'aria-selected': method === id,
-                    className: `kode-method-tab${method === id ? ' is-active' : ''}`,
-                    onClick: () => { setMethod(id); setError(''); setMessage(''); if (qrFlow) void cancelQr() },
-                  }, label),
-                ),
-              ),
-              method === 'email' && h('form', { className: 'kode-account-form', onSubmit: verifyCode },
-                h('div', { className: 'kode-field-row' },
-                  h('input', { type: 'email', value: email, placeholder: 'name@example.com', disabled: busy, onChange: e => setEmail(e.target.value) }),
-                  h(Button, { type: 'button', variant: 'outline', disabled: busy || !email.trim() || !relayUrl.trim(), onClick: () => void sendCode() }, codeSent ? '重新发送' : '发送验证码'),
-                ),
-                codeSent && h('div', { className: 'kode-field-row' },
-                  h('input', { value: code, placeholder: '输入 6 位验证码', disabled: busy, onChange: e => setCode(e.target.value) }),
-                  h(Button, { type: 'submit', variant: 'primary', disabled: busy || !code.trim() }, busy ? '登录中…' : '登录'),
-                ),
-              ),
-              (method === 'palmx' || method === 'palm') && h('div', { className: 'kode-qr-panel' },
-                qrFlow
-                  ? h('div', { className: 'kode-qr-box' },
-                      qrFlow.qr_data_url && h('img', { src: qrFlow.qr_data_url, alt: '登录二维码', className: 'kode-qr-image' }),
-                      h('p', { className: 'kode-config-note' }, qrFlow.state === 'scanned'
-                        ? '已扫码，请在手机端确认登录…'
-                        : (method === 'palm' ? '请使用 Kode 手机 App 扫码并完成掌纹验证…' : '请使用 PalmX 扫码确认登录…')),
-                      h(Button, { size: 'sm', variant: 'outline', onClick: () => void cancelQr() }, '取消'),
-                    )
-                  : h('div', { className: 'kode-secondary-actions' },
-                      h(Button, { variant: 'primary', disabled: busy || !relayUrl.trim(), onClick: () => void startQr(method) }, method === 'palm' ? '生成掌纹接力二维码' : '生成 PalmX 登录二维码'),
-                      kodeEmbedded() && h(Button, { variant: 'outline', onClick: () => window.kodeHost?.request('open-account', { tab: 'account' }) }, '在 Kode 窗口登录'),
-                    ),
-              ),
-            ),
-      ),
+      h('section', { className: 'kode-settings-group', 'data-account-group': 'kode' },
+        h('div', { className: 'kode-account-group-head' },
+          h(SettingsTitle, { icon: AccountUserIcon }, 'Kode 账号', !signedIn && h(SettingsTag, { tone: 'kind' }, '未登录'))),
+        signedIn ? signedInCard() : signedOutCard()),
 
-      signedIn && h('div', { className: 'kode-settings-group' },
-        h('div', { className: 'kode-group-head-row' },
-          h('h3', { className: 'kode-settings-group-title' }, '多设备切换'),
-          h(Button, { size: 'sm', variant: 'outline', disabled: devicesSnap.loading, onClick: () => void refreshAccountDevices() }, devicesSnap.loading ? '刷新中…' : '刷新设备'),
-        ),
-        h('div', { className: 'kode-settings-card kode-settings-card-padded' },
-          devicesSnap.devices.length === 0
-            ? h('p', { className: 'kode-config-note' }, devicesSnap.loading ? '正在读取账号设备…' : '当前仅此设备登录了该账号。在另一台电脑登录同一 Kode 账号后即可在此切换。')
-            : h('ul', { className: 'kode-device-list' },
-                ...devicesSnap.devices.map(device => {
-                  const isSelf = device.device_id === devicesSnap.selfDeviceId
-                  const isSelected = isSelf ? !devicesSnap.activeDeviceId : devicesSnap.activeDeviceId === device.device_id
-                  return h('li', { key: device.device_id, className: `kode-device-row${isSelected ? ' is-selected' : ''}` },
-                    h('div', { className: 'kode-device-row-main' },
-                      h('span', { className: `kode-account-dot kode-dot-${device.online || isSelf ? 'online' : 'off'}` }),
-                      h('div', null,
-                        h('strong', null, device.name || device.device_id, isSelf && h('span', { className: 'kode-agent-tag' }, '此设备')),
-                        h('p', { className: 'kode-config-note' }, isSelf ? '当前本地工作台' : (device.online ? '在线 · 可查看并对话' : '离线')),
-                      ),
-                    ),
-                    h(Button, {
-                      size: 'sm',
-                      variant: isSelected ? 'primary' : 'outline',
-                      disabled: isSelected,
-                      onClick: () => selectAccountDevice(isSelf ? null : device.device_id),
-                    }, isSelected ? '当前查看' : (isSelf ? '切回此设备' : '切换查看')),
-                  )
-                }),
-              ),
-          devicesSnap.error && h(Failure, { text: devicesSnap.error }),
-        ),
-      ),
+      signedIn && h('section', { className: 'kode-settings-group', 'data-account-group': 'devices' },
+        h('div', { className: 'kode-account-group-head' },
+          h(SettingsTitle, { icon: AccountComputerIcon }, '设备'),
+          h(Tooltip, { label: '刷新设备', side: 'left', delayMs: 350, portal: true },
+            h(Button, { size: 'sm', variant: 'ghost', className: 'kode-account-refresh', 'aria-label': '刷新设备', disabled: devicesSnap.loading, onClick: () => void refreshAccountDevices() },
+              h(AccountRefreshIcon, { size: 14, className: devicesSnap.loading ? 'kode-spin' : undefined, 'aria-hidden': true })))),
+        h('div', { className: 'kode-settings-card' },
+          devicesBody(),
+          devicesSnap.error && h(AccountError, { text: devicesSnap.error, standalone: true }))),
 
-      h('div', { className: 'kode-settings-group' },
-        h('h3', { className: 'kode-settings-group-title' }, 'DSH 账号（二级管理）'),
-        h('div', { className: 'kode-settings-card kode-settings-card-padded' },
-          h('div', { className: 'kode-secondary-row' },
-            h('div', null,
-              h('strong', null, 'DeepSeek Harness 原生账号'),
-              h('p', { className: 'kode-config-note' }, dshSecondary.signedIn ? `已登录：${dshSecondary.label}` : '未登录（仅在使用 DeepSeek 内置模型/原生服务时需要）'),
-            ),
-            h('div', { className: 'kode-secondary-actions' },
-              dshSecondary.openSettings && h(Button, { size: 'sm', variant: 'outline', onClick: () => dshSecondary.openSettings() }, 'DSH 原生设置'),
-              !dshSecondary.signedIn && dshSecondary.signIn && h(Button, { size: 'sm', variant: 'outline', onClick: () => dshSecondary.signIn() }, '登录 DSH 账号'),
-              dshSecondary.signedIn && dshSecondary.signOut && h(Button, { size: 'sm', variant: 'outline', className: 'kode-delete', onClick: () => void dshSecondary.signOut() }, '退出 DSH 账号'),
-            ),
-          ),
-        ),
-      ),
+      h('section', { className: 'kode-settings-group', 'data-account-group': 'dsh' },
+        h(SettingsTitle, { icon: AccountSettingsIcon }, 'DeepSeek Harness 账号'),
+        h('div', { className: 'kode-settings-card' },
+          h(AccountRow, {
+            title: ['DSH 原生账号', h(SettingsTag, { key: 'state', tone: dshSecondary.signedIn ? 'success' : 'kind' }, dshSecondary.signedIn ? '已登录' : '未登录')],
+            note: dshSecondary.signedIn
+              ? [dshSecondary.label, '仅用于 DeepSeek 内置模型与原生服务'].filter(Boolean).join(' · ')
+              : '仅在使用 DeepSeek 内置模型或原生服务时需要',
+          },
+            dshSecondary.openSettings && h(Button, { size: 'sm', variant: 'outline', onClick: () => dshSecondary.openSettings() }, '原生设置'),
+            !dshSecondary.signedIn && dshSecondary.signIn && h(Button, { size: 'sm', variant: 'outline', onClick: () => dshSecondary.signIn() }, '登录 DSH 账号'),
+            dshSecondary.signedIn && dshSecondary.signOut && h(Button, { size: 'sm', variant: 'outline', className: 'kode-account-danger', onClick: () => void dshSecondary.signOut() }, '退出'),
+          ))),
 
-      message && h('p', { className: 'kode-config-note kode-success-note', role: 'status' }, message),
-      h(Failure, { text: error || loadError }),
+      message && h('p', { className: 'kode-account-ok', role: 'status' }, h(IconCheckOutlineRegular, { size: 14, 'aria-hidden': true }), message),
     )
+  }
+  // Older primitives builds may lack some glyphs; fall back to ones every supported build ships.
+  const AccountUserIcon = IconUserOutlineRegular ?? IconUsersOutlineRegular
+  const AccountRefreshIcon = IconRefreshOutlineRegular ?? IconLoadingOutlineRegular
+  const AccountSettingsIcon = IconSettingsOutlineRegular ?? IconPersonalizationOutlineRegular
+  const AccountScannedIcon = IconCheckCircleOutlineRegular ?? IconCheckOutlineRegular
+  const accountMethodLabels = { email: '邮箱验证码', palmx: 'PalmX', palm: '手机掌纹接力' }
+  const syncTones = { online: 'success', warn: 'warning', error: 'error', idle: 'kind' }
+  function AccountComputerIcon({ size = 16 }) {
+    return h('svg', { width: size, height: size, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true },
+      h('rect', { x: 1.75, y: 2.5, width: 12.5, height: 8.5, rx: 1 }), h('path', { d: 'M5.5 13.5h5M8 11v2.5' }))
+  }
+  function AccountError({ text, standalone = false }) {
+    return text ? h('p', { className: `kode-account-error${standalone ? ' is-standalone' : ''}`, role: 'alert' }, h(IconWarningOutlineRegular, { size: 14, 'aria-hidden': true }), text) : null
+  }
+  // One settings row: optional leading tile, a title line (text + tags), a note and an inline error on the left; actions on the right.
+  function AccountRow({ lead, title, note, error, children, ...props }) {
+    const actions = (Array.isArray(children) ? children : [children]).filter(Boolean)
+    return h('div', { className: 'kode-integration-row kode-account-row', ...props },
+      h('span', { className: 'kode-account-row-main' },
+        lead,
+        h('span', { className: 'kode-account-row-copy' },
+          title != null && h('strong', null, ...(Array.isArray(title) ? title.filter(Boolean) : [title])),
+          note ? h('p', { className: 'kode-config-note' }, note) : null,
+          h(AccountError, { text: error }))),
+      actions.length > 0 && h('span', { className: 'kode-account-actions' }, ...actions))
   }
 
   // Compact multi-device switcher bar rendered at the top of the DSH sidebar.

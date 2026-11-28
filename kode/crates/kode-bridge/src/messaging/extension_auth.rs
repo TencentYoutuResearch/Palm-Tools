@@ -7,11 +7,85 @@ use tokio::{process::Command, sync::Mutex, time::timeout};
 
 static LOGIN: Mutex<()> = Mutex::const_new(());
 
+#[cfg(target_os = "macos")]
+fn authorization_url(line: &str) -> Option<url::Url> {
+    let url = url::Url::parse(line.trim()).ok()?;
+    let local = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
+    (url.host().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && (url.scheme() == "https" || (url.scheme() == "http" && local)))
+        .then_some(url)
+}
+
+#[cfg(target_os = "macos")]
+async fn claude_browser_login(mut command: Command, seconds: u64) -> Result<String> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let mut child = command
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("无法启动 Claude Code")?;
+    let mut lines =
+        BufReader::new(child.stdout.take().context("无法读取 Claude 授权链接")?).lines();
+    let mut opened = false;
+    let result = timeout(Duration::from_secs(seconds), async {
+        while let Some(line) = lines.next_line().await? {
+            if !opened {
+                if let Some(url) = authorization_url(&line) {
+                    let status = Command::new("/usr/bin/open")
+                        .arg(url.as_str())
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .kill_on_drop(true)
+                        .status()
+                        .await
+                        .context("无法启动默认浏览器")?;
+                    if !status.success() {
+                        bail!("系统未能打开 Claude MCP 授权页面，请检查默认浏览器");
+                    }
+                    opened = true;
+                }
+            }
+        }
+        let status = child.wait().await?;
+        if !status.success() && !opened {
+            bail!("Claude Code 未返回可打开的授权链接（{status}）");
+        }
+        if !status.success() {
+            bail!("Claude MCP 授权未完成（{status}）");
+        }
+        Ok(String::new())
+    })
+    .await;
+    result.unwrap_or_else(|_| {
+        if opened {
+            Err(anyhow::anyhow!("等待浏览器授权回调超时，请重新发起授权"))
+        } else {
+            Err(anyhow::anyhow!("等待 Claude Code 生成授权链接超时"))
+        }
+    })
+}
+
 async fn cli(profile: &Value, args: &[String], seconds: u64, capture: bool) -> Result<String> {
     let exe = profile["executable"].as_str().context("CLI 未配置")?;
     let mut command = Command::new(exe);
+    #[cfg(target_os = "macos")]
+    let browser_login = !capture
+        && profile["type"] == "claude"
+        && Path::new(exe)
+            .file_stem()
+            .is_some_and(|name| name == "claude")
+        && args.windows(2).any(|pair| pair == ["mcp", "login"]);
+    for arg in args {
+        #[cfg(target_os = "macos")]
+        if browser_login && arg == "--" {
+            command.arg("--no-browser");
+        }
+        command.arg(arg);
+    }
     command
-        .args(args)
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -43,6 +117,10 @@ async fn cli(profile: &Value, args: &[String], seconds: u64, capture: bool) -> R
     } else {
         None
     };
+    #[cfg(target_os = "macos")]
+    if browser_login {
+        return claude_browser_login(command, seconds).await;
+    }
     let child = command.spawn().context("无法启动 Agent CLI")?;
     let output = timeout(Duration::from_secs(seconds), child.wait_with_output())
         .await
@@ -295,6 +373,20 @@ async fn query(hub: &Hub, input: &Value, login: bool) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn browser_login_only_opens_web_urls() {
+        assert!(authorization_url("  https://example.org/authorize?state=opaque").is_some());
+        for line in [
+            "Visit this URL to authorize:",
+            "file:///tmp/test",
+            "http://example.org",
+            "https://user:pass@example.org",
+        ] {
+            assert!(authorization_url(line).is_none());
+        }
+    }
+
     #[test]
     fn auth_requires_explicit_cli_evidence() {
         assert_eq!(

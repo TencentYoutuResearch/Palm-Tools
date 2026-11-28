@@ -154,12 +154,14 @@ test('the integrations GET exposes the built-in naming rule for display and edit
   registerIntegrationApi({
     webServer: { register: route => { handler = route.handler } },
     connection: { admit: () => ({ peer: { principal: { kind: 'owner' } } }) },
-  }, { call: async path => ({ path }) })
+  }, { call: async path => path.endsWith('/integrations') ? {kode_version:'1.2.3',messaging_enabled:true} : {} })
   const req = Readable.from([]); req.method = 'GET'
   let payload
   const res = { setHeader() {}, end: value => { payload = JSON.parse(value) } }
   await handler(req, res)
   assert.equal(res.statusCode, 200)
+  assert.equal(payload.kodeVersion,'1.2.3')
+  assert.deepEqual(payload.settings,{messaging_enabled:true})
   assert.deepEqual(payload.sessionNaming, { defaultPrompt: sessionNamingPolicy().prompt, maxWords: sessionNamingPolicy().maxWords })
   assert.ok(payload.sessionNaming.defaultPrompt.length > 0)
 })

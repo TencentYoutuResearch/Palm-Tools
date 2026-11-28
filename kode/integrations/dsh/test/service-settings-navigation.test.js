@@ -4,6 +4,7 @@ import vm from 'node:vm'
 import { readAgentClientSource } from '../scripts/build-agent-client.js'
 
 const source = await readAgentClientSource()
+const SETTINGS_UI = { SettingsTitle: 'SettingsTitle', SettingsTag: 'SettingsTag', IconDatabaseOutlineRegular: 'database', IconSkillOutlineRegular: 'skill', IconLinkOutlineRegular: 'link', IconGaugeOutlineRegular: 'gauge', IconInfoOutlineRegular: 'info', IconRemoteConnectionOutlineRegular: 'remote', IconPersonalizationOutlineRegular: 'personalization', IconPluginPinwheelOutlineRegular: 'plugin', IconClockOutlineRegular: 'clock', IconAgentPresetOutlineRegular: 'agent-preset' }
 function fixture(open = () => {}) {
   const h = (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat() })
   const scope = {
@@ -15,7 +16,7 @@ function fixture(open = () => {}) {
     useProjectHosts: () => ({ data: { current: 'local', hosts: [{ id: 'local', name: 'This computer' }, { id: 'worker', name: 'Worker' }] } }),
     useIntegrationSettings: () => ({ data: null, busy: false, error: 'Missing API', recoveryNeeded: true }),
     Button: 'button', Failure: 'failure', SelectField: 'select', RemoteComputerIcon: 'icon', IconPlusOutlineRegular: 'plus', IconAgentPresetOutlineRegular: 'agent-icon', IconWarningOutlineRegular: 'warning', IconCheckOutlineRegular: 'check', IconLoadingOutlineRegular: 'loading',
-    RemoteHostForm: 'form', ServiceRecovery: 'recovery',
+    RemoteHostForm: 'form', ServiceRecovery: 'recovery', ...SETTINGS_UI,
   }
   scope.openKodeSettings = section => { scope.requestedSettingsSection = section; open(`kode-${section}`) }
   vm.createContext(scope)
@@ -47,7 +48,7 @@ test('service recovery navigation selects the failing Host without switching the
     assert.equal(nodes(scoped).filter(node => node.type === 'section').length, 1, 'only the active settings panel mounts')
     const content = typeof body.type === 'function' ? nodes(body.type(body.props)) : nodes(scoped)
     const groupHeading = { agents: '配置主机', integrations: '内置能力', mobile: '手机配对' }[section]
-    assert.ok(content.some(node => node.type === 'h3' && node.children.includes(groupHeading)))
+    assert.ok(content.some(node => node.type === 'SettingsTitle' && node.children.includes(groupHeading)))
   }
   assert.equal(scope.transport.current, 'local')
   assert.equal(scope.requestedServiceHost, undefined, 'consume the navigation target once')

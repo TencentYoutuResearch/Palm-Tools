@@ -8,6 +8,7 @@ const reviewSchema = z.object({ url: z.string(), repo: z.string(), number: z.str
 const relaySchema = z.object({
   id: z.string(), nodeId: z.string(), sessionId: z.string(), content: z.string(),
   direction: z.enum(['received', 'sent']), reply: z.boolean(), status: z.string().optional(),
+  deliveryStatus:z.string().optional(), receiptSeq:z.number().optional(),
   title: z.string().optional(), replyTo: z.string().optional(), answered: z.literal(true).optional(),
 })
 const viewSchema = z.object({ reviews: z.array(reviewSchema), relays: z.array(relaySchema) })
@@ -108,7 +109,7 @@ function relayFromRow(row, direction) {
 }
 
 function isReplyTo(reply, request) {
-  return request.direction === 'sent' && !request.reply && reply.direction === 'received' &&
+  return !request.reply && reply.direction !== request.direction &&
     reply.replyTo === request.id && reply.nodeId === request.nodeId && reply.sessionId === request.sessionId
 }
 
@@ -119,7 +120,7 @@ function relayReplies(result, relays) {
     if (!reply?.replyTo || relays.some(row => row.id === reply.id)) return []
     // A read includes receipts for outgoing messages. Only an actual reply from
     // the original peer can change the state of an outgoing request.
-    return relays.some(row => isReplyTo(reply, row)) ? [reply] : []
+    return relays.some(row => row.direction === 'sent' && isReplyTo(reply, row)) ? [reply] : []
   })
 }
 
@@ -131,14 +132,20 @@ function addRecent(rows, items, key) {
 
 function addRecentRelays(rows, items) {
   const answered = new Set(rows.filter(row => row.answered).map(row => row.id))
-  const replies = [...rows, ...items].filter(row => row.direction === 'received' && row.replyTo)
-  return addRecent(rows, items, row => row.id).map(row =>
+  const replies = [...rows, ...items].filter(row => row.replyTo)
+  const previous = new Map(rows.filter(row => row.receiptSeq !== undefined).map(row => [row.id,row]))
+  const merged = items.map(item => {
+    const old = previous.get(item.id)
+    return old && old.nodeId === item.nodeId && old.sessionId === item.sessionId
+      ? {...item,receiptSeq:old.receiptSeq,deliveryStatus:old.deliveryStatus} : item
+  })
+  return addRecent(rows, merged, row => row.id).map(row =>
     answered.has(row.id) || replies.some(reply => isReplyTo(reply, row)) ? { ...row, answered: true } : row)
 }
 
 export const sessionPanelProjection = {
   key: 'kodeSessionPanel',
-  stateVersion: 4,
+  stateVersion: 5,
   stateSchema,
   init: () => ({ reviewStates: {}, reviews: [], relays: [], pendingTools: [] }),
   apply(state, event) {
@@ -166,7 +173,16 @@ export const sessionPanelProjection = {
       const relays = tool.kind === 'create' || tool.kind === 'send'
         ? [relayFromRow(outgoing, 'sent')].filter(Boolean)
         : relayReplies(value, state.relays)
-      return { ...state, pendingTools, relays: relays.length ? addRecentRelays(state.relays, relays) : state.relays }
+      let recent = relays.length ? addRecentRelays(state.relays, relays) : state.relays
+      if ((tool.kind === 'read' || tool.kind === 'wait') && Array.isArray(value?.events)) {
+        for (const {seq,message} of value.events.filter(event => event && typeof event === 'object')) {
+          if (!Number.isSafeInteger(seq) || seq < 0 || typeof message?.status !== 'string' || message.status.length > 32) continue
+          const i = recent.findIndex(row => row.direction === 'sent' && row.id === message.id &&
+            row.nodeId === message.target?.node_id && row.sessionId === message.target?.session_id && seq > (row.receiptSeq ?? -1))
+          if (i >= 0) recent = recent.with(i,{...recent[i],receiptSeq:seq,deliveryStatus:message.status})
+        }
+      }
+      return { ...state, pendingTools, relays: recent }
     }
     const message = event.type === 'user/message' ? event.data : event.type === 'assistant/message' ? event.data.message : undefined
     if (!message || event.surfaceOp === 'replace') return state

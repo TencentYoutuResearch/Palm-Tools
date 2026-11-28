@@ -1169,7 +1169,7 @@ pub(crate) fn parse_cursor_request(value: &Value) -> Option<(String, UsageBucket
 fn codex_file_events(path: &Path, backend: &str, fallback_ms: Option<i64>) -> Vec<UsageEvent> {
     let mut events = Vec::new();
     let mut model = String::from("unknown");
-    let mut previous = UsageBucket::default();
+    let mut previous: Option<UsageBucket> = None;
     for_each_json_line(path, |value| {
         let entry_type = value.get("type").and_then(Value::as_str);
         let payload = value.get("payload").unwrap_or(&Value::Null);
@@ -1190,19 +1190,24 @@ fn codex_file_events(path: &Path, backend: &str, fallback_ms: Option<i64>) -> Ve
         let Some(info) = payload.get("info") else {
             return;
         };
-        let (current, cumulative) = if let Some(total) = info.get("total_token_usage") {
-            (codex_usage(total), true)
-        } else if let Some(last) = info.get("last_token_usage") {
-            (codex_usage(last), false)
+        let last = info
+            .get("last_token_usage")
+            .filter(|v| v.is_object())
+            .map(codex_usage);
+        let delta = if let Some(total) = info.get("total_token_usage").filter(|v| v.is_object()) {
+            let current = codex_usage(total);
+            // A resumed rollout can begin with the parent thread's lifetime counters.
+            let delta = match previous.as_ref() {
+                Some(prior) if current.total >= prior.total => usage_delta(&current, prior),
+                _ => last.unwrap_or_else(|| current.clone()),
+            };
+            previous = Some(current);
+            delta
+        } else if let Some(last) = last {
+            previous = None;
+            last
         } else {
             return;
-        };
-        let delta = if cumulative {
-            let delta = usage_delta(&current, &previous);
-            previous = current;
-            delta
-        } else {
-            current
         };
         if delta.total > 0 {
             events.push(UsageEvent {
@@ -1649,6 +1654,34 @@ mod tests {
         assert_eq!(
             (delta.input, delta.output, delta.cached, delta.total),
             (60, 15, 30, 75)
+        );
+    }
+
+    #[test]
+    fn resumed_rollout_excludes_inherited_usage_from_first_event() {
+        let path =
+            std::env::temp_dir().join(format!("kode-inherited-usage-{}.jsonl", std::process::id()));
+        let rows = [
+            (5_227_970_108_u64, 128616),
+            (5_227_970_108, 128616),
+            (5_228_000_108, 30000),
+        ];
+        let lines: Vec<_> = rows
+            .iter()
+            .map(|(total, last)| {
+                serde_json::json!({
+            "type":"event_msg","payload":{"type":"token_count","info":{
+                "total_token_usage":{"total_tokens":total},"last_token_usage":{"total_tokens":last}
+            }}
+        }).to_string()
+            })
+            .collect();
+        fs::write(&path, lines.join("\n")).unwrap();
+        let events = codex_file_events(&path, "codex", None);
+        fs::remove_file(path).unwrap();
+        assert_eq!(
+            events.iter().map(|e| e.usage.total).collect::<Vec<_>>(),
+            vec![128616, 30000]
         );
     }
 

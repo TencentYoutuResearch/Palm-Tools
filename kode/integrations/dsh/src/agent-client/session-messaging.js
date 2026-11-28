@@ -65,20 +65,40 @@
     return h('span', { 'data-kode-relay': marker, hidden: true }, css && h('style', null, css))
   }
   // The projection's answered flag wins; otherwise only a received relay that names a sent request in its reply-to answers it. Delivery receipts never do.
-  // Sent lines fly out on the paper plane; received ones arrive as mail, opened once they answer us.
+  // The glyph shows direction only: whatever we sent flies out on the paper plane, whatever we received arrives as opened mail.
   const relayKinds = {
-    waiting: { label: '等待对方回复', icon: IconPaperPlaneOutlineRegular, badge: IconClockOutlineRegular, tone: 'waiting' },
-    answered: { label: '已收到回复', icon: IconPaperPlaneOutlineRegular, badge: IconCheckOutlineRegular, tone: 'answered' },
+    waiting: { label: '等待对方回复', icon: IconPaperPlaneOutlineRegular },
+    answered: { label: '已收到回复', icon: IconPaperPlaneOutlineRegular },
     sent: { label: '已发送', icon: IconPaperPlaneOutlineRegular },
     replied: { label: '已回复对方', icon: IconPaperPlaneOutlineRegular },
     reply: { label: '收到对方回复', icon: IconMailReadOutlineRegular },
-    incoming: { label: '收到消息', icon: IconMailUnreadOutlineRegular },
+    incoming: { label: '收到消息', icon: IconMailReadOutlineRegular },
+    responded: { label: '收到消息 · 已回复', icon: IconMailReadOutlineRegular },
   }
-  function relayIcon(key) {
-    const {icon,badge} = relayKinds[key]
-    return h('span', { className:'kode-relay-icon', 'data-relay-kind':key, 'aria-hidden':true },
-      h(icon,{size:16}), badge && h('span',{className:'kode-relay-badge'},h(badge,{size:7})))
+  // The corner badge shows the outcome only, in the MR/TAPD badge style. A real reply (↩) and a delivery
+  // receipt (ring / ? / ✕) never share a glyph; accepted and unknown receipts draw nothing.
+  const relayBadges = {
+    reply: { label: '' },
+    fail: { label: status => `未送达：${deliveryStatusLabels[status] ?? '通信未成功'}` },
+    unknown: { label: () => '投递结果待确认，对方可能已收到' },
+    ring: { label: status => deliveryStatusLabels[status] ?? '正在投递' },
   }
+  const deliveryBadges = { queued: 'ring', received: 'ring', delivering: 'ring', uncertain: 'unknown', rejected: 'fail', expired: 'fail' }
+  // Priority: reply > fail > unknown > ring > none. A reply we sent never shows ↩: it has no answer to wait for.
+  function relayBadge(row, kind) {
+    if (kind === 'answered' || kind === 'responded') return { badge: 'reply' }
+    if (row.direction !== 'sent') return {}
+    const status = row.deliveryStatus ?? row.status, badge = deliveryBadges[status]
+    return badge ? { badge, label: relayBadges[badge].label(status) } : {}
+  }
+  // A received request shows ↩ only when this session sent a reply naming it, back to the same peer.
+  function answeredBy(relays, id, nodeId, sessionId) {
+    return Array.isArray(relays) && relays.some(row => row.direction === 'sent' && row.reply && row.replyTo === id && row.nodeId === nodeId && row.sessionId === sessionId)
+  }
+  function relayIcon(key, badge) {
+    return h('span', { className:'kode-relay-icon', 'data-relay-kind':key, 'aria-hidden':true }, h(relayKinds[key].icon,{size:16}), ...badge ? [h('i', { className: 'kode-relay-badge', 'data-badge': badge })] : [])
+  }
+
   // Agent prose reads as Markdown, but a panel body must stay quiet: images become
   // links (MarkdownText would fetch remote ones), single newlines keep their line
   // breaks, and underscores or asterisks inside bare paths stay literal.
@@ -125,20 +145,23 @@
   }
   // Collapsed relays show only the two real session names, the title and the
   // disclosure chevron; time, delivery and body live in the expanded detail.
-  function RelayToggle({ from, to, title, open, onToggle, kind, failed }) {
-    return h('button', { type: 'button', className: 'kode-relay-toggle', 'aria-expanded': open, onClick: onToggle },
-      h('span', { className: 'kode-relay-heading' }, relayIcon(kind), h('strong', { title: from.title }, from.name), h('span', { className: 'kode-secondary', 'aria-label': '发往' }, '→'), h('strong', { title: to.title }, to.name)),
-      failed && h('span', { className: 'kode-relay-failed kode-error', role: 'img', 'aria-label': '通信未成功', title: '通信未成功' }, h(IconWarningOutlineRegular, { size: 14 })),
+  // The badge replaces the old ⚠: a failed relay is told once, by the red corner, and named for screen readers here.
+  function RelayToggle({ from, to, title, open, onToggle, kind, badge, state }) {
+    return h('button', { type: 'button', className: 'kode-relay-toggle', 'aria-expanded': open, onClick: onToggle, title: state || undefined },
+      h('span', { className: 'kode-relay-heading' }, relayIcon(kind, badge), h('strong', { title: from.title }, from.name), h('span', { className: 'kode-secondary', 'aria-label': '发往' }, '→'), h('strong', { title: to.title }, to.name)),
+      state && h('span', { className: 'kode-sr-only' }, `，${state}`),
       h(IconChevronDownOutlineRegular, { size: 12 }),
       h('span', { className: 'kode-relay-title' }, title))
   }
   const currentEnd = name => ({ name, title: `${name}（当前会话）` })
-  function RelayCard({ relay, time, nameOf, sessionId, node, useChat }) {
+  function RelayCard({ relay, time, nameOf, sessionId, node, useChat, useProjection }) {
     const [open, setOpen] = useState(false)
+    const relays = useProjection?.('kodeSessionPanel', state => state?.relays)
     const slash = relay.address.indexOf('/'), sender = nameOf(relay.address.slice(0, slash), relay.address.slice(slash + 1))
+    const kind = relay.replyTo ? 'reply' : answeredBy(relays, relay.id, relay.address.slice(0, slash), relay.address.slice(slash + 1)) ? 'responded' : 'incoming'
     return h('section', { className: 'kode-relay', 'aria-label': '会话消息', 'data-open': open ? '' : undefined },
       useChat && h(RelayEchoVisibility, { node, sessionId, useChat }),
-      h(RelayToggle, { from: { name: sender, title: sender }, to: currentEnd(nameOf(undefined, sessionId)), title: relayTitle(relay), open, onToggle: () => setOpen(!open), kind: relay.replyTo ? 'reply' : 'incoming' }),
+      h(RelayToggle, { from: { name: sender, title: sender }, to: currentEnd(nameOf(undefined, sessionId)), title: relayTitle(relay), open, onToggle: () => setOpen(!open), kind, badge: relayBadge({ direction: 'received' }, kind).badge, state: relayKinds[kind].label }),
       open && h('div', { className: 'kode-relay-detail' }, h('p', { className: 'kode-panel-meta' }, relay.replyTo ? '回复了这段对话' : '发来一条消息', Number.isFinite(time) && ' · ', Number.isFinite(time) && h('time', { dateTime: new Date(time).toISOString() }, new Date(time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))), h(PanelMarkdown, { text: relay.content, className: 'kode-relay-body' })),
     )
   }

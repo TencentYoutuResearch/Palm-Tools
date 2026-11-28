@@ -5,6 +5,7 @@ import vm from 'node:vm'
 import { readAgentClientSource } from '../scripts/build-agent-client.js'
 
 const source = await readAgentClientSource()
+const SETTINGS_UI = { SettingsTitle: 'SettingsTitle', SettingsTag: 'SettingsTag', IconDatabaseOutlineRegular: 'database', IconSkillOutlineRegular: 'skill', IconLinkOutlineRegular: 'link', IconGaugeOutlineRegular: 'gauge', IconInfoOutlineRegular: 'info', IconRemoteConnectionOutlineRegular: 'remote', IconPersonalizationOutlineRegular: 'personalization', IconPluginPinwheelOutlineRegular: 'plugin', IconClockOutlineRegular: 'clock', IconAgentPresetOutlineRegular: 'agent-preset' }
 function client(directoryData = { current: 'local', hosts: [] }, windowProperties = {}, contextProperties = {}, globals = {}, hooks = {}) {
   const { primitives: primitiveOverrides = {}, ...reactHooks } = hooks
   let plugin
@@ -362,7 +363,10 @@ test('Agent list keeps editors collapsed until requested', () => {
   assert.match(JSON.stringify(body), /默认 Agent/); assert.match(JSON.stringify(body), /添加 Agent/)
   const defaultAgent = findNode(body, child => child?.props?.label === '默认 Agent')
   assert.equal(defaultAgent.props.showLabel, false)
-  assert.ok(findNode(body, child => child?.type === 'h3' && child.children.includes('默认 Agent')))
+  const heading = findNode(body, child => child?.type?.name === 'SettingsTitle' && child.children.includes('默认 Agent'))
+  assert.ok(heading, 'section titles go through the shared heading')
+  assert.equal(heading.type(heading.props).type, 'h3', 'and still render a native h3')
+  assert.equal(heading.props.icon, 'IconAgentPresetOutlineRegular', 'with the native Agent glyph')
   assert.ok(findNode(body, child => child?.props?.className === 'kode-settings-scope' && child.children?.some(row => row?.props?.label === '默认 Agent')), 'default Agent uses the same framed scope as the configuration Host')
   assert.doesNotMatch(JSON.stringify(body), /kode-agent-form|type.:.password/)
 })
@@ -420,12 +424,15 @@ test('model menu owns model, effort and Fast selection in one trigger', async ()
 })
 
 test('Agent update controls highlight only a confirmed release and use the correct update action', () => {
-  const scope={h:(type,props,...children)=>({type,props,children}),Button:'button'}
+  const scope={h:(type,props,...children)=>({type,props,children}),Button:'button',...SETTINGS_UI}
   vm.runInNewContext(source.slice(source.indexOf('  function AgentVersionIdentity'), source.indexOf('  function AgentSettingsBody')),scope)
   const profile={id:'configured',name:'Work Codex',type:'codex'}, calls=[]
   const state={versions:{configured:{current:'1.2.3',latest:'1.3.0',updateAvailable:true}},operate:(...args)=>calls.push(args)}
   const identity=scope.AgentVersionIdentity({profile,state})
-  assert.match(visibleText(identity),/Work Codex.*1.2.3.*可更新到 1.3.0/)
+  assert.match(visibleText(identity),/Work Codex.*v1\.2\.3.*↑ 1\.3\.0/)
+  const tags=[];(function walk(node){if(!node||typeof node!=='object')return;if(node.type==='SettingsTag')tags.push(node.props);(node.children??[]).forEach(walk)})(identity)
+  assert.deepEqual(tags.map(tag=>[tag.tone,tag['aria-label']]),[['version','已安装 1.2.3'],['update','可更新到 1.3.0']],'versions are monospace tags with spoken names')
+  assert.doesNotMatch(visibleText(scope.AgentVersionIdentity({profile,state:{versions:{configured:{current:'1.3.0'}}}})),/↑|可更新/,'no update tag without a confirmed release')
   const button=scope.AgentUpdateButton({profile,state})
   assert.equal(button.props.variant,'primary')
   button.props.onClick()
@@ -483,11 +490,16 @@ test('the details card uses the composer profile without repeating its model acr
     assert.equal(block.type.name, 'SessionIdentitySection')
     const [identity] = block.children
     assert.equal(identity.props.className, 'kode-environment-identity')
-    const [row, action] = identity.children
-    assert.equal(row.props.label, name)
-    assert.equal(row.props.detail, name === type ? undefined : type)
-    assert.equal(row.props.icon.props.size, 28)
-    assert.equal(row.props.actionLabel, '设置 ' + name + ' 的头像与背景')
+    const [avatarSeat, lines, action] = identity.children
+    assert.equal(avatarSeat.props.className, 'kode-identity-avatar')
+    assert.equal(avatarSeat.children[0].props.size, 32, 'avatar B is 32px')
+    const [nameLine, typeLine] = lines.children
+    assert.equal(nameLine.children[0].children[0], name)
+    const edit = nameLine.children[1].children[0]
+    assert.equal(edit.props.className, 'kode-identity-edit', 'the pencil sits right after the name')
+    assert.equal(edit.props['aria-label'], '设置 ' + name + ' 的头像与背景')
+    assert.equal(typeLine.props.className, 'kode-identity-type')
+    assert.equal(typeLine.children[0], type, 'the second line names the Agent type')
     const handoff = action.type(action.props)
     assert.equal(handoff.props['aria-label'], '交接会话到其他 Agent')
     assert.match(visibleText(handoff), /交接/)
@@ -541,7 +553,7 @@ test('Plugin and Skills sources stay a multi-item list with an on-demand editor 
    {id:'acp-unknown',name:'Unconfigured ACP',type:'custom'},
  ],configuredDefaultProfileId:'codex'}
  const sessions={list:{getSnapshot:()=>({byId:{active:{retainedBy:{mainView:1},projectionValues:{kodeAgent:{profileId:'deepseek'}}}}})}}
- const scope={directory:()=>({getSnapshot:()=>({data:agents})}),useSyncExternalStore:(_,get)=>get(),hubCall:async body=>{requests.push(body);return slots[0]},React:{Fragment:'fragment'},Button:'button',Modal:'modal',Failure:'failure',SelectField:'select',IconPlusOutlineRegular:'plus',IconChevronDownOutlineRegular:'chevron',IconCheckOutlineRegular:'check',IconClockOutlineRegular:'clock',transport:null,h:(type,props,...children)=>({type,props,children}),useEffect(){},AbortController,setTimeout:()=>0,clearTimeout(){},useRef:(()=>{const refs=[];let i=0;return value=>refs[i++%1]??=({current:value})})(),useState(initial){const at=index++;if(slots[at]===undefined)slots[at]=initial;return[slots[at],value=>{slots[at]=typeof value==='function'?value(slots[at]):value}]}}
+ const scope={...SETTINGS_UI,directory:()=>({getSnapshot:()=>({data:agents})}),useSyncExternalStore:(_,get)=>get(),hubCall:async body=>{requests.push(body);return slots[0]},React:{Fragment:'fragment'},Button:'button',Modal:'modal',Failure:'failure',SelectField:'select',IconPlusOutlineRegular:'plus',IconChevronDownOutlineRegular:'chevron',IconCheckOutlineRegular:'check',IconClockOutlineRegular:'clock',transport:null,h:(type,props,...children)=>({type,props,children}),useEffect(){},AbortController,setTimeout:()=>0,clearTimeout(){},useRef:(()=>{const refs=[];let i=0;return value=>refs[i++%1]??=({current:value})})(),useState(initial){const at=index++;if(slots[at]===undefined)slots[at]=initial;return[slots[at],value=>{slots[at]=typeof value==='function'?value(slots[at]):value}]}}
  vm.runInNewContext(source.slice(source.indexOf('  const hubTargetNames'),source.indexOf('  function GoalBar')),scope)
  const render=()=>{index=0;return scope.HubSettings({host:'local',sessions})}
  render();slots[0]={power:{supported:false},sources:[{id:'remote',kind:'git',location:'https://example.test/remote',subdir:'plugins/remote',targets:['dsh'],nativeStatus:{dsh:'skills-only'},updatedAt:1,release:'r1',packages:[{name:'remote',path:'.',displayName:'Remote Toolkit',description:'Remote summary',longDescription:'Long remote summary',version:'1.2.3',author:'team',category:'Engineering',logo:'assets/logo.png',skills:[{name:'example-skill',description:'Skill summary'}],agents:[{name:'reviewer',description:'Reviews changes'}],hooks:[{name:'PreToolUse',description:'Hook summary'}],commands:[{name:'build',description:'Build summary'}],rules:[{name:'discipline',description:'Rule summary'}],mcp:[{name:'remote-mcp',type:'http'}]}]},{id:'local',kind:'local',location:'/tmp/skills',targets:['dsh'],skills:['skills--local']}],targets:{dsh:'.agents/skills',codex:'.codex/skills',tclaude:'.tclaude/skills','directory-fixture':'/example/custom/skills'},profileTargets:{deepseek:'dsh',codex:'codex','codex-alt':'codex',tclaude:'tclaude','acp-with-skills':'directory-fixture'}}
@@ -634,7 +646,7 @@ test('plugin toggles preserve source boundaries and sequence MCP login with retr
   const codex = { id: 'codex', name: 'Codex', type: 'codex', origin: 'builtin' }
   const agents = { profiles: [codex], configuredDefaultProfileId: 'codex' }
   const sessions = { list: { getSnapshot: () => ({ byId: {} }) } }
-  const scope = {
+  const scope = { ...SETTINGS_UI,
     directory: () => ({ getSnapshot: () => ({ data: agents }) }), useSyncExternalStore: (_, get) => get(),
     hubCall: async body => {
       requests.push(body)
@@ -755,7 +767,7 @@ test('MCP rows reuse the Agent sync tags and one-click authorization logs in eac
       { packageKey: 'kit', name: 'local', status: 'mystery' },
     ],
   }
-  const scope = {
+  const scope = { ...SETTINGS_UI,
     directory: () => ({ getSnapshot: () => ({ data: agents }) }), useSyncExternalStore: (_, get) => get(),
     hubCall: async body => {
       requests.push({ ...body })
@@ -848,11 +860,11 @@ test('Kode settings use the native settings section and a pinnable sidebar panel
   assert.ok(!c.ctx.slots.entries('sidebar.panellist.actions').some(row => row.options.id === 'kode-entries'), 'standalone does not duplicate the native menu entry')
   const main = c.entry('main', 'kode-settings'), wrapper = main(), panel = wrapper.children[0], tree = panel.type(panel.props)
   assert.match(JSON.stringify(tree), /插件与集成/); assert.doesNotMatch(JSON.stringify(tree), /Agent 共享/)
-  assert.match(JSON.stringify(tree), /统一管理 Agent、插件、连接与个性化设置/)
+  assert.doesNotMatch(JSON.stringify(tree), /统一管理 Agent、插件、连接与个性化设置/, 'the brand header needs no tagline')
   assert.match(findNode(tree, node => node.type === 'img' && node.props.src?.includes('type=kode'))?.props.src, /\/api\/kode\/avatars\/media\?type=kode&state=idle/)
   assert.match(source,/\.kode-settings-scope \.kode-field\{[^}]*width:100%;max-width:none/)
   assert.match(source,/\.kode-settings-brand-avatar\{[^}]*width:32px;height:32px/)
-  assert.match(source,/\.kode-settings-brand p\{[^}]*font-size:12px;line-height:18px/)
+  assert.doesNotMatch(source,/\.kode-settings-brand p\{/)
   c.ctx.layout.selectPanel('kode-settings')
   assert.deepEqual(selected, ['kode-settings'])
   assert.equal(c.shell.component, c.native)
@@ -1254,12 +1266,12 @@ test('avatar animation subscribes to native running and interaction facts indepe
  vm.runInNewContext(source.slice(source.indexOf('  const emptyAvatarStatuses'),source.indexOf('  async function stageAvatarPrompt')),scope)
  assert.equal(scope.useAvatarStatus('running'),'running');assert.equal(scope.useAvatarStatus('awaiting'),'awaiting');assert.equal(scope.useAvatarStatus('idle'),'idle');assert.equal(scope.useAvatarStatus('not-loaded'),undefined)
  Object.assign(scope,{transport:null,useState:value=>[value,()=>{}],useEffect(){},React:{useRef:value=>({current:value})},useAvatarLibrary:()=>({avatars:[{id:'person',animations:{idle:['idle-1'],running:['running-1','running-2'],awaiting:['awaiting-1','awaiting-2'],done:['done-1','done-2']}}]}),h:(type,props,...children)=>({type,props,children})})
- const artOf=avatar=>avatar.children[0].children[0].children[0]
+ const artOf=avatar=>avatar.children[0].children[0]
  for(const status of ['running','awaiting','done']) assert.equal(artOf(scope.AgentAvatar({profile:{avatar:{id:'person'}},status})).props.src,`${status==='running'?'awaiting':status}-1`,'reuse the original awaiting/done animations for every state')
  const nativeKode=artOf(scope.AgentAvatar({profile:{type:'dsh',avatar:{id:null,url:'/api/kode/avatars/media?type=dsh&state=idle'}}}))
  assert.equal(nativeKode.type,'img');assert.equal(nativeKode.props.src,'/api/kode/avatars/media?type=dsh&state=idle','native Kode conversations must render the packaged Kode icon')
- for(const status of ['running','awaiting','done']) assert.equal(scope.AgentAvatar({profile:{avatar:{id:'person'}},status}).children[1].props.className,'kode-agent-avatar-dot')
- assert.equal(scope.AgentAvatar({profile:{avatar:{id:'person'}},status:'idle'}).children[1],false,'idle avatars carry no dot')
+ for(const status of ['running','awaiting','done']) assert.equal(scope.AgentAvatar({profile:{avatar:{id:'person'}},status}).children[2].props.className,'kode-agent-avatar-dot')
+ assert.equal(scope.AgentAvatar({profile:{avatar:{id:'person'}},status:'idle'}).children[2],false,'idle avatars carry no dot')
  scope.avatarContext.sessions={list:{subscribe:()=>()=>{},getSnapshot:()=>({byId:{'not-loaded':{running:true}}})}}
  assert.equal(scope.useAvatarStatus('not-loaded'),'running','cold artwork directories must not delay the native running state')
 })
@@ -1280,9 +1292,10 @@ test('running sessions use one steady avatar marker for default and custom artwo
  vm.runInNewContext(source.slice(source.indexOf('  const avatarStateRank'),source.indexOf('  function FederatedWorkspaceBrowser')),scope)
  const tree=scope.SessionStatusAvatars({root:{current:null},rows:{custom:{agent:{type:'codex',avatar:{id:'gallery/person'}}},default:{agent:{type:'claude'}},plain:{}}})
  assert.deepEqual(tree.children.map(overlay=>[overlay.children[0].props['data-status'],overlay.children[0].children[0].props.status]),[['ongoing','running'],['ongoing','running']])
- const css=source.slice(source.indexOf('/* Session state: a 1.5px ring'),source.indexOf('.kode-tool-action{'))
- assert.match(css,/\.kode-agent-avatar-face\{position:absolute;inset:-2\.5px;box-sizing:border-box;padding:1px;border:1\.5px solid transparent;border-radius:50%\}/,'1.5px ring over a fixed 1px gap around a circular face')
- assert.match(css,/\.kode-agent-avatar-art\{[^}]*overflow:hidden;border-radius:50%\}/,'artwork is clipped to a circle inside the face')
+ const css=source.slice(source.indexOf('.kode-unified-workspaces [data-kode-status-avatar]{'),source.indexOf('.kode-tool-action{'))
+ assert.match(css,/\.kode-agent-avatar-face\{position:absolute;inset:-2\.5px;box-sizing:border-box;border:1\.5px solid transparent;border-radius:50%;pointer-events:none\}/,'1.5px ring over a fixed 1px gap around a circular face')
+ assert.match(css,/\[data-kode-status-avatar\]\{position:relative\}/,'native seat keeps its idle dimensions')
+ assert.match(css,/\.kode-agent-avatar-art\{position:absolute;inset:0;[^}]*overflow:hidden;border-radius:50%\}/,'artwork is clipped to a circle inside the face')
  assert.match(css,/\.kode-agent-avatar-face,\.kode-agent-avatar-art,\.kode-agent-avatar-art::after,\.kode-agent-avatar-dot\{corner-shape:round\}/,'circles opt out of the DSH superellipse corner-shape')
  assert.match(css,/\[data-avatar-state=running\]>\.kode-agent-avatar-face,[^{]*\[data-avatar-state=awaiting\]>\.kode-agent-avatar-face,[^{]*\[data-avatar-state=done\]>\.kode-agent-avatar-face\{[^}]*border-color:var\(--kode-avatar-ring\);-webkit-mask:var\(--kode-avatar-notch\);mask:var\(--kode-avatar-notch\)\}/,'every state rings the face and notches it for the dot')
  assert.match(css,/\[data-avatar-state=awaiting\]>\.kode-agent-avatar-face\{border-style:dashed\}/,'awaiting differs by stroke, not only by color')
@@ -1427,23 +1440,25 @@ test('existing session identity remains visible when its runtime is idle or unlo
  assert.equal(worn.children[0].props['aria-label'],'编辑伙伴')
  const clicks = []
  Object.assign(scope, {
-   SessionPanelRow: 'panel-row', HandoffAction: 'handoff', selectedCatalogModel: () => undefined, IconEditOutlineRegular: 'edit',
+   SessionPanelRow: 'panel-row', HandoffAction: 'handoff', Tooltip: 'tooltip', selectedCatalogModel: () => undefined, IconEditOutlineRegular: 'edit',
    openBotsPage: () => clicks.push('companions'), requestedBotEdit: null,
    window: { dispatchEvent: event => clicks.push(event.type) }, CustomEvent: class { constructor(type) { this.type = type } },
    openAvatarDialog: target => clicks.push(target),
  })
  const panelProps = { ...props, panel: true, dismissOverlay: () => clicks.push('close panel') }
- const companionRow = scope.AgentIdentity(panelProps).children[0].children[0].props
- assert.equal(companionRow.actionLabel, '编辑伙伴 柚子 PM')
- assert.equal(companionRow.icon.props.profile.avatar.id, 'gallery/yuzu')
- companionRow.onClick()
+ const panelParts = () => { const [avatarSeat, lines] = scope.AgentIdentity(panelProps).children[0].children; return { avatar: avatarSeat.children[0].props, edit: lines.children[0].children[1].children[0].props, name: lines.children[0].children[0].children[0] } }
+ const companionRow = panelParts()
+ assert.equal(companionRow.name, '柚子 PM')
+ assert.equal(companionRow.edit['aria-label'], '编辑伙伴 柚子 PM')
+ assert.equal(companionRow.avatar.profile.avatar.id, 'gallery/yuzu')
+ companionRow.edit.onClick()
  assert.equal(scope.requestedBotEdit, 'b1')
  assert.deepEqual(clicks, ['close panel', 'companions', 'kode-bot-edit'])
 
  scope.useWorkspaceDirectory = () => ({ current: 'remote-fixture', hosts: [{ id: 'remote-fixture', sessions: [{ id: 'saved-session', running: true, agent: { avatar: { id: 'gallery/remote' } } }] }] })
- const avatarRow = scope.AgentIdentity(panelProps).children[0].children[0].props
- assert.equal(avatarRow.icon.props.status, 'running')
- avatarRow.onClick()
+ const avatarRow = panelParts()
+ assert.equal(avatarRow.avatar.status, 'running')
+ avatarRow.edit.onClick()
  assert.equal(clicks.at(-2), 'close panel')
  assert.equal(clicks.at(-1).host, 'remote-fixture')
  assert.equal(clicks.at(-1).profile.avatar.id, 'gallery/remote')
@@ -1644,7 +1659,7 @@ test('global activity uses project priority across Hosts and updates without mou
 test('interface settings toggle the device service directly and report save failures', () => {
  let enabled = true, error = '', received
  const service = { subscribe: () => () => {}, getSnapshot: () => ({ tokenIsland: enabled }), update(value) { received = value; enabled = value.tokenIsland } }
- const scope = { avatarContext: { get: name => name === 'kodeInterface' ? service : undefined },
+ const scope = { ...SETTINGS_UI, avatarContext: { get: name => name === 'kodeInterface' ? service : undefined },
    React: { Fragment: 'fragment', useMemo: fn => fn(), useCallback: fn => fn }, useSyncExternalStore: (_subscribe, get) => get(),
    useState: () => [error, value => { error = value }], SelectField: 'select', Failure: 'failure', h: (type, props, ...children) => ({ type, props: props ?? {}, children }) }
  const component = vm.runInNewContext(source.slice(source.indexOf('  function InterfaceSettingsBody('), source.indexOf('  function NotificationSettingsBody(')) + '\nInterfaceSettingsBody', scope)
@@ -1696,7 +1711,7 @@ test('settings group small preferences by task, preserve deep links, and keep de
 test('Agent naming is grouped under conversation communication and missing support is explained', () => {
  const shared = { messaging_enabled: false, memory_enabled: true, auto_resume_interrupted: true }
  let data
- const scope = {
+ const scope = { ...SETTINGS_UI,
   h: (type, props, ...children) => ({ type, props: props ?? {}, children }),
   React: { Fragment: 'fragment' }, Button: 'button', useState: value => [value, () => {}],
   useIntegrationSettings: () => ({ data, update() {}, busy: false, error: '' }),
@@ -1711,7 +1726,8 @@ test('Agent naming is grouped under conversation communication and missing suppo
  assert.equal(findNode(communication, node => node.type?.name === 'SessionNamingSettings').props.prompt, 'Example')
  assert.doesNotMatch(visibleText(communication), /共享记忆/)
  const unsupported = findNode(render(shared), node => node.props?.['aria-label'] === '会话通信')
- assert.match(visibleText(unsupported), /Agent 会话命名.*更新服务后即可设置/s)
+ assert.match(visibleText(unsupported), /自定义会话命名规则.*更新服务后即可设置/s)
+ assert.doesNotMatch(visibleText(available), /允许 Agent 发现|允许 Agent 搜索|全额返还能量/, 'switch labels speak for themselves')
  assert.ok(findNode(unsupported, node => node.type === 'ServiceRecoveryLink'))
  data = { settings: { ...shared, session_naming_prompt: 'Example' } }
  const general = scope.SessionBehaviorSettings({ host: 'local' })
@@ -1730,7 +1746,7 @@ test('session naming shows the effective rule, edits it in place, saves and rest
       return [state[index], next => { state[index] = typeof next === 'function' ? next(state[index]) : next }]
     },
     useRef: () => ({ current: null }), useEffect: () => {}, requestAnimationFrame: fn => fn(),
-    Button: 'button',
+    Button: 'button', ...SETTINGS_UI,
   }
   vm.runInNewContext(source.slice(source.indexOf('  function SessionNamingSettings('), source.indexOf('  function SessionBehaviorSettings(')), scope)
   const update = async input => {
@@ -1744,7 +1760,8 @@ test('session naming shows the effective rule, edits it in place, saves and rest
   // View state: the default rule is visible and marked as the default; nothing is editable yet.
   let view = render()
   assert.equal(findNode(view, node => node.type === 'pre').children[0], defaultPrompt)
-  assert.match(visibleText(view), /默认/); assert.match(visibleText(view), /最多 4 个词/)
+  assert.match(visibleText(view), /自定义会话命名规则/); assert.doesNotMatch(visibleText(view), /Agent 会话命名/)
+  assert.match(visibleText(view), /默认/); assert.match(visibleText(view), /用于 Agent 创建的会话 · 最多 4 词/)
   assert.equal(findNode(view, node => node.type === 'textarea'), undefined)
   // Edit state starts from the effective rule; unchanged text cannot be saved.
   button(view, '编辑规则').props.onClick()
@@ -1938,29 +1955,60 @@ test('Kode review, subagent and communication rows stay one line and show three 
   assert.match(source, /rowProps: child => \(\{ label: childTitle\(child\), hint: childStatusLabel\(child\), detail: child\.model,/)
 })
 
-test('communication rows show only a title and tell waiting from answered by the projected flag or reply-to, never by delivery receipts', () => {
-  const scope = vm.createContext({ IconClockOutlineRegular: 'clock', IconCheckOutlineRegular: 'check', IconPaperPlaneOutlineRegular: 'plane', IconMailUnreadOutlineRegular: 'mail-unread', IconMailReadOutlineRegular: 'mail-read' })
+test('communication rows keep direction glyphs and add one outcome badge: a real reply is never confused with a delivery receipt', () => {
+  const h = (type, props, ...children) => ({ type, props: props ?? {}, children })
+  const scope = vm.createContext({ h, IconPaperPlaneOutlineRegular: 'plane', IconMailReadOutlineRegular: 'mail-read' })
   vm.runInContext(source.slice(source.indexOf('  const relayKinds = {'), source.indexOf('  function CommunicationRows(')) + ';globalThis.relayKinds = relayKinds', scope)
-  const ask = { nodeId: 'n', sessionId: 'peer', id: 'ask', direction: 'sent', reply: false, status: 'accepted', content: '请评审 PR' }
-  const delivered = { nodeId: 'n', sessionId: 'peer', id: 'ask-2', direction: 'sent', reply: false, status: 'received', content: '另一个请求' }
-  const answer = { nodeId: 'n', sessionId: 'peer', id: 'ans', direction: 'received', reply: true, replyTo: 'ask', content: '评审完成' }
-  const reply = { nodeId: 'n', sessionId: 'peer', id: 'back', direction: 'sent', reply: true, replyTo: 'theirs', content: '已处理' }
-  const request = { nodeId: 'n', sessionId: 'peer', id: 'theirs', direction: 'received', reply: false, content: '# 帮我看看\n细节' }
-  const rows = [ask, delivered, answer, reply, request]
-  assert.deepEqual(rows.map(row => scope.relayKind(row, rows)), ['answered', 'waiting', 'reply', 'replied', 'incoming'])
-  assert.deepEqual(rows.map(row => scope.relayKinds[scope.relayKind(row, rows)].icon), ['plane', 'plane', 'mail-read', 'plane', 'mail-unread'], 'sent, received requests and received replies each keep their own native glyph')
-  assert.deepEqual(rows.map(row => scope.relayKinds[scope.relayKind(row, rows)].badge), ['check','clock',undefined,undefined,undefined])
-  assert.deepEqual(Object.values(scope.relayKinds).map(kind => kind.label), ['等待对方回复', '已收到回复', '已发送', '已回复对方', '收到对方回复', '收到消息'])
-  assert.doesNotMatch(source, /data-inbound|scaleX\(-1\)/, 'no glyph is mirrored to fake a direction')
+  const base = { nodeId: 'n', sessionId: 'peer', reply: false }
+  const ask = { ...base, id: 'ask', direction: 'sent', status: 'accepted', content: '请评审 PR' }
+  const answer = { ...base, id: 'ans', direction: 'received', reply: true, replyTo: 'ask', content: '评审完成' }
+  const request = { ...base, id: 'theirs', direction: 'received', content: '# 帮我看看' }
+  const back = { ...base, id: 'back', direction: 'sent', reply: true, replyTo: 'theirs', status: 'accepted', content: '已处理' }
+  const lone = { ...base, id: 'lone', direction: 'received', content: '新的设备分配' }
+  const sent = (id, status, extra) => ({ ...base, id, direction: 'sent', status, content: id, ...extra })
+  const rows = [ask, answer, request, back, lone,
+    sent('q', 'queued'), sent('r', 'received'), sent('d', 'delivering'), sent('u', 'uncertain'), sent('x', 'rejected'), sent('e', 'expired'), sent('old'), sent('odd', 'weird'),
+    sent('replyFail', 'expired', { reply: true, replyTo: 'lone-x' }), sent('replyPending', 'queued', { reply: true, replyTo: 'lone-y' })]
+  const view = row => { const kind = scope.relayKind(row, rows), { badge, label } = scope.relayBadge(row, kind); return [row.id, kind, badge ?? null, label ?? null] }
+  assert.deepEqual(rows.map(view), [
+    ['ask', 'answered', 'reply', null],
+    ['ans', 'reply', null, null],
+    ['theirs', 'responded', 'reply', null],
+    ['back', 'replied', null, null],
+    ['lone', 'incoming', null, null],
+    ['q', 'waiting', 'ring', '已入队'], ['r', 'waiting', 'ring', '已到达目标节点'], ['d', 'waiting', 'ring', '正在投递'],
+    ['u', 'waiting', 'unknown', '投递结果待确认，对方可能已收到'],
+    ['x', 'waiting', 'fail', '未送达：已拒绝'], ['e', 'waiting', 'fail', '未送达：已过期'],
+    ['old', 'waiting', null, null], ['odd', 'waiting', null, null],
+    ['replyFail', 'replied', 'fail', '未送达：已过期'], ['replyPending', 'replied', 'ring', '已入队'],
+  ])
+  // Delivery receipts never become ↩, however far they get.
+  for (const status of ['queued', 'received', 'delivering', 'accepted', 'uncertain']) assert.notEqual(scope.relayBadge(sent('s', status), scope.relayKind(sent('s', status), [])).badge, 'reply', status)
+  // Reply beats any receipt; a later receipt (deliveryStatus) beats the send-time status.
+  assert.equal(scope.relayBadge({ ...ask, status: 'expired', answered: true }, 'answered').badge, 'reply')
+  assert.equal(scope.relayBadge(sent('later', 'queued', { deliveryStatus: 'rejected' }), 'waiting').badge, 'fail')
+  assert.equal(scope.relayBadge(sent('later', 'uncertain', { deliveryStatus: 'accepted' }), 'waiting').badge, undefined)
+  // A received request is answered only by our reply to the same peer.
+  assert.equal(scope.relayKind(request, [request, { ...back, sessionId: 'stranger' }]), 'incoming')
+  assert.equal(scope.relayKind(request, [request, { ...back, nodeId: 'other' }]), 'incoming')
+  assert.equal(scope.relayKind(request, [request, { ...back, reply: false }]), 'incoming', 'a fresh message is not a reply')
   assert.equal(scope.relayKind(ask, [ask]), 'waiting', 'an accepted receipt is not a reply')
   assert.equal(scope.relayKind(ask, [ask, { ...answer, sessionId: 'stranger' }]), 'waiting', 'only the asked peer can answer')
+  assert.equal(scope.relayKind({ ...ask, answered: true }, [ask]), 'answered', 'the projected answered flag wins even when the reply is not in view')
+  assert.equal(scope.relayKind({ ...ask, answered: false }, rows), 'answered', 'without the flag the real reply-to still counts')
+  // Glyphs stay direction only; the badge is the only extra mark, decorative to assistive tech.
+  assert.deepEqual(new Set(Object.values(scope.relayKinds).map(kind => kind.icon)), new Set(['plane', 'mail-read']))
+  assert.doesNotMatch(source, /data-inbound|scaleX\(-1\)/, 'no glyph is mirrored to fake a direction')
+  const icon = scope.relayIcon('waiting', 'fail')
+  assert.equal(icon.props['aria-hidden'], true)
+  assert.equal(JSON.stringify(icon.children[1].props), '{"className":"kode-relay-badge","data-badge":"fail"}')
+  assert.equal(scope.relayIcon('waiting').children.length, 1, 'no badge, no empty node')
+  assert.doesNotMatch(source, /kode-relay-badge\[data-badge=(?:ok|accepted|clock)/, 'accepted and waiting draw nothing; no clocks')
+  assert.match(source, /\.kode-relay-badge\{position:absolute;bottom:-2px;right:-3px;width:10px;height:10px;[^}]*box-shadow:0 0 0 1\.5px var\(--kode-badge-seam,var\(--dsw-alias-bg-layer-1\)\)\}/)
+  assert.match(source, /\.kode-relay\{--kode-badge-seam:var\(--dsw-alias-bg-module-platform\)/, 'chat cards cut the seam from their own background')
   assert.equal(scope.relayTitle({ title: ' 代码评审 ', content: 'body' }), '代码评审')
   assert.equal(scope.relayTitle(request), '会话消息', 'untitled history never leaks its content')
-  assert.equal(scope.relayTitle(reply), '会话回复')
-  assert.equal(scope.relayTitle({ replyTo: 'm', content: '正文' }), '会话回复')
-  const reordered = { ...ask, answered: true }
-  assert.equal(scope.relayKind(reordered, [reordered]), 'answered', 'the projected answered flag wins even when the reply is not in view')
-  assert.equal(scope.relayKind({ ...ask, answered: false }, rows), 'answered', 'without the flag the real reply-to still counts')
+  assert.equal(scope.relayTitle(back), '会话回复')
 })
 
 test('panel bodies render compact Markdown without remote images, while paths and code stay literal', () => {
@@ -2008,7 +2056,7 @@ test('chat relay cards start collapsed to route and title, and reveal the body o
   const h = (type, props, ...children) => ({ type, props: props ?? {}, children })
   const scope = vm.createContext({ h, useState: initial => [state ?? initial, next => { state = next }], useMemo: make => make(), MarkdownText: 'MarkdownText', markdownLabels: {}, IconPaperPlaneOutlineRegular: 'plane', IconMailReadOutlineRegular: 'mail-read', IconMailUnreadOutlineRegular: 'mail-unread', IconClockOutlineRegular: 'clock', IconCheckOutlineRegular: 'check', IconChevronDownOutlineRegular: 'chevron', IconWarningOutlineRegular: 'warning', RelayEchoVisibility: 'echo' })
   const slice = (from, to) => source.slice(source.indexOf(from), source.indexOf(to))
-  vm.runInContext(slice('  function relayTitle(', '  function CommunicationRows') + slice("  // The projection's answered flag wins", '  function HistoricalRelay('), scope)
+  vm.runInContext(slice('  const deliveryStatusLabels =', '  function useSlotEntry(') + slice('  function relayTitle(', '  function CommunicationRows') + slice("  // The projection's answered flag wins", '  function HistoricalRelay('), scope)
   const text = node => node == null || node === false ? '' : typeof node === 'string' ? node : Array.isArray(node) ? node.map(text).join('') : node.type === 'MarkdownText' ? node.props.text : text(node.children)
   const find = (node, test) => !node || typeof node !== 'object' ? undefined : Array.isArray(node) ? node.map(child => find(child, test)).find(Boolean) : test(node) ? node : find(node.children, test)
   const draw = relay => scope.RelayCard({ relay, time: Date.UTC(2026, 0, 1, 2, 42), nameOf: (node, id) => id === 'self' ? '当前会话' : '评审助手', sessionId: 'self' })
@@ -2019,8 +2067,14 @@ test('chat relay cards start collapsed to route and title, and reveal the body o
   const toggle = find(card, node => node.type === 'button')
   assert.equal(toggle.props['aria-expanded'], false)
   assert.equal(find(card, node => node.props?.className === 'kode-relay-icon').children[0].type, 'mail-read', 'a received reply arrives as opened mail')
-  assert.equal(find(render({ ...relay, replyTo: undefined }), node => node.props?.className === 'kode-relay-icon').children[0].type, 'mail-unread', 'a received request arrives as unread mail')
-  assert.equal(text(card), '评审助手→当前会话代码评审结论')
+  assert.equal(find(render({ ...relay, replyTo: undefined }), node => node.props?.className === 'kode-relay-icon').children[0].type, 'mail-read', 'a received request arrives as the same opened mail')
+  assert.equal(find(render(relay), node => node.props?.className === 'kode-relay-icon').children.length, 1, 'a received reply carries no badge')
+  const answered = expand(scope.RelayCard({ relay: { address: 'n/peer', id: 'm9', content: 'x' }, nameOf: () => 'p', sessionId: 'self', useProjection: () => [{ direction: 'sent', reply: true, replyTo: 'm9', nodeId: 'n', sessionId: 'peer' }] }))
+  assert.equal(find(answered, node => node.props?.className === 'kode-relay-badge').props['data-badge'], 'reply', 'a request we answered shows ↩')
+  const stranger = expand(scope.RelayCard({ relay: { address: 'n/peer', id: 'm9', content: 'x' }, nameOf: () => 'p', sessionId: 'self', useProjection: () => [{ direction: 'sent', reply: true, replyTo: 'm9', nodeId: 'n', sessionId: 'other' }] }))
+  assert.equal(find(stranger, node => node.props?.className === 'kode-relay-badge'), undefined, 'a reply to another peer does not count')
+  assert.equal(text(card), '评审助手→当前会话，收到对方回复代码评审结论', 'the state is spoken, not drawn as text')
+  assert.equal(find(card, node => node.props?.className === 'kode-sr-only').children[0], '，收到对方回复')
   assert.equal(find(card, node => node.type === 'strong' && node.props.title === '当前会话（当前会话）') != null, true)
   assert.equal(find(card, node => node.type === 'time'), undefined)
   toggle.props.onClick()
@@ -2050,7 +2104,11 @@ test('sessions_send cards collapse to the two session names and title, with stat
   assert.doesNotMatch(closed, /通信未成功/)
   assert.match(text(card(true)), /发送会话消息 · 发送时：.*机密正文.*投递状态不代表目标任务已完成/)
   const expand = node => !node || typeof node !== 'object' ? node : Array.isArray(node) ? node.map(expand) : typeof node.type === 'function' ? expand(node.type(node.props)) : { ...node, children: expand(node.children) }
-  assert.match(JSON.stringify(expand(card(false, true))), /"role":"img","aria-label":"通信未成功"/)
+  const failed = JSON.stringify(expand(card(false, true)))
+  assert.match(failed, /"className":"kode-relay-badge","data-badge":"fail"/, 'a failed send is told by the red corner badge')
+  assert.match(failed, /"className":"kode-sr-only"},"children":\["，已发送，未送达：通信未成功"\]/, 'and named for screen readers')
+  assert.doesNotMatch(failed, /kode-relay-failed|"warning"|IconWarning/, 'no second ⚠ beside the red badge')
+  assert.doesNotMatch(closed, /kode-relay-badge/, 'an accepted send draws no badge')
 })
 
 test('shared memory approval page registers in sidebar panellist, trailing badge, and main slot', () => {
@@ -2517,4 +2575,105 @@ test('completed review links start folded even when there are no open reviews', 
   assert.match(render(['merged']),/显示另外 1 项/)
   assert.doesNotMatch(render(['closed','merged']),/MR #/)
   assert.match(render(['open','closed','merged']),/MR #1.*显示另外 2 项/)
+})
+
+test('account settings follow the C layout: titled groups, rows with tags and right-aligned actions, without changing account actions', async () => {
+  const posts = [], selected = []
+  let states = {}, n = 0
+  const scope = {
+    h: (type, props, ...children) => ({ type, props: typeof type === 'function' ? { ...props, children: children.length <= 1 ? children[0] : children } : props ?? {}, children }), Button: 'Button', Tooltip: 'Tooltip', ...SETTINGS_UI,
+    IconUserOutlineRegular: 'user', IconRefreshOutlineRegular: 'refresh', IconSettingsOutlineRegular: 'settings', IconCheckCircleOutlineRegular: 'check-circle',
+    IconUsersOutlineRegular: 'users', IconLoadingOutlineRegular: 'loading', IconCheckOutlineRegular: 'check', IconWarningOutlineRegular: 'warning',
+    useState: value => { const i = n++; return [i in states ? states[i] : typeof value === 'function' ? value() : value, () => {}] },
+    useEffect() {}, useSyncExternalStore: (_s, get) => get(), kodeEmbedded: () => false, localStorage: { getItem: () => '', setItem() {} },
+    fetch: async (_url, init) => { posts.push(JSON.parse(init?.body ?? '{}')); return { ok: true } }, parseHostJson: async () => ({}), setImmediate, setInterval: () => 0, clearInterval() {}, setTimeout: () => 0, clearTimeout() {},
+    document: { hidden: false }, window: {}, URL, sharedTarget: null, showShared() {}, closeKodePanel() {}, Failure: 'Failure',
+  }
+  const start = source.indexOf('  const KODE_RELAY_STORAGE_KEY'), end = source.indexOf('  // Compact multi-device switcher bar')
+  vm.runInNewContext(source.slice(start, end), scope)
+  const render = (stateByIndex = {}) => { states = stateByIndex; n = 0; return expand(scope.AccountSettingsBody()) }
+  const all = (node, pred, out = []) => { if (Array.isArray(node)) node.forEach(c => all(c, pred, out)); else if (node && typeof node === 'object') { if (pred(node)) out.push(node); for (const c of node.children ?? []) all(c, pred, out) } return out }
+  const rows = tree => all(tree, x => x.props?.className === 'kode-integration-row kode-account-row')
+  const rowText = row => visibleText(row).replace(/\s+/g, ' ').trim()
+  const buttons = node => all(node, x => x.type === 'Button').map(b => visibleText(b).trim())
+
+  // Signed out: one titled group with a 未登录 tag, relay / method rows and the email row; no devices group.
+  scope.publishKodeAccount({ status: null, loaded: true, error: '' })
+  let tree = render({ 0: 'https://relay.kode.dev' })
+  let titles = all(tree, x => x.type === 'SettingsTitle')
+  assert.deepEqual(titles.map(t => visibleText(t).replace(/\s+/g, ' ').trim()), ['Kode 账号 未登录', 'DeepSeek Harness 账号'])
+  assert.deepEqual(titles.map(t => t.props.icon), ['user', 'settings'])
+  assert.deepEqual(rows(tree).map(r => rowText(r).split(' ')[0]), ['账号中继', '登录方式', '邮箱', 'DSH'])
+  const seg = all(tree, x => x.props?.className === 'kode-account-seg')[0]
+  assert.equal(seg.props.role, 'tablist'); assert.deepEqual(seg.children.map(b => [visibleText(b).trim(), b.props['aria-selected']]), [['邮箱验证码', true], ['PalmX 扫码', false], ['手机掌纹接力', false]])
+  assert.deepEqual(buttons(rows(tree)[2]), ['发送验证码'])
+  // Code sent with an error: the error renders inside the code row, with 登录 as the primary action.
+  tree = render({ 0: 'https://relay.kode.dev', 3: 'a@b.c', 4: '123', 5: true, 11: '验证码错误' })
+  const codeRow = rows(tree).find(r => rowText(r).startsWith('验证码'))
+  assert.match(rowText(codeRow), /验证码错误/); assert.equal(all(codeRow, x => x.type === 'Button').at(-1).props.variant, 'primary')
+  assert.equal(all(tree, x => x.props?.className === 'kode-account-error is-standalone').length, 0, 'the error is not repeated below the card')
+  // QR login replaces the action row; scanned overlays a check.
+  tree = render({ 0: 'https://relay.kode.dev', 2: 'palmx', 6: { kind: 'palmx', qr_data_url: 'data:x', state: 'scanned' } })
+  const qr = all(tree, x => x.props?.className === 'kode-account-qr')[0]
+  assert.equal(qr.props['data-state'], 'scanned'); assert.match(visibleText(qr), /已扫码，请在手机上确认登录/); assert.ok(all(qr, x => x.type === 'check-circle').length)
+  assert.deepEqual(buttons(qr), ['取消'])
+
+  // Signed in: profile row with sync tag, inactive sync row, login method tags, devices with tags and 查看 / 切回此设备.
+  scope.publishKodeAccount({ status: { account_name: 'paradix', account_email: 'p@x.dev', state: 'syncing', backends: [{ id: 'b', kind: 'account_relay', active: false, server_url: 'https://relay.kode.dev/x' }] }, loaded: true, error: '' })
+  scope.publishDevices({ devices: [{ device_id: 'a', name: 'MacBook Pro' }, { device_id: 'b', name: 'Mac Studio', online: true }, { device_id: 'c', name: 'M4 编译机' }], selfDeviceId: 'a', activeDeviceId: 'b', loaded: true, loading: false, error: '' })
+  tree = render({ 7: ['email', 'palmx'] })
+  titles = all(tree, x => x.type === 'SettingsTitle')
+  assert.deepEqual(titles.map(t => visibleText(t).trim()), ['Kode 账号', '设备', 'DeepSeek Harness 账号'])
+  const [profile, inactive, methods, ...rest] = rows(tree)
+  assert.match(rowText(profile), /^P paradix 未启用同步 p@x\.dev · relay\.kode\.dev/)
+  assert.deepEqual(buttons(profile), ['修改名称', '退出登录'])
+  assert.equal(all(profile, x => x.type === 'Button')[1].props.className, 'kode-account-danger')
+  assert.match(rowText(inactive), /账号同步 未启用/); assert.deepEqual(buttons(inactive), ['启用同步'])
+  assert.deepEqual(all(methods, x => x.type === 'SettingsTag').map(t => visibleText(t).trim()), ['邮箱验证码', 'PalmX']); assert.deepEqual(buttons(methods), ['解绑 PalmX'])
+  const devices = rest.filter(r => r.props['data-device'])
+  assert.deepEqual(devices.map(rowText), ['MacBook Pro 此设备 此电脑的本地工作台 切回此设备', 'Mac Studio 正在查看 在线 · 可查看会话并对话', 'M4 编译机 离线 · 上线后可切换查看 查看'])
+  assert.equal(all(devices[2], x => x.type === 'Button')[0].props.disabled, true, 'offline devices cannot be viewed')
+  assert.deepEqual(devices.map(d => all(d, x => x.type === 'i')[0].props['data-online']), ['', '', undefined])
+  all(devices[0], x => x.type === 'Button')[0].props.onClick()
+  assert.match(rowText(rows(render({ 7: [] })).find(r => r.props['data-device'] === 'a')), /正在查看/, '切回此设备 still selects the local device')
+  const refresh = all(tree, x => x.props?.className === 'kode-account-refresh')[0]
+  assert.equal(refresh.props['aria-label'], '刷新设备'); assert.equal(refresh.props.variant, 'ghost')
+  // Editing the name swaps the title for an inline field and hides the row actions.
+  tree = render({ 7: [], 8: 'paradix 的工作台', 9: true })
+  const editing = rows(tree)[0]
+  assert.deepEqual(buttons(editing), ['保存', '取消']); assert.ok(all(editing, x => x.type === 'form' && x.props.className === 'kode-account-inline-field').length)
+  assert.deepEqual(buttons(rows(tree)[2]), ['绑定 PalmX'])
+  // Loading and single-device states.
+  scope.publishDevices({ devices: [], selfDeviceId: 'a', activeDeviceId: null, loaded: false, loading: true, error: '' })
+  assert.match(visibleText(all(render(), x => x.props?.className === 'kode-account-loading')[0]), /正在读取账号下的设备…/)
+  scope.publishDevices({ devices: [{ device_id: 'a', name: 'MacBook Pro' }], selfDeviceId: 'a', activeDeviceId: null, loaded: true, loading: false, error: '读取失败' })
+  tree = render()
+  assert.match(visibleText(tree), /只有此电脑登录了该账号/); assert.match(visibleText(all(tree, x => x.props?.className === 'kode-account-error is-standalone')[0]), /读取失败/)
+  // Every action keeps its original endpoint and payload.
+  const click = async (tree, label, within = tree) => { const b = all(within, x => x.type === 'Button' && visibleText(x).trim() === label)[0]; assert.ok(b, label); await b.props.onClick?.({ preventDefault() {} }); await new Promise(r => setImmediate(r)) }
+  posts.length = 0
+  scope.publishKodeAccount({ status: null, loaded: true, error: '' })
+  await click(render({ 0: 'https://relay.kode.dev', 3: 'a@b.c' }), '发送验证码')
+  await click(render({ 0: 'https://relay.kode.dev', 2: 'palmx' }), '生成二维码')
+  await click(render({ 0: 'https://relay.kode.dev', 2: 'palm' }), '生成二维码')
+  scope.publishKodeAccount({ status: { account_name: 'paradix', backends: [{ id: 'b', kind: 'account_relay', active: false, server_url: 'https://r' }] }, loaded: true, error: '' })
+  scope.publishDevices({ devices: [], selfDeviceId: 'a', activeDeviceId: null, loaded: true, loading: false, error: '' })
+  await click(render({ 7: ['palmx'] }), '解绑 PalmX')
+  await click(render({ 7: [] }), '绑定 PalmX')
+  const signedInB = { status: { account_name: 'paradix', backends: [{ id: 'b', kind: 'account_relay', active: false, server_url: 'https://r' }] }, loaded: true, error: '' }
+  await click(render({ 7: [] }), '启用同步')
+  scope.publishKodeAccount(signedInB)
+  await click(render({ 7: [] }), '退出登录')
+  scope.publishKodeAccount(signedInB)
+  assert.deepEqual(posts.filter(p => p.action && p.action !== 'devices').map(p => [p.action, p.purpose ?? p.backend_id ?? p.server_url ?? '']), [
+    ['code', 'https://relay.kode.dev'], ['palmx_start', 'sign_in'], ['palm_start', 'https://relay.kode.dev'], ['palmx_unbind', ''], ['palmx_start', 'bind'], ['activate', 'b'], ['sign_out', 'b']])
+  let dshOut = 0
+  scope.updateDshSecondaryBridge({ signedIn: true, label: 'pd', openSettings() {}, signIn: null, signOut: () => { dshOut++ } })
+  await click(render({ 7: [] }), '退出', all(render({ 7: [] }), x => x.props?.['data-account-group'] === 'dsh')[0])
+  assert.equal(dshOut, 1)
+  // Old tab / device-list / QR markup (the sidebar launcher keeps kode-pill) and CSS are gone; new rules exist.
+  for (const old of ['kode-method-tab', 'kode-device-row', 'kode-qr-box', 'kode-account-profile-head']) assert.doesNotMatch(source, new RegExp(`\\.${old}[{.]`), old)
+  assert.match(source, /\.kode-account-seg>button\[aria-selected=true\]\{/)
+  assert.match(source, /\.kode-account-device-icon>i\[data-online\]\{background:#1a7f37\}/)
+  assert.match(source, /@container\(max-width:520px\)\{\.kode-account-row\{flex-wrap:wrap/)
 })
