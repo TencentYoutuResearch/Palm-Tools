@@ -1,14 +1,17 @@
 const ESC = 0x1b
 const CSI = 0x5b
 const ENABLE_PRIVATE_MODE = 0x68
-const MOUSE_TRACKING_MODES = new Set(['9', '1000', '1002', '1003', '1005', '1006', '1015'])
+// Legacy or non-SGR formats are stripped so xterm stays on SGR reporting for
+// Windows TCodex. Button/motion modes 1000/1002/1003 and SGR 1006 pass through;
+// the input filter then drops click/motion reports but preserves wheel.
+const MOUSE_TRACKING_MODES = new Set(['9', '1005', '1015'])
 
 const decoder = new TextDecoder()
 const encoder = new TextEncoder()
 
 /**
- * Prevent a Windows TCodex session from enabling xterm mouse reporting.
- * The carry buffer keeps split DECSET sequences intact across PTY chunks.
+ * Keep Windows TCodex mouse reporting on the SGR protocol. The carry buffer
+ * keeps split DECSET sequences intact across PTY chunks.
  */
 export class TerminalMouseTrackingGate {
   private carry: number[] = []

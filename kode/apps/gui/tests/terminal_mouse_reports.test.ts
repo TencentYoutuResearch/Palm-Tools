@@ -9,6 +9,11 @@ test('strips SGR mouse press, release, and motion reports', () => {
   assert.equal(stripTerminalMouseReports('\x1b[<35;12;34M'), '')
 })
 
+test('preserves SGR wheel reports for TCodex transcript scrolling', () => {
+  assert.equal(stripTerminalMouseReports('\x1b[<64;12;34M'), '\x1b[<64;12;34M')
+  assert.equal(stripTerminalMouseReports('\x1b[<65;12;34M'), '\x1b[<65;12;34M')
+})
+
 test('strips urxvt and X10 mouse reports', () => {
   assert.equal(stripTerminalMouseReports('\x1b[35;12;34M'), '')
   assert.equal(stripTerminalMouseReports('\x1b[M !!'), '')
