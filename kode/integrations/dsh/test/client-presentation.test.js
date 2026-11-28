@@ -68,6 +68,18 @@ test('Standalone Desktop registers the Kode Harness sidebar wordmark', () => {
   assert.equal(visibleText(brand()).trim(), 'Harness')
 })
 
+test('the sidebar places the device switcher before the native New Session action', () => {
+  const layer = client().entryById('kode-device-switcher')
+  const action = { type: 'button', props: { onClick() {} } }
+  for (const wide of [true, false]) {
+    const row = layer({ children: action, wide })
+    assert.equal(row.props['data-collapsed'], !wide)
+    assert.equal(row.children[0].type.name, 'DeviceSwitcherBar')
+    assert.equal(row.children[0].props.wide, wide)
+    assert.equal(row.children[1], action)
+  }
+})
+
 test('Sidebar Harness reuses only the native inverted badge from BrandWordmark at native 14px height', () => {
   const el = (type, props = {}) => ({ type, props })
   // Mirrors dsh-client-ui-primitives BrandWordmark: deepseek letters, the whale, then the badge plate and glyphs.
@@ -2073,7 +2085,10 @@ test('shared memory approval page registers in sidebar panellist, trailing badge
   assert.equal(tree.children[0].props.className, 'kode-settings-brand')
   const layout = tree.children[1]
   assert.equal(layout.props.className, 'kode-settings-layout')
-  const [nav, section] = layout.children
+  const [toolbar, section] = layout.children
+  assert.equal(toolbar.props.className, 'kode-memory-toolbar')
+  const [nav, actions] = toolbar.children
+  assert.equal(actions.props.className, 'kode-memory-header-actions')
   assert.equal(nav.type, 'nav')
   assert.equal(nav.props.className, 'kode-settings-nav')
   assert.equal(nav.children.length, 2)
@@ -2092,7 +2107,8 @@ test('shared memory approval page registers in sidebar panellist, trailing badge
   const factsPage = factsClient.entry('main', 'kode-memory')().children[0]
   stateIndex = 0
   const factsTree = factsPage.type(factsPage.props)
-  const [factsNav, factsSection] = factsTree.children[1].children
+  const [factsToolbar, factsSection] = factsTree.children[1].children
+  const [factsNav] = factsToolbar.children
   assert.equal(factsNav.children[0].props['aria-current'], undefined)
   assert.equal(factsNav.children[1].props['aria-current'], 'page')
   assert.equal(factsSection.props.id, 'kode-memory-facts')

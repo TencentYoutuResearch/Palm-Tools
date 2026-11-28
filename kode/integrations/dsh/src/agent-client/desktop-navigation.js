@@ -1,7 +1,9 @@
   // Embedded in Kode desktop (kode.extension/v1 view): Kode hides its own
   // chrome, so the way back to its terminals ("Kode 终端") lives in dsh's UI.
   const kodeEmbedded = () => !!globalThis.document?.documentElement?.hasAttribute?.('data-kode-embed') && typeof globalThis.window?.kodeHost?.request === 'function'
-  const glyph = (d, size = 15) => h('svg', { width: size, height: size, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.4, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d }))
+  const sidebarIconSize = 18
+  const navigationStrokeWidth = 1.0
+  const glyph = (d, size = 15) => h('svg', { width: size, height: size, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: navigationStrokeWidth * 16 / size, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d }))
   const TERMINAL_GLYPH = 'M2.5 3.5h11v9h-11zM5 6.5l2 1.5-2 1.5M8.5 10h2.5'
   // The supplied KODE. wordmark, split into transparent layers: white strokes follow the
   // theme ink through a mask, red strokes keep the brand colour. Shared by sidebar and hero.

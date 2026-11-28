@@ -45,24 +45,39 @@ test('agent update status names the failure once and explains slow Cursor update
   assert.match(source, /\.kode-agent-update-status\[data-phase=failed\]\{[^}]*color:var\(--dsw-alias-/)
 })
 
-test('the partner sidebar collapses, remembers its state and keeps unseen activity visible', () => {
+test('the partner sidebar mounts from the wide trailing slot and remembers its disclosure state', () => {
   const storage = new Map()
+  const box = { remove() { mounted = null } }
+  const entry = { ownerDocument: { createElement: () => box }, after: element => { mounted = element } }
+  const anchor = { closest: selector => selector === '[class*="panelEntry"]' ? entry : null }
+  let mounted, host
   const scope = { h, ...icons, IconChevronDownOutlineRegular: 'chevron',
+    BotsNest: 'roster', createPortal: (child, target) => ({ child, target, children: [] }),
     useSyncExternalStore: (_, read) => read(), useBots: () => ({ data: { bots: [{id:'b1'}] } }),
     useWatches: () => ({ data: { unseen: { b1: 2 } } }),
     localStorage: { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value) } }
   const effects = []
-  scope.useRef = initial => ({ current: initial }); scope.useEffect = fn => effects.push(fn)
+  scope.useRef = () => ({ current: anchor })
+  scope.useState = () => [host, value => { host = value }]
+  scope.useEffect = fn => effects.push(fn)
   vm.runInNewContext(between('  const BOTS_COLLAPSED_KEY', '  function botBannerStyle('), scope)
-  const render = () => scope.BotsNavTrailing()
+  const openSession = () => {}
+  const render = () => scope.BotsNavTrailing({ wide: true, openSession })
   const control = () => render().children.find(node => node?.props?.role === 'button')
   assert.equal(control().props['aria-expanded'], true)
+  const cleanup = effects.at(-1)()
+  assert.equal(mounted, box)
+  assert.equal(box.className, 'kode-bots-nest')
+  const roster = () => render().children.find(node => node?.target === box)?.child
+  assert.equal(roster().props.openSession, openSession)
+  assert.equal(roster().props.collapsed, false)
   let stopped = 0, prevented = 0
   const event = { stopPropagation() { stopped++ }, preventDefault() { prevented++ } }
   control().props.onClick(event)
   assert.equal(storage.get('kode.dsh.botsCollapsed'), '1')
   assert.deepEqual([stopped, prevented], [1, 1])
   assert.equal(control().props['aria-expanded'], false)
+  assert.equal(roster().props.collapsed, true)
   assert.match(text(render()), /2/)
   control().props.onKeyDown({ ...event, key: 'Enter' })
   assert.equal(storage.get('kode.dsh.botsCollapsed'), '0')
@@ -71,21 +86,14 @@ test('the partner sidebar collapses, remembers its state and keeps unseen activi
   assert.deepEqual([stopped, prevented], [3, 3])
   assert.match(source, /\[class\*="panelEntry"\]:has\(\.kode-bots-collapse\) \[class\*="panelRow"\]\{padding-right:38px\}/)
   assert.match(source, /:is\(:hover,:has\(:focus-visible\)\) \[class\*="panelTrailing"\]:has\(\.kode-bots-trailing\)\{opacity:1\}/)
+  assert.doesNotMatch(source, /\.kode-bots-collapse\{opacity:0\}/)
   assert.match(source, /\.kode-bots-collapse:focus-visible\{outline:/)
-  // At rest the arrow hides on hover-capable pointers; touch keeps it visible and the title text toggles.
-  assert.match(source, /@media\(hover:hover\)\{[^@]*\[class\*="panelEntry"\]:has\(\.kode-bots-collapse\):not\(:hover\):not\(:has\(:focus-visible\)\) \.kode-bots-collapse\{opacity:0\}/)
-  const listeners = {}, classes = new Set()
-  const title = { addEventListener: (type, fn) => { listeners[type] = fn }, removeEventListener: type => { delete listeners[type] }, classList: { add: name => classes.add(name), remove: name => classes.delete(name) } }
-  render().props.ref.current = { closest: () => ({ querySelector: selector => selector === '[class*="panelTitle"]' ? title : null }) }
-  const cleanup = effects.at(-1)()
-  assert.ok(classes.has('kode-bots-title'))
-  const before = storage.get('kode.dsh.botsCollapsed')
-  listeners.click(event)
-  assert.notEqual(storage.get('kode.dsh.botsCollapsed'), before)
-  assert.deepEqual([stopped, prevented], [4, 4])
-  cleanup(); assert.equal(listeners.click, undefined); assert.ok(!classes.has('kode-bots-title'))
+  cleanup()
+  assert.equal(mounted, null)
 
   const rail = scope.BotsNavTrailing({ wide: false })
+  assert.equal(effects.at(-1)(), undefined)
+  assert.equal(mounted, null)
   assert.equal(rail?.props?.className, 'kode-bot-badge')
   assert.equal(text(rail), '2')
   storage.set('kode.dsh.botsCollapsed', '0')
@@ -96,6 +104,28 @@ test('the partner sidebar collapses, remembers its state and keeps unseen activi
   assert.match(source, /\[class\*="root"\]\[class\*="collapsed"\]:has\(\[data-sidebar-toggle\]\) \[class\*="panelEntry"\] \[class\*="panelRow"\]\{padding:0\}/)
   assert.match(source, /\[class\*="root"\]\[class\*="collapsed"\]:has\(\[data-sidebar-toggle\]\) \[class\*="scrollArea"\]\{[^}]*overflow-y:auto/)
 
+})
+
+test('the open partner sidebar shows loading, retry, or the first creation action', () => {
+  const starts = []
+  let retries = 0
+  const scope = {
+    h, useState: value => [value, () => {}], useRef: () => ({ current: null }), useEffect() {},
+    useAvatarLibrary: () => ({}), IconPlusOutlineRegular: 'plus',
+    refreshBots: () => { retries++ }, openBotStart: id => starts.push(id),
+  }
+  vm.runInNewContext(between('  function BotsNest(', '  function BotModelPicker('), scope)
+  const render = props => scope.BotsNest(props)
+  assert.equal(render({ collapsed: true }), null)
+  assert.equal(render({}).children[0].props.role, 'status')
+  const retry = render({ error: 'offline' }).children[0]
+  assert.equal(retry.props.title, 'offline')
+  retry.props.onClick({ stopPropagation() {} })
+  assert.equal(retries, 1)
+  const create = render({ data: { bots: [] } }).children[0]
+  assert.equal(text(create), '创建第一个伙伴')
+  create.props.onClick()
+  assert.deepEqual(starts, [null])
 })
 
 test('collapsed communication rows name the peer and direction but never the body', () => {

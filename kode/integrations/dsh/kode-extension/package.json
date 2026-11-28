@@ -5,7 +5,7 @@
   "description": "Kode extension: dsh conversation UI for Kode sessions",
   "type": "module",
   "engines": {
-    "node": ">=24.9.0"
+    "node": ">=18.0.0"
   },
   "kodeNewUi": {
     "dsh": "0.2.3-alpha.2",

@@ -104,6 +104,8 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
     }
     wrapSlot(ctx, 'main.conversation', entry => typeof entry.component === 'function', native => props => h(ConversationNavigation, { ...props, native }))
     wrapSlot(ctx, 'settings.launcher', entry => typeof entry.component === 'function', native => props => h(KodeAccountLauncher, { ...props, native }))
+    ctx.slots.inject('sidebar.session.action', () => ctx.slots.register(
+      { name: 'sidebar.session.action', id: 'kode-device-switcher' }, SidebarSessionActions))
     wrapSlot(ctx, 'shell.overlay', entry => entry.options.id === 'workspace.session-rename', native => props => h(RoutedRenameDialog, { ...props, native }))
     wrapSlot(ctx, 'conversation.session.header.actions', entry => entry.options.id === 'subagent-catalog', native => props => h(FilteredSubagentCatalog, { ...props, native }))
     wrapSlot(ctx, 'conversation.session.header.lineage', entry => typeof entry.component === 'function', native => props => h(FilteredSubagentCatalog, { ...props, native }))
@@ -187,7 +189,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       const KodeMainPage = () => h('div', { className: 'kode-settings-main' }, h(KodeSettings, { sessions: scope.sessions, slots: scope.slots, close: () => {} }))
       scope.slots.inject('main', () => scope.slots.register({ name: 'main', key: 'kode-settings' }, KodeMainPage))
       // Native panels can be pinned or moved to More using the sidebar's controls.
-      scope.slots.inject('sidebar.panellist', () => scope.slots.register({ name: 'sidebar.panellist', id: 'kode-settings', order: 6, label: 'Kode 设置' }, IconAgentPresetOutlineRegular))
+      scope.slots.inject('sidebar.panellist', () => scope.slots.register({ name: 'sidebar.panellist', id: 'kode-settings', order: 6, label: 'Kode 设置' }, () => h(IconAgentPresetOutlineRegular, { size: sidebarIconSize + 2 })))
       if (kodeEmbedded()) {
         const KodeMoreItems = ({ onDismiss }) => h(React.Fragment, null,
           h(MenuItemButton, { icon: glyph(TERMINAL_GLYPH), onSelect: () => { onDismiss?.(); scope.layout.selectPanel('kode-leave') } }, 'Kode 终端'),
@@ -205,9 +207,9 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
       openBotChat = openBotSession
       scope.slots.inject('sidebar.panellist.trailing', () => scope.slots.register({ name: 'sidebar.panellist.trailing', id: 'schedules' }, () => h('span', { className: 'kode-schedules-marker', hidden: true })))
       scope.slots.inject('sidebar.panellist.trailing', () => scope.slots.register({ name: 'sidebar.panellist.trailing', id: 'plugins' }, () => h('span', { className: 'kode-plugins-marker', hidden: true })))
-      scope.slots.inject('sidebar.panellist.trailing', () => scope.slots.register({ name: 'sidebar.panellist.trailing', id: 'kode-bots' }, BotsNavTrailing))
+      scope.slots.inject('sidebar.panellist.trailing', () => scope.slots.register({ name: 'sidebar.panellist.trailing', id: 'kode-bots' }, props => h(BotsNavTrailing, { ...props, openSession: openBotSession })))
       scope.slots.inject('sidebar.panellist.trailing', () => scope.slots.register({ name: 'sidebar.panellist.trailing', id: 'kode-memory' }, MemoryPendingBadge))
-      scope.slots.inject('sidebar.panellist', () => scope.slots.register({ name: 'sidebar.panellist', id: 'kode-bots', order: 5, label: '伙伴' }, props => h(BotsNavGlyph, { ...props, openSession: openBotSession })))
+      scope.slots.inject('sidebar.panellist', () => scope.slots.register({ name: 'sidebar.panellist', id: 'kode-bots', order: 5, label: '伙伴' }, BotsNavGlyph))
       scope.slots.inject('sidebar.panellist', () => scope.slots.register({ name: 'sidebar.panellist', id: 'kode-memory', order: 5.5, label: '共享记忆' }, MemoryNavIcon))
       if (kodeEmbedded()) {
         scope.slots.inject('main', () => scope.slots.register({ name: 'main', key: 'kode-leave' }, () => h(KodeLeavePage, { layout: scope.layout })))
@@ -221,7 +223,7 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
             const label = panel.badge > 0 ? `${panel.title} (${panel.badge > 99 ? '99+' : panel.badge})` : panel.title
             return [
               scope.slots.register({ name: 'main', key }, () => h(KodePanelPage, { panel })),
-              scope.slots.register({ name: 'sidebar.panellist', id: key, order: 20 + index, label }, ({ size } = {}) => panel.extension === 'kode.team' && panel.id === 'team' ? teamIcon(size) : glyph(PANEL_GLYPH, size)),
+              scope.slots.register({ name: 'sidebar.panellist', id: key, order: 20 + index, label }, ({ size = sidebarIconSize } = {}) => panel.extension === 'kode.team' && panel.id === 'team' ? teamIcon(size) : glyph(PANEL_GLYPH, size)),
             ]
           })
         }
@@ -237,11 +239,8 @@ window.__ModuleLoader__.load({ id: '@kode/dsh', factory(require) {
               idempotency_key: `bot-greet-${message.botId}-${Date.now()}`,
             }).then(res => {
               if (res?.sessionId) void openBotSession(res.sessionId)
-              else { requestedBotStart = message.botId; scope.layout.selectPanel('kode-bots') }
-            }).catch(() => {
-              requestedBotStart = message.botId
-              scope.layout.selectPanel('kode-bots')
-            })
+              else openBotStart(message.botId)
+            }).catch(() => openBotStart(message.botId))
           }
         }
         window.addEventListener('kode-host', onHost)

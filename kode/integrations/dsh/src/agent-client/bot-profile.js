@@ -49,31 +49,18 @@
   // Lucide Heart, Users and Plug, rendered at the sidebar's native icon size.
   const companionIcon = size => navIcon(size, h('path', { d: 'M2 9.5a5.5 5.5 0 0 1 9.591-3.676.56.56 0 0 0 .818 0A5.49 5.49 0 0 1 22 9.5c0 2.29-1.5 4-3 5.5l-5.492 5.313a2 2 0 0 1-3 .019L5 15c-1.5-1.5-3-3.2-3-5.5' }))
   const teamIcon = size => navIcon(size, h('path', { d: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2 M16 3.128a4 4 0 0 1 0 7.744 M22 21v-2a4 4 0 0 0-3-3.87' }), h('circle', { cx: 9, cy: 7, r: 4 }))
-  function navIcon(size = 16, ...children) {
-    return h('svg', { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, ...children)
+  const navigationStrokeOn24Grid = navigationStrokeWidth * 24 / sidebarIconSize
+  function navIcon(size = sidebarIconSize, ...children) {
+    return h('svg', { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: navigationStrokeWidth * 24 / size, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, ...children)
   }
-  const pluginMask = encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22v-5 M15 8V2 M17 8a1 1 0 0 1 1 1v4a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1z M9 8V2"/></svg>')
+  const pluginMask = encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="1 1 22 22" fill="none" stroke="black" stroke-width="${navigationStrokeWidth * 22 / sidebarIconSize}" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22v-5 M15 8V2 M17 8a1 1 0 0 1 1 1v4a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1z M9 8V2"/></svg>`)
   // Lucide Timer (ISC), https://lucide.dev/icons/timer
-  const automationMask = encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="10" x2="14" y1="2" y2="2"/><line x1="12" x2="15" y1="14" y2="11"/><circle cx="12" cy="14" r="8"/></svg>')
-  // Mount the roster below the whole navigation entry, including its pin control.
-  function BotsNavGlyph({ size, openSession }) {
-    const seat = useRef(null), [host, setHost] = useState(null)
-    const wide = size === 16
-    useEffect(() => {
-      if (!wide) return
-      let item = seat.current?.closest('button')
-      const nav = item?.closest('nav')
-      if (!nav) return
-      while (item.parentElement !== nav) item = item.parentElement
-      const box = document.createElement('div')
-      box.className = 'kode-bots-nest'
-      item.after(box)
-      setHost(box)
-      return () => { box.remove(); setHost(null) }
-    }, [wide])
-    return h(React.Fragment, null,
-      h('span', { ref: seat, className: 'kode-bots-glyph' }, companionIcon(size)),
-      host && createPortal(h(BotsNest, { openSession }), host))
+  const automationMask = encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="${navigationStrokeOn24Grid}" stroke-linecap="round" stroke-linejoin="round"><line x1="10" x2="14" y1="2" y2="2"/><line x1="12" x2="15.5" y1="13" y2="9.5"/><circle cx="12" cy="13" r="9"/></svg>`)
+  function BotsNavGlyph({ size } = {}) { return companionIcon(size) }
+  function openBotStart(id) {
+    requestedBotStart = id
+    openBotsPage?.()
+    window.dispatchEvent(new CustomEvent('kode-bot-start'))
   }
   // Sidebar nameplate & card banner presets.
   const BOT_BANNER_PRESETS = [
@@ -104,23 +91,24 @@
     const runs = (watches.runs ?? []).filter(run => run.status === 'needs_user').map(run => ({ key: run.id, kind: 'run', bot: run.bot, time: run.started, run }))
     return [...tasks, ...runs].sort((a, b) => b.time - a.time)
   }
-  function BotsNavTrailing(props) {
-    const wide = props?.wide ?? true
+  function BotsNavTrailing({ wide = true, openSession } = {}) {
     const collapsed = useBotsCollapsed()
-    const { data } = useBots()
+    const { data, error } = useBots()
     const watches = useWatches().data
     const totalUnseen = Object.values(watches?.unseen ?? {}).reduce((sum, n) => sum + (Number(n) || 0), 0) + inboxItems(watches).length
     const count = data?.bots?.length ?? 0
-    const anchor = useRef(null)
-    // The host row owns its own click; only the "伙伴" title text toggles the nested list.
+    const anchor = useRef(null), [host, setHost] = useState(null)
+    // The trailing slot declares whether the sidebar is wide. Mount the roster
+    // next to the entry so its interactive rows sit outside the navigation button.
     useEffect(() => {
       if (!wide) return
-      const title = anchor.current?.closest('[class*="panelRow"]')?.querySelector('[class*="panelTitle"]')
-      if (!title) return
-      const toggle = event => { event.stopPropagation(); event.preventDefault(); setBotsCollapsed(!botsCollapsed) }
-      title.addEventListener('click', toggle)
-      title.classList.add('kode-bots-title')
-      return () => { title.removeEventListener('click', toggle); title.classList.remove('kode-bots-title') }
+      const entry = anchor.current?.closest('[class*="panelEntry"]')
+      if (!entry) return
+      const box = entry.ownerDocument.createElement('div')
+      box.className = 'kode-bots-nest'
+      entry.after(box)
+      setHost(box)
+      return () => { box.remove(); setHost(null) }
     }, [wide])
     if (!wide) {
       return totalUnseen > 0
@@ -138,7 +126,8 @@
         title: collapsed ? `展开伙伴（${count}）` : '折叠伙伴',
         onClick: event => { event.stopPropagation(); event.preventDefault(); setBotsCollapsed(!collapsed) },
         onKeyDown: event => { if (event.key === 'Enter' || event.key === ' ') { event.stopPropagation(); event.preventDefault(); setBotsCollapsed(!collapsed) } },
-      }, h(IconChevronDownOutlineRegular, { size: 12 })))
+      }, h(IconChevronDownOutlineRegular, { size: 12 })),
+      host && createPortal(h(BotsNest, { collapsed, data, error, watches, openSession }), host))
   }
   function botBannerStyle(library, bot) {
     const raw = (bot?.banner ?? '').trim()
@@ -215,9 +204,8 @@
       !library.avatars.length && h('span', { className: 'kode-config-note' }, library.loaded ? '还没有自定义头像。可以在 Kode 设置 → 个性化 里创建头像、动画和背景，回来就能选。' : '正在读取头像…'),
       h(Failure, { text: library.error }))
   }
-  function BotsNest({ openSession }) {
-    const collapsed = useBotsCollapsed()
-    const { data } = useBots(), watches = useWatches().data, [expanded, setExpanded] = useState({})
+  function BotsNest({ collapsed, data, error, watches, openSession }) {
+    const [expanded, setExpanded] = useState({})
     const library = useAvatarLibrary(Boolean(data?.bots?.some(bot => bot.avatar)))
     const [hovered, setHovered] = useState(null)
     const [hoverBusy, setHoverBusy] = useState(false)
@@ -228,8 +216,12 @@
     }
     useEffect(() => () => clearHoverTimers(), [])
     useEffect(() => { if (collapsed) { clearHoverTimers(); setHovered(null) } }, [collapsed])
-    if (!data || collapsed) return null
-    const start = bot => { requestedBotStart = bot?.id ?? null; openBotsPage?.() }
+    if (collapsed) return null
+    if (!data) return h('div', { className: 'kode-bots-list' },
+      error
+        ? h('button', { type: 'button', className: 'kode-bot-row', title: error, onClick: event => { event.stopPropagation(); void refreshBots() } }, '伙伴读取失败，点击重试')
+        : h('span', { className: 'kode-bot-list-status', role: 'status' }, '正在读取伙伴…'))
+    const start = bot => openBotStart(bot?.id ?? null)
     const measurePopover = element => {
       const rect = element?.getBoundingClientRect?.()
       if (!rect) return null
@@ -290,7 +282,7 @@
         const bannerStyle = banner?.kind === 'image'
           ? { '--kode-bot-banner-img': `url(${JSON.stringify(banner.url)})` }
           : banner?.kind === 'gradient' ? { '--kode-bot-banner-bg': banner.css } : undefined
-        const isBusy = watches?.runs.some(run => run.bot === bot.id && ['starting', 'running', 'needs_user'].includes(run.status))
+        const isBusy = watches?.runs?.some(run => run.bot === bot.id && ['starting', 'running', 'needs_user'].includes(run.status))
         return [h('div', { key: bot.id, className: 'kode-bot-line' }, h('button', {
           type: 'button',
           className: `kode-bot-row kode-bot-item${banner ? ` has-banner is-${banner.kind}` : ''}`,

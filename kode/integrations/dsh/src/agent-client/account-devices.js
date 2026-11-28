@@ -632,6 +632,11 @@
     )
   }
 
+  function SidebarSessionActions({ children, wide = true }) {
+    return h('div', { className: 'kode-sidebar-session-actions', 'data-collapsed': !wide },
+      h(DeviceSwitcherBar, { wide }), children)
+  }
+
   // Compact multi-device switcher bar rendered at the top of the DSH sidebar.
   function DeviceSwitcherBar({ wide = true }) {
     const { status } = useKodeAccount()
@@ -680,6 +685,7 @@
           type: 'button',
           className: 'kode-device-switcher-btn',
           title: activeRemote ? `正在查看远端设备：${activeRemote.name}` : '切换 Kode 账号下的其他设备',
+          'aria-label': `切换设备，当前：${label}`,
           'aria-haspopup': 'menu',
           'aria-expanded': open,
           onClick: () => setOpen(v => !v),

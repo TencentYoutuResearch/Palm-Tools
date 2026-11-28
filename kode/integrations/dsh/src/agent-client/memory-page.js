@@ -62,7 +62,7 @@
     h('path', { d: 'M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z' }),
     h('path', { d: 'M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4' }),
   )
-  function MemoryNavIcon({ size = 16 } = {}) { return memoryIcon(size) }
+  function MemoryNavIcon({ size = sidebarIconSize } = {}) { return memoryIcon(size) }
   function MemoryPendingBadge() {
     const { data } = useMemorySummary()
     const count = data?.stats?.pending ?? data?.pending?.length ?? 0
@@ -151,7 +151,7 @@
         const res = await memoryCall('', { action: 'review', id: item.id, verdict }, host)
         setEditingId(null); setReasonTarget(null)
         setSelectedIds(prev => { const next = new Set(prev); next.delete(item.id); return next })
-        const energyText = typeof res.author_energy === 'number' ? `，${res.author ?? item.author} 能量 → ${res.author_energy.toFixed(1)} / ${(res.max_energy ?? maxEnergy).toFixed(0)}` : ''
+        const energyText = typeof res.author_energy === 'number' ? `，能量余额 ${res.author_energy.toFixed(1)} / ${(res.max_energy ?? maxEnergy).toFixed(0)}` : ''
         setNotice(`${label}${energyText}`)
         await reloadPending(host)
         if (tab === 'facts') await loadFacts(factsQuery, factsScope, host)
@@ -222,21 +222,19 @@
           h('h2', null, '共享记忆'),
           h('p', null, '审批 Agent 提交的记忆提议、查看能量配额，并检索已入库的团队与项目记忆。'))),
       h('div', { className: 'kode-settings-layout' },
-        h('nav', { className: 'kode-settings-nav', 'aria-label': '共享记忆视图' },
-          h('button', { type: 'button', id: 'kode-memory-tab-pending', 'aria-current': tab === 'pending' ? 'page' : undefined, 'aria-controls': 'kode-memory-pending', onClick: () => setTab('pending') },
-            '待审批', (stats.pending ?? pending.length) > 0 && h('span', { className: 'kode-bot-badge' }, String(stats.pending ?? pending.length))),
-          h('button', { type: 'button', id: 'kode-memory-tab-facts', 'aria-current': tab === 'facts' ? 'page' : undefined, 'aria-controls': 'kode-memory-facts', onClick: () => setTab('facts') },
-            `已入库 (${stats.facts ?? 0})`)),
-        h('section', { id: `kode-memory-${tab}`, className: 'kode-settings-section', tabIndex: -1, 'aria-label': tab === 'pending' ? '待审批记忆' : '已入库记忆' },
+        h('div', { className: 'kode-memory-toolbar' },
+          h('nav', { className: 'kode-settings-nav', 'aria-label': '共享记忆视图' },
+            h('button', { type: 'button', id: 'kode-memory-tab-pending', 'aria-current': tab === 'pending' ? 'page' : undefined, 'aria-controls': 'kode-memory-pending', onClick: () => setTab('pending') },
+              `待审批 (${stats.pending ?? pending.length})`),
+            h('button', { type: 'button', id: 'kode-memory-tab-facts', 'aria-current': tab === 'facts' ? 'page' : undefined, 'aria-controls': 'kode-memory-facts', onClick: () => setTab('facts') },
+              `已入库 (${stats.facts ?? 0})`)),
           h('div', { className: 'kode-memory-header-actions' },
             hostOptions.length > 1 && h('div', { className: 'kode-memory-host-picker' },
               h(SelectField, { label: '主机', showLabel: false, value: host, options: hostOptions, onChange: setHost })),
-            h(Button, { type: 'button', variant: 'outline', disabled: busy, onClick: () => { void reloadPending(host); if (tab === 'facts') void loadFacts(factsQuery, factsScope, host) } }, '刷新')),
-
+            h(Button, { type: 'button', variant: 'outline', disabled: busy, onClick: () => { void reloadPending(host); if (tab === 'facts') void loadFacts(factsQuery, factsScope, host) } }, '刷新'))),
+        h('section', { id: `kode-memory-${tab}`, className: 'kode-settings-section', tabIndex: -1, 'aria-label': tab === 'pending' ? '待审批记忆' : '已入库记忆' },
           h('div', { className: 'kode-memory-stats' },
-            h('span', { className: 'kode-memory-stat' }, h('strong', null, String(stats.pending ?? pending.length)), ' 待审批'),
-            h('span', { className: 'kode-memory-stat' }, h('strong', null, String(stats.facts ?? 0)), ' 已入库'),
-            h('span', { className: 'kode-memory-stat' }, '能量上限 ', h('strong', null, String(maxEnergy)), '（批准全额返还 · 6h 满回血）')),
+            h('span', { className: 'kode-memory-stat' }, '能量上限 ', h('strong', null, String(maxEnergy)), ' · 批准后全额返还，6 小时恢复至上限')),
 
           energyAuthors.length > 0 && h('div', { className: 'kode-memory-energy-strip', 'aria-label': '作者能量状态' },
             ...energyAuthors.map(row => {
